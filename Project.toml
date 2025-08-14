@@ -1,0 +1,21 @@
+name = "Iceberg"
+uuid = "390bdf5b-b624-43dc-a846-0ef7a3405804"
+authors = ["Vukasin Stefanovic <vukasin.stefanovic92@gmail.com>"]
+version = "0.2.0"
+
+[deps]
+Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+iceberg_rust_ffi_jll = "6bd5c94f-693c-53e3-983d-a09fad412f22"
+
+[compat]
+Arrow = "2.0"
+julia = "1.9"
+
+[extras]
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "DataFrames"]
