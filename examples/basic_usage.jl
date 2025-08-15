@@ -1,12 +1,12 @@
 #!/usr/bin/env julia
 
-# Basic usage example for Iceberg.jl
-println("=== Iceberg.jl Basic Usage Example ===")
+# Basic usage example for RustyIceberg.jl
+println("=== RustyIceberg.jl Basic Usage Example ===")
 
 # Load the package
-println("Loading Iceberg package...")
-include("../src/Iceberg.jl")
-using .Iceberg
+println("Loading RustyIceberg package...")
+include("../src/RustyIceberg.jl")
+using .RustyIceberg
 using DataFrames
 
 println("✅ Package loaded successfully!")

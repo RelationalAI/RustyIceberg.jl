@@ -1,7 +1,7 @@
-name = "Iceberg"
+name = "RustyIceberg"
 uuid = "390bdf5b-b624-43dc-a846-0ef7a3405804"
 authors = ["Vukasin Stefanovic <vukasin.stefanovic92@gmail.com>"]
-version = "0.2.0"
+version = "0.1.0"
 
 [deps]
 Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"

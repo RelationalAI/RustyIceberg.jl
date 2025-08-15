@@ -1,4 +1,4 @@
-# Iceberg.jl
+# RustyIceberg.jl
 
 A Julia package that provides bindings to the Iceberg C API, allowing you to read Apache Iceberg tables directly from Julia.
 
@@ -21,7 +21,6 @@ This package wraps the `iceberg_c_api.h` interface with Julia bindings, providin
 1. Clone this repository:
 ```bash
 git clone <repository-url>
-cd Iceberg.jl/Iceberg
 ```
 
 2. Install the package in Julia:
@@ -48,7 +47,7 @@ Before using this package, you need to:
 ### High-level API (Recommended)
 
 ```julia
-using Iceberg
+using RustyIceberg
 using DataFrames  # Optional: for converting Arrow.Table to DataFrame
 
 # Read an entire Iceberg table - returns an iterator over Arrow.Table objects
@@ -85,7 +84,7 @@ combined_df = reduce(vcat, all_dataframes)
 ### Low-level API
 
 ```julia
-using Iceberg
+using RustyIceberg
 
 # Load the library
 load_iceberg_library()
@@ -186,7 +185,7 @@ Run the test suite:
 
 ```julia
 using Pkg
-Pkg.test("Iceberg")
+Pkg.test("RustyIceberg")
 ```
 
 The tests replicate the functionality of the C integration test (`integration_test.c`) but using Julia bindings. Note that some tests may fail if S3 credentials are not configured or if the test data is not available.
@@ -238,7 +237,7 @@ The package automatically manages memory for C resources:
 
 Enable debug output by setting the environment variable:
 ```bash
-export JULIA_DEBUG=Iceberg
+export JULIA_DEBUG=RustyIceberg
 ```
 
 ## Contributing

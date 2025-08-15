@@ -1,8 +1,8 @@
 using Test
-using Iceberg
+using RustyIceberg
 using DataFrames
 
-@testset "Iceberg.jl" begin
+@testset "RustyIceberg.jl" begin
     @testset "Library Loading" begin
         # Test library loading
         @test load_iceberg_library()

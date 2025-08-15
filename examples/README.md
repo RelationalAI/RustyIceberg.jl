@@ -1,6 +1,6 @@
-# Iceberg.jl Basic Usage Example
+# RustyIceberg.jl Basic Usage Example
 
-This example demonstrates how to use Iceberg.jl to read Iceberg tables from S3.
+This example demonstrates how to use RustyIceberg.jl to read Iceberg tables from S3.
 
 ## Prerequisites
 
@@ -51,8 +51,8 @@ julia basic_usage.jl
 
 The example should output something like:
 ```
-=== Iceberg.jl Basic Usage Example ===
-Loading Iceberg package...
+=== RustyIceberg.jl Basic Usage Example ===
+Loading RustyIceberg package...
 ✅ Package loaded successfully!
 Loading environment variables from /path/to/.env...
    Set AWS_ACCESS_KEY_ID

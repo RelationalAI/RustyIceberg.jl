@@ -1,4 +1,4 @@
-module Iceberg
+module RustyIceberg
 
 using Libdl
 using Arrow
