@@ -259,6 +259,8 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
         # Create scan
         result, scan = iceberg_table_scan(table)
         if result != ICEBERG_OK
+            # TODO: Is everything exception free? what if we get an exception in Julia
+            # between FFI calls to Rust, or between iterations? How do we deallocate objects then?
             iceberg_table_free(table)
             error("Failed to create scan: $(iceberg_error_message())")
         end
