@@ -60,7 +60,7 @@ const RUST_LIB = if haskey(ENV, "ICEBERG_RUST_LIB")
         """
     lib_path
 else
-    object_store_ffi_jll.libobject_store_ffi
+    iceberg_rust_ffi_jll.libiceberg_rust_ffi
 end
 
 """
