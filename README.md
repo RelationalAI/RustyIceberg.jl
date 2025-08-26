@@ -34,6 +34,17 @@ Pkg.add(path=".")
 Pkg.instantiate()
 ```
 
+## Development
+
+When working on RustyIceberg.jl, you can either use
+[iceberg_rust_ffi_jll.jl](https://github.com/RelationalAI/iceberg_rust_ffi_jll.jl) or use
+a local build of [iceberg_rust_ffi](https://github.com/RelationalAI/iceberg_rust_ffi).
+When using a local build, set the environment variable `ICEBERG_RUST_LIB` to the directory
+containing the build. For example, if you have the `iceberg_rust_ffi` repository at
+`~/repos/iceberg_rust_ffi` and build the library by running `cargo build --release` from
+the base of that repository, then you could use that local build by setting
+ICEBERG_RUST_LIB="~/repos/iceberg_rust_ffi/target/release".
+
 ## Prerequisites
 
 Before using this package, you need to:
@@ -60,7 +71,7 @@ table_iterator = read_iceberg_table(
 for arrow_table in table_iterator
     # Convert to DataFrame if needed
     df = DataFrame(arrow_table)
-    
+
     # Process your data...
     println("Batch size: ", size(df))
     println("Columns: ", names(df))
@@ -98,37 +109,37 @@ result, table = iceberg_table_open(
 if result == ICEBERG_OK
     # Create a scan
     result, scan = iceberg_table_scan(table)
-    
+
     if result == ICEBERG_OK
         # Read batches
         while true
             result, batch_ptr = iceberg_scan_next_batch(scan)
-            
+
             if result == ICEBERG_END_OF_STREAM
                 break
             elseif result == ICEBERG_OK
                 # Process the batch
                 batch = unsafe_load(batch_ptr)
-                
+
                 # Convert to Arrow.Table
                 io = IOBuffer(unsafe_wrap(Array, batch.data, batch.length))
                 arrow_table = Arrow.Table(io)
-                
+
                 # Convert to DataFrame if needed
                 df = DataFrame(arrow_table)
-                
+
                 # Do something with the data...
                 println("Batch: ", size(df))
-                
+
                 # Free the batch
                 iceberg_arrow_batch_free(batch_ptr)
             end
         end
-        
+
         # Cleanup
         iceberg_scan_free(scan)
     end
-    
+
     iceberg_table_free(table)
 end
 
@@ -256,4 +267,4 @@ This project is licensed under the same license as the parent Iceberg project.
 
 - **Libdl**: For dynamic library loading
 - **Arrow**: For Arrow format support
-- **Test**: For testing (development dependency) 
+- **Test**: For testing (development dependency)
