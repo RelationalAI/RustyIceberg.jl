@@ -1,5 +1,6 @@
 module RustyIceberg
 
+using Base.Libc.Libdl: dlext
 using Libdl
 using Arrow
 using iceberg_rust_ffi_jll
@@ -47,18 +48,33 @@ const iceberg_scan_next_batch_func_t = Ptr{Cvoid}
 const iceberg_arrow_batch_free_func_t = Ptr{Cvoid}
 const iceberg_error_message_func_t = Ptr{Cvoid}
 
+const RUST_LIB = if haskey(ENV, "ICEBERG_RUST_LIB")
+    # For development, e.g. run `cargo build --release` and point to `target/release/` dir.
+    # Note this is set a precompilation time, as `ccall` needs this to be a `const`,
+    # so you need to restart Julia / recompile the package if you change it.
+    lib_path = realpath(joinpath(ENV["ICEBERG_RUST_LIB"], "libiceberg_rust_ffi.$(dlext)"))
+    @warn """
+        Using unreleased object_store_ffi library:
+            $(repr(contractuser(lib_path)))
+        This is only intended for local development and should not be used in production.
+        """
+    lib_path
+else
+    object_store_ffi_jll.libobject_store_ffi
+end
+
 """
     load_iceberg_library(lib_path::String=iceberg_rust_ffi_jll.libiceberg_rust_ffi)
 
 Load the Iceberg C API library and resolve all function symbols.
 """
-function load_iceberg_library(lib_path::String=iceberg_rust_ffi_jll.libiceberg_rust_ffi)
-    println("Loading Iceberg C API library from: $lib_path")
+function load_iceberg_library(lib_path::String=RUST_LIB)
+    println("Loading Iceberg C API library from: $(lib_path)")
 
     # Try to open the dynamic library
     lib_handle[] = dlopen(lib_path, RTLD_LAZY)
     if lib_handle[] == C_NULL
-        error("Failed to load library: $lib_path")
+        error("Failed to load library: $(lib_path)")
     end
 
     println("✅ Library loaded successfully")
