@@ -41,7 +41,7 @@ When working on RustyIceberg.jl, you can either use
 a local build of [iceberg_rust_ffi](https://github.com/RelationalAI/iceberg_rust_ffi).
 When using a local build, set the environment variable `ICEBERG_RUST_LIB` to the directory
 containing the build. For example, if you have the `iceberg_rust_ffi` repository at
-`~/repos/iceberg_rust_ffi` and build the library by running `cargo build --releas`e from
+`~/repos/iceberg_rust_ffi` and build the library by running `cargo build --release` from
 the base of that repository, then you could use that local build by setting
 ICEBERG_RUST_LIB="~/repos/iceberg_rust_ffi/target/release".
 
