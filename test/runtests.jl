@@ -1,6 +1,8 @@
 using Test
 using RustyIceberg
+using RustyIceberg: ICEBERG_OK
 using DataFrames
+using Arrow
 
 @testset "RustyIceberg.jl" begin
     @testset "Library Loading" begin
