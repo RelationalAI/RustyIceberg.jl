@@ -12,6 +12,9 @@ jobs:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
     env:
       JULIA_NUM_THREADS: 2
+      # TODO iceberg_rust_ffi requires this and panics otherwise, we should fix that (test
+      # bucket is publicly accessible).
+      AWS_ACCESS_KEY_ID: "<AWS_ACCESS_KEY_ID>"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
