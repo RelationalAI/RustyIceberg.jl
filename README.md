@@ -1,5 +1,7 @@
 # RustyIceberg.jl
 
+[![CI](https://github.com/RelationalAI/RustyIceberg.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/RelationalAI/RustyIceberg.jl/actions/workflows/CI.yml)
+
 A Julia package that provides bindings to the Iceberg C API, allowing you to read Apache Iceberg tables directly from Julia.
 
 ## Overview
