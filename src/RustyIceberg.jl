@@ -1,24 +1,161 @@
 module RustyIceberg
 
 using Base.Libc.Libdl: dlext
+using Base: @kwdef, @lock
 using Libdl
 using Arrow
 using iceberg_rust_ffi_jll
 
-export IcebergTable, IcebergScan, ArrowBatch, IcebergResult
+export IcebergTable, IcebergScan, ArrowBatch, IcebergConfig
 export IcebergTableIterator, IcebergTableIteratorState
-export iceberg_table_open, iceberg_table_free, iceberg_table_scan
-export iceberg_scan_select_columns, iceberg_scan_free, iceberg_scan_next_batch
-export iceberg_arrow_batch_free, iceberg_error_message
-export load_iceberg_library, unload_iceberg_library, read_iceberg_table
+export init_iceberg_runtime, read_iceberg_table
+export IcebergException
 
-# Constants
-const ICEBERG_OK = 0
-const ICEBERG_ERROR = -1
-const ICEBERG_NULL_POINTER = -2
-const ICEBERG_IO_ERROR = -3
-const ICEBERG_INVALID_TABLE = -4
-const ICEBERG_END_OF_STREAM = -5
+const Option{T} = Union{T, Nothing}
+
+const rust_lib = if haskey(ENV, "ICEBERG_RUST_LIB")
+    # For development, e.g. run `cargo build --release` and point to `target/release/` dir.
+    # Note this is set a precompilation time, as `ccall` needs this to be a `const`,
+    # so you need to restart Julia / recompile the package if you change it.
+    lib_path = realpath(joinpath(ENV["ICEBERG_RUST_LIB"], "libiceberg_rust_ffi.$(dlext)"))
+    @warn """
+        Using unreleased iceberg_rust_ffi library:
+            $(repr(replace(lib_path, homedir() => "~")))
+        This is only intended for local development and should not be used in production.
+        """
+    lib_path
+else
+    iceberg_rust_ffi_jll.libiceberg_rust_ffi
+end
+
+"""
+Runtime configuration for the Iceberg library.
+"""
+struct IcebergConfig
+    n_threads::Culonglong
+end
+
+function default_panic_hook()
+    println("Rust thread panicked, exiting the process")
+    exit(1)
+end
+
+const _ICEBERG_STARTED = Ref(false)
+const _INIT_LOCK::ReentrantLock = ReentrantLock()
+_PANIC_HOOK::Function = default_panic_hook
+
+struct InitException <: Exception
+    msg::String
+    return_code::Cint
+end
+
+Base.@ccallable function panic_hook_wrapper()::Cint
+    global _PANIC_HOOK
+    _PANIC_HOOK()
+    return 0
+end
+
+# This is the callback that Rust calls to notify a Julia task of a completed operation.
+Base.@ccallable function notify_result(event_ptr::Ptr{Nothing})::Cint
+    event = unsafe_pointer_to_objref(event_ptr)::Base.Event
+    notify(event)
+    return 0
+end
+
+# A dict of all tasks that are waiting some result from Rust
+const tasks_in_flight = IdDict{Task, Int64}()
+const preserve_task_lock = Threads.SpinLock()
+function preserve_task(x::Task)
+    @lock preserve_task_lock begin
+        v = get(tasks_in_flight, x, 0)::Int
+        tasks_in_flight[x] = v + 1
+    end
+    nothing
+end
+function unpreserve_task(x::Task)
+    @lock preserve_task_lock begin
+        v = get(tasks_in_flight, x, 0)::Int
+        if v == 0
+            error("unbalanced call to unpreserve_task for $(typeof(x))")
+        elseif v == 1
+            pop!(tasks_in_flight, x)
+        else
+            tasks_in_flight[x] = v - 1
+        end
+    end
+    nothing
+end
+
+"""
+    init_iceberg_runtime()
+    init_iceberg_runtime(config::IcebergConfig)
+    init_iceberg_runtime(config::IcebergConfig; on_rust_panic::Function)
+
+Initialize the Iceberg runtime.
+
+This starts a `tokio` runtime for handling Iceberg requests.
+It must be called before sending a request.
+"""
+function init_iceberg_runtime(
+    config::IcebergConfig=IcebergConfig(0);
+    on_rust_panic::Function=default_panic_hook
+)
+    global _PANIC_HOOK
+    @lock _INIT_LOCK begin
+        if _ICEBERG_STARTED[]
+            return nothing
+        end
+        _PANIC_HOOK = on_rust_panic
+        panic_fn_ptr = @cfunction(panic_hook_wrapper, Cint, ())
+        fn_ptr = @cfunction(notify_result, Cint, (Ptr{Nothing},))
+        res = @ccall rust_lib.iceberg_init_runtime(config::IcebergConfig, panic_fn_ptr::Ptr{Nothing}, fn_ptr::Ptr{Nothing})::Cint
+        if res != 0
+            throw(InitException("Failed to initialize Iceberg runtime.", res))
+        end
+        _ICEBERG_STARTED[] = true
+    end
+    return nothing
+end
+
+function response_error_to_string(response, operation)
+    err = string("failed to process ", operation, " with error: ", unsafe_string(response.error_message))
+    @ccall rust_lib.iceberg_destroy_cstring(response.error_message::Ptr{Cchar})::Cint
+    return err
+end
+
+macro throw_on_error(response, operation, exception)
+    throw_on_error(response, operation, exception)
+end
+
+function throw_on_error(response, operation, exception)
+    return :( $(esc(:($response.result != 0))) ? throw($exception($response_error_to_string($(esc(response)), $operation))) : $(nothing) )
+end
+
+function ensure_wait(event::Base.Event)
+    for _ in 1:20
+        try
+            return wait(event)
+        catch e
+            @error "cannot skip this wait point to prevent UB, ignoring exception: $(e)"
+        end
+    end
+
+    @error "ignored too many wait exceptions, giving up"
+    exit(1)
+end
+
+function wait_or_cancel(event::Base.Event, response)
+    try
+        return wait(event)
+    catch e
+        # Note: context cancellation not fully implemented in iceberg_rust_ffi yet
+        ensure_wait(event)
+        if response.error_message != C_NULL
+            @ccall rust_lib.iceberg_destroy_cstring(response.error_message::Ptr{Cchar})::Cint
+        end
+        rethrow(e)
+    end
+end
 
 # Opaque pointer types
 const IcebergTable = Ptr{Cvoid}
@@ -31,108 +168,216 @@ struct ArrowBatch
     rust_ptr::Ptr{Cvoid}
 end
 
-# Result type
-const IcebergResult = Cint
+# Response structures for async operations
+mutable struct IcebergTableResponse
+    result::Cint
+    table::IcebergTable
+    error_message::Ptr{Cchar}
+    context::Ptr{Cvoid}
 
-# Global variables for dynamic loading
-const lib_handle = Ref{Ptr{Cvoid}}(C_NULL)
-const function_pointers = Dict{Symbol, Ptr{Cvoid}}()
-
-# Function pointer types
-const iceberg_table_open_func_t = Ptr{Cvoid}
-const iceberg_table_free_func_t = Ptr{Cvoid}
-const iceberg_table_scan_func_t = Ptr{Cvoid}
-const iceberg_scan_select_columns_func_t = Ptr{Cvoid}
-const iceberg_scan_free_func_t = Ptr{Cvoid}
-const iceberg_scan_next_batch_func_t = Ptr{Cvoid}
-const iceberg_arrow_batch_free_func_t = Ptr{Cvoid}
-const iceberg_error_message_func_t = Ptr{Cvoid}
-
-const RUST_LIB = if haskey(ENV, "ICEBERG_RUST_LIB")
-    # For development, e.g. run `cargo build --release` and point to `target/release/` dir.
-    # Note this is set a precompilation time, as `ccall` needs this to be a `const`,
-    # so you need to restart Julia / recompile the package if you change it.
-    lib_path = realpath(joinpath(ENV["ICEBERG_RUST_LIB"], "libiceberg_rust_ffi.$(dlext)"))
-    @warn """
-        Using unreleased object_store_ffi library:
-            $(repr(contractuser(lib_path)))
-        This is only intended for local development and should not be used in production.
-        """
-    lib_path
-else
-    iceberg_rust_ffi_jll.libiceberg_rust_ffi
+    IcebergTableResponse() = new(-1, C_NULL, C_NULL, C_NULL)
 end
 
-"""
-    load_iceberg_library(lib_path::String=iceberg_rust_ffi_jll.libiceberg_rust_ffi)
+mutable struct IcebergScanResponse
+    result::Cint
+    scan::IcebergScan
+    error_message::Ptr{Cchar}
+    context::Ptr{Cvoid}
 
-Load the Iceberg C API library and resolve all function symbols.
-"""
-function load_iceberg_library(lib_path::String=RUST_LIB)
-    println("Loading Iceberg C API library from: $(lib_path)")
-
-    # Try to open the dynamic library
-    lib_handle[] = dlopen(lib_path, RTLD_LAZY)
-    if lib_handle[] == C_NULL
-        error("Failed to load library: $(lib_path)")
-    end
-
-    println("✅ Library loaded successfully")
-
-    # Function names to resolve
-    functions = [
-        :iceberg_table_open,
-        :iceberg_table_free,
-        :iceberg_table_scan,
-        :iceberg_scan_select_columns,
-        :iceberg_scan_free,
-        :iceberg_scan_next_batch,
-        :iceberg_arrow_batch_free,
-        :iceberg_error_message
-    ]
-
-    # Resolve function symbols
-    for func_name in functions
-        ptr = dlsym(lib_handle[], String(func_name))
-        if ptr == C_NULL
-            error("Failed to resolve $func_name")
-        end
-        function_pointers[func_name] = ptr
-    end
-
-    println("✅ All function symbols resolved successfully")
-    return true
+    IcebergScanResponse() = new(-1, C_NULL, C_NULL, C_NULL)
 end
 
-"""
-    unload_iceberg_library()
+mutable struct IcebergBatchResponse
+    result::Cint
+    batch::Ptr{ArrowBatch}
+    end_of_stream::Bool
+    new_stream_ptr::Ptr{Cvoid}
+    error_message::Ptr{Cchar}
+    context::Ptr{Cvoid}
 
-Unload the Iceberg C API library.
-"""
-function unload_iceberg_library()
-    if lib_handle[] != C_NULL
-        dlclose(lib_handle[])
-        lib_handle[] = C_NULL
-        empty!(function_pointers)
-        println("✅ Library unloaded")
-    end
+    IcebergBatchResponse() = new(-1, C_NULL, false, C_NULL, C_NULL, C_NULL)
 end
 
-# Wrapper functions that call the C API
+# Exception types
+abstract type IcebergException <: Exception end
+
+struct TableOpenException <: IcebergException
+    msg::String
+end
+
+struct ScanException <: IcebergException
+    msg::String
+end
+
+struct BatchException <: IcebergException
+    msg::String
+end
+
+# High-level functions using the async API pattern from RustyObjectStore.jl
+
 """
-    iceberg_table_open(table_path::String, metadata_path::String) -> Tuple{IcebergResult, IcebergTable}
+    iceberg_table_open(table_path::String, metadata_path::String) -> IcebergTable
 
 Open an Iceberg table from the given path and metadata file.
 """
 function iceberg_table_open(table_path::String, metadata_path::String)
-    table_ref = Ref{IcebergTable}(C_NULL)
-    result = ccall(
-        function_pointers[:iceberg_table_open],
-        IcebergResult,
-        (Cstring, Cstring, Ref{IcebergTable}),
-        table_path, metadata_path, table_ref
-    )
-    return result, table_ref[]
+    response = IcebergTableResponse()
+    ct = current_task()
+    event = Base.Event()
+    handle = pointer_from_objref(event)
+    
+    while true
+        preserve_task(ct)
+        result = GC.@preserve response event try
+            result = @ccall rust_lib.iceberg_table_open(
+                table_path::Cstring,
+                metadata_path::Cstring,
+                response::Ref{IcebergTableResponse},
+                handle::Ptr{Cvoid}
+            )::Cint
+
+            wait_or_cancel(event, response)
+
+            result
+        finally
+            unpreserve_task(ct)
+        end
+
+        if result == -2  # CRESULT_BACKOFF
+            sleep(0.01)
+            continue
+        end
+
+        @throw_on_error(response, "table_open", TableOpenException)
+
+        return response.table
+    end
+end
+
+"""
+    iceberg_table_scan(table::IcebergTable) -> IcebergScan
+
+Create a scan for the given table.
+"""
+function iceberg_table_scan(table::IcebergTable)
+    response = IcebergScanResponse()
+    ct = current_task()
+    event = Base.Event()
+    handle = pointer_from_objref(event)
+    
+    while true
+        preserve_task(ct)
+        result = GC.@preserve response event try
+            result = @ccall rust_lib.iceberg_table_scan(
+                table::IcebergTable,
+                response::Ref{IcebergScanResponse},
+                handle::Ptr{Cvoid}
+            )::Cint
+
+            wait_or_cancel(event, response)
+
+            result
+        finally
+            unpreserve_task(ct)
+        end
+
+        if result == -2  # CRESULT_BACKOFF
+            sleep(0.01)
+            continue
+        end
+
+        @throw_on_error(response, "table_scan", ScanException)
+
+        return response.scan
+    end
+end
+
+"""
+    iceberg_scan_wait_batch(scan::IcebergScan) -> Nothing
+
+Wait for the next batch asynchronously and store it in the scan.
+"""
+function iceberg_scan_wait_batch(scan::IcebergScan)
+    response = IcebergBatchResponse()
+    ct = current_task()
+    event = Base.Event()
+    handle = pointer_from_objref(event)
+    
+    while true
+        preserve_task(ct)
+        result = GC.@preserve response event try
+            result = @ccall rust_lib.iceberg_scan_wait_batch_with_storage(
+                scan::IcebergScan,
+                response::Ref{IcebergBatchResponse},
+                handle::Ptr{Cvoid}
+            )::Cint
+
+            wait_or_cancel(event, response)
+
+            result
+        finally
+            unpreserve_task(ct)
+        end
+
+        if result == -2  # CRESULT_BACKOFF
+            sleep(0.01)
+            continue
+        end
+
+        @throw_on_error(response, "scan_wait_batch", BatchException)
+
+        # Store the batch result in the scan
+        result = @ccall rust_lib.iceberg_scan_store_batch_result(
+            scan::IcebergScan,
+            response::Ref{IcebergBatchResponse}
+        )::Cint
+        
+        if result != 0
+            error("Failed to store batch result")
+        end
+
+        return nothing
+    end
+end
+
+"""
+    iceberg_scan_next_batch(scan::IcebergScan) -> Tuple{Bool, Union{ArrowBatch, Nothing}}
+
+Get the current batch from the scan (synchronous). Returns (end_of_stream, batch).
+Call iceberg_scan_wait_batch first to wait for and store the batch.
+"""
+function iceberg_scan_next_batch(scan::IcebergScan)
+    response = IcebergBatchResponse()
+    
+    result = @ccall rust_lib.iceberg_scan_next_batch(
+        scan::IcebergScan,
+        response::Ref{IcebergBatchResponse},
+        C_NULL::Ptr{Cvoid}
+    )::Cint
+
+    @throw_on_error(response, "scan_next_batch", BatchException)
+
+    return response.end_of_stream, response.batch
+end
+
+"""
+    iceberg_scan_select_columns(scan::IcebergScan, column_names::Vector{String}) -> Nothing
+
+Select specific columns for the scan.
+"""
+function iceberg_scan_select_columns(scan::IcebergScan, column_names::Vector{String})
+    # Convert String vector to Cstring array
+    c_strings = [pointer(col) for col in column_names]
+    result = @ccall rust_lib.iceberg_scan_select_columns(
+        scan::IcebergScan,
+        pointer(c_strings)::Ptr{Cstring},
+        length(column_names)::Csize_t
+    )::Cint
+    
+    if result != 0
+        error("Failed to select columns")
+    end
+    return nothing
 end
 
 """
@@ -141,45 +386,7 @@ end
 Free the memory associated with an Iceberg table.
 """
 function iceberg_table_free(table::IcebergTable)
-    ccall(
-        function_pointers[:iceberg_table_free],
-        Cvoid,
-        (IcebergTable,),
-        table
-    )
-end
-
-"""
-    iceberg_table_scan(table::IcebergTable) -> Tuple{IcebergResult, IcebergScan}
-
-Create a scan for the given table.
-"""
-function iceberg_table_scan(table::IcebergTable)
-    scan_ref = Ref{IcebergScan}(C_NULL)
-    result = ccall(
-        function_pointers[:iceberg_table_scan],
-        IcebergResult,
-        (IcebergTable, Ref{IcebergScan}),
-        table, scan_ref
-    )
-    return result, scan_ref[]
-end
-
-"""
-    iceberg_scan_select_columns(scan::IcebergScan, column_names::Vector{String}) -> IcebergResult
-
-Select specific columns for the scan.
-"""
-function iceberg_scan_select_columns(scan::IcebergScan, column_names::Vector{String})
-    # Convert String vector to Cstring array
-    c_strings = [pointer(col) for col in column_names]
-    result = ccall(
-        function_pointers[:iceberg_scan_select_columns],
-        IcebergResult,
-        (IcebergScan, Ptr{Cstring}, Csize_t),
-        scan, pointer(c_strings), length(column_names)
-    )
-    return result
+    @ccall rust_lib.iceberg_table_free(table::IcebergTable)::Cvoid
 end
 
 """
@@ -188,28 +395,7 @@ end
 Free the memory associated with a scan.
 """
 function iceberg_scan_free(scan::IcebergScan)
-    ccall(
-        function_pointers[:iceberg_scan_free],
-        Cvoid,
-        (IcebergScan,),
-        scan
-    )
-end
-
-"""
-    iceberg_scan_next_batch(scan::IcebergScan) -> Tuple{IcebergResult, ArrowBatch}
-
-Get the next Arrow batch from the scan.
-"""
-function iceberg_scan_next_batch(scan::IcebergScan)
-    batch_ref = Ref{Ptr{ArrowBatch}}(C_NULL)
-    result = ccall(
-        function_pointers[:iceberg_scan_next_batch],
-        IcebergResult,
-        (IcebergScan, Ref{Ptr{ArrowBatch}}),
-        scan, batch_ref
-    )
-    return result, batch_ref[]
+    @ccall rust_lib.iceberg_scan_free(scan::IcebergScan)::Cvoid
 end
 
 """
@@ -218,26 +404,7 @@ end
 Free the memory associated with an Arrow batch.
 """
 function iceberg_arrow_batch_free(batch::Ptr{ArrowBatch})
-    ccall(
-        function_pointers[:iceberg_arrow_batch_free],
-        Cvoid,
-        (Ptr{ArrowBatch},),
-        batch
-    )
-end
-
-"""
-    iceberg_error_message() -> String
-
-Get the last error message from the C API.
-"""
-function iceberg_error_message()
-    msg_ptr = ccall(
-        function_pointers[:iceberg_error_message],
-        Cstring,
-        ()
-    )
-    return msg_ptr == C_NULL ? "" : unsafe_string(msg_ptr)
+    @ccall rust_lib.iceberg_arrow_batch_free(batch::Ptr{ArrowBatch})::Cvoid
 end
 
 # Iterator type for Arrow batches
@@ -261,52 +428,36 @@ Iterate over Arrow.Table objects from the Iceberg table.
 """
 function Base.iterate(iter::IcebergTableIterator, state=nothing)
     if state === nothing
-        # First iteration - open table and scan
-        if lib_handle[] == C_NULL
-            load_iceberg_library()
+        # First iteration - ensure runtime is initialized
+        if !_ICEBERG_STARTED[]
+            init_iceberg_runtime()
         end
 
         # Open table
-        result, table = iceberg_table_open(iter.table_path, iter.metadata_path)
-        if result != ICEBERG_OK
-            error("Failed to open table: $(iceberg_error_message())")
-        end
+        table = iceberg_table_open(iter.table_path, iter.metadata_path)
 
         # Create scan
-        result, scan = iceberg_table_scan(table)
-        if result != ICEBERG_OK
-            # TODO: Is everything exception free? what if we get an exception in Julia
-            # between FFI calls to Rust, or between iterations? How do we deallocate objects then?
-            iceberg_table_free(table)
-            error("Failed to create scan: $(iceberg_error_message())")
-        end
+        scan = iceberg_table_scan(table)
 
         # Select columns if specified
         if !isempty(iter.columns)
-            result = iceberg_scan_select_columns(scan, iter.columns)
-            if result != ICEBERG_OK
-                iceberg_scan_free(scan)
-                iceberg_table_free(table)
-                error("Failed to select columns: $(iceberg_error_message())")
-            end
+            iceberg_scan_select_columns(scan, iter.columns)
         end
 
         state = IcebergTableIteratorState(table, scan, true)
     end
 
-    # Get next batch
-    result, batch_ptr = iceberg_scan_next_batch(state.scan)
+    # Wait for next batch asynchronously 
+    iceberg_scan_wait_batch(state.scan)
+    
+    # Get the stored batch synchronously
+    end_of_stream, batch_ptr = iceberg_scan_next_batch(state.scan)
 
-    if result == ICEBERG_END_OF_STREAM
+    if end_of_stream
         # End of stream - cleanup and return nothing
         iceberg_scan_free(state.scan)
         iceberg_table_free(state.table)
         return nothing
-    elseif result != ICEBERG_OK
-        # Error - cleanup and throw
-        iceberg_scan_free(state.scan)
-        iceberg_table_free(state.table)
-        error("Failed to get next batch: $(iceberg_error_message())")
     end
 
     if batch_ptr == C_NULL
@@ -352,9 +503,5 @@ function read_iceberg_table(table_path::String, metadata_path::String; columns::
     return IcebergTableIterator(table_path, metadata_path, columns)
 end
 
-# Cleanup on module unload
-function __init__()
-    atexit(unload_iceberg_library)
-end
 
-end # module Iceberg
+end # module RustyIceberg

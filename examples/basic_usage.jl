@@ -40,10 +40,10 @@ end
 # Load environment variables
 env_loaded = load_env_file(joinpath(@__DIR__, ".env"))
 
-# Test library loading
-println("Using default library path")
-load_iceberg_library()
-println("✅ Library loaded!")
+# Initialize Iceberg runtime
+println("Initializing Iceberg runtime...")
+init_iceberg_runtime()
+println("✅ Runtime initialized!")
 
 # Test actual table reading using the same paths as integration test
 println("Testing table reading with actual data...")
@@ -125,7 +125,7 @@ catch e
         println("   1. Make sure your .env file has correct AWS credentials")
         println("   2. Verify the S3 endpoint is accessible")
         println("   3. Check that the table path and metadata path are correct")
-        println("   4. Ensure the library path in .env points to the correct location")
+        println("   4. Ensure the Rust library was built correctly")
     else
         println("\n💡 Please configure your .env file first:")
         println("   cp env.example .env")
