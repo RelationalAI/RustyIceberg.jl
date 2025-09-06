@@ -9,6 +9,7 @@ using iceberg_rust_ffi_jll
 export IcebergTable, IcebergScan, ArrowBatch, IcebergConfig
 export IcebergTableIterator, IcebergTableIteratorState
 export init_iceberg_runtime, read_iceberg_table
+export iceberg_scan_init_stream, iceberg_scan_wait_batch_from_stream
 export IcebergException
 
 const Option{T} = Union{T, Nothing}
@@ -131,6 +132,7 @@ function throw_on_error(response, operation, exception)
     return :( $(esc(:($response.result != 0))) ? throw($exception($response_error_to_string($(esc(response)), $operation))) : $(nothing) )
 end
 
+# TODO @vustef: Not sure what this is for.
 function ensure_wait(event::Base.Event)
     for _ in 1:20
         try
@@ -191,11 +193,19 @@ mutable struct IcebergBatchResponse
     result::Cint
     batch::Ptr{ArrowBatch}
     end_of_stream::Bool
-    new_stream_ptr::Ptr{Cvoid}
     error_message::Ptr{Cchar}
     context::Ptr{Cvoid}
 
-    IcebergBatchResponse() = new(-1, C_NULL, false, C_NULL, C_NULL, C_NULL)
+    IcebergBatchResponse() = new(-1, C_NULL, false, C_NULL, C_NULL)
+end
+
+mutable struct IcebergBoolResponse
+    result::Cint
+    success::Bool
+    error_message::Ptr{Cchar}
+    context::Ptr{Cvoid}
+
+    IcebergBoolResponse() = new(-1, false, C_NULL, C_NULL)
 end
 
 # Exception types
@@ -293,12 +303,12 @@ function iceberg_table_scan(table::IcebergTable)
 end
 
 """
-    iceberg_scan_wait_batch(scan::IcebergScan) -> Nothing
+    iceberg_scan_init_stream(scan::IcebergScan) -> Nothing
 
-Wait for the next batch asynchronously and store it in the scan.
+Initialize the stream for the scan asynchronously.
 """
-function iceberg_scan_wait_batch(scan::IcebergScan)
-    response = IcebergBatchResponse()
+function iceberg_scan_init_stream(scan::IcebergScan)
+    response = IcebergBoolResponse()
     ct = current_task()
     event = Base.Event()
     handle = pointer_from_objref(event)
@@ -306,9 +316,9 @@ function iceberg_scan_wait_batch(scan::IcebergScan)
     while true
         preserve_task(ct)
         result = GC.@preserve response event try
-            result = @ccall rust_lib.iceberg_scan_wait_batch_with_storage(
+            result = @ccall rust_lib.iceberg_scan_init_stream(
                 scan::IcebergScan,
-                response::Ref{IcebergBatchResponse},
+                response::Ref{IcebergBoolResponse},
                 handle::Ptr{Cvoid}
             )::Cint
 
@@ -324,20 +334,74 @@ function iceberg_scan_wait_batch(scan::IcebergScan)
             continue
         end
 
-        @throw_on_error(response, "scan_wait_batch", BatchException)
+        @throw_on_error(response, "scan_init_stream", BatchException)
 
-        # Store the batch result in the scan
-        result = @ccall rust_lib.iceberg_scan_store_batch_result(
-            scan::IcebergScan,
-            response::Ref{IcebergBatchResponse}
-        )::Cint
-        
-        if result != 0
-            error("Failed to store batch result")
-        end
-
+        # Stream is automatically stored in the scan by the Rust function
         return nothing
     end
+end
+
+"""
+    iceberg_scan_wait_batch_from_stream(scan::IcebergScan) -> Nothing
+
+Wait for the next batch from the initialized stream asynchronously and store it in the scan.
+"""
+function iceberg_scan_wait_batch_from_stream(scan::IcebergScan)
+    response = IcebergBoolResponse()
+    ct = current_task()
+    event = Base.Event()
+    handle = pointer_from_objref(event)
+    
+    while true
+        preserve_task(ct)
+        result = GC.@preserve response event try
+            result = @ccall rust_lib.iceberg_scan_next_batch_from_stream(
+                scan::IcebergScan,
+                response::Ref{IcebergBoolResponse},
+                handle::Ptr{Cvoid}
+            )::Cint
+
+            wait_or_cancel(event, response)
+
+            result
+        finally
+            unpreserve_task(ct)
+        end
+
+        if result == -2  # CRESULT_BACKOFF
+            sleep(0.01)
+            continue
+        end
+
+        @throw_on_error(response, "scan_wait_batch_from_stream", BatchException)
+
+        # Batch is automatically stored in the scan by the Rust function
+        return nothing
+    end
+end
+
+"""
+    iceberg_scan_wait_batch(scan::IcebergScan) -> Nothing
+
+Wait for the next batch asynchronously and store it in the scan.
+This is a convenience function that handles both stream initialization and batch retrieval.
+"""
+function iceberg_scan_wait_batch(scan::IcebergScan)
+    # First, try to initialize the stream (this is safe to call multiple times)
+    # If the stream already exists, this will be a no-op in the Rust side
+    try
+        iceberg_scan_init_stream(scan)
+    catch e
+        # If stream already exists, that's expected for subsequent calls
+        if !occursin("Stream already exists", string(e))
+            rethrow(e)
+        end
+    end
+    
+    # Then get the next batch from the stream
+    iceberg_scan_wait_batch_from_stream(scan)
+    
+    return nothing
 end
 
 """
