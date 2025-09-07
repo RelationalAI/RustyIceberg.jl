@@ -189,15 +189,6 @@ mutable struct IcebergScanResponse
     IcebergScanResponse() = new(-1, C_NULL, C_NULL, C_NULL)
 end
 
-mutable struct IcebergBatchResponse
-    result::Cint
-    batch::Ptr{ArrowBatch}
-    end_of_stream::Bool
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    IcebergBatchResponse() = new(-1, C_NULL, false, C_NULL, C_NULL)
-end
 
 mutable struct IcebergBoolResponse
     result::Cint
@@ -405,23 +396,14 @@ function iceberg_scan_wait_batch(scan::IcebergScan)
 end
 
 """
-    iceberg_scan_next_batch(scan::IcebergScan) -> Tuple{Bool, Union{ArrowBatch, Nothing}}
+    iceberg_scan_get_current_batch(scan::IcebergScan) -> Ptr{ArrowBatch}
 
-Get the current batch from the scan (synchronous). Returns (end_of_stream, batch).
+Get the current batch from the scan (synchronous). Returns null if end of stream.
 Call iceberg_scan_wait_batch first to wait for and store the batch.
 """
-function iceberg_scan_next_batch(scan::IcebergScan)
-    response = IcebergBatchResponse()
-    
-    result = @ccall rust_lib.iceberg_scan_next_batch(
-        scan::IcebergScan,
-        response::Ref{IcebergBatchResponse},
-        C_NULL::Ptr{Cvoid}
-    )::Cint
-
-    @throw_on_error(response, "scan_next_batch", BatchException)
-
-    return response.end_of_stream, response.batch
+function iceberg_scan_get_current_batch(scan::IcebergScan)
+    batch_ptr = @ccall rust_lib.iceberg_scan_get_current_batch(scan::IcebergScan)::Ptr{ArrowBatch}
+    return batch_ptr
 end
 
 """
@@ -463,12 +445,12 @@ function iceberg_scan_free(scan::IcebergScan)
 end
 
 """
-    iceberg_arrow_batch_free(batch::Ptr{ArrowBatch})
+    iceberg_arrow_batch_free(scan::IcebergScan)
 
-Free the memory associated with an Arrow batch.
+Free the memory associated with the current Arrow batch in the scan.
 """
-function iceberg_arrow_batch_free(batch::Ptr{ArrowBatch})
-    @ccall rust_lib.iceberg_arrow_batch_free(batch::Ptr{ArrowBatch})::Cvoid
+function iceberg_arrow_batch_free(scan::IcebergScan)
+    @ccall rust_lib.iceberg_arrow_batch_free(scan::IcebergScan)::Cvoid
 end
 
 # Iterator type for Arrow batches
@@ -515,17 +497,13 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
     iceberg_scan_wait_batch(state.scan)
     
     # Get the stored batch synchronously
-    end_of_stream, batch_ptr = iceberg_scan_next_batch(state.scan)
+    batch_ptr = iceberg_scan_get_current_batch(state.scan)
 
-    if end_of_stream
+    if batch_ptr == C_NULL
         # End of stream - cleanup and return nothing
         iceberg_scan_free(state.scan)
         iceberg_table_free(state.table)
         return nothing
-    end
-
-    if batch_ptr == C_NULL
-        error("Received NULL batch")
     end
 
     # Convert ArrowBatch pointer to ArrowBatch struct
@@ -538,7 +516,7 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
     arrow_table = Arrow.Table(io)
 
     # Free the batch
-    iceberg_arrow_batch_free(batch_ptr)
+    iceberg_arrow_batch_free(state.scan)
 
     return arrow_table, state
 end
