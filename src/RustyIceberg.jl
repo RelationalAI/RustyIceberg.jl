@@ -235,32 +235,25 @@ function iceberg_table_open(table_path::String, metadata_path::String)
     event = Base.Event()
     handle = pointer_from_objref(event)
     
-    while true
-        preserve_task(ct)
-        result = GC.@preserve response event try
-            result = @ccall rust_lib.iceberg_table_open(
-                table_path::Cstring,
-                metadata_path::Cstring,
-                response::Ref{IcebergTableResponse},
-                handle::Ptr{Cvoid}
-            )::Cint
+    preserve_task(ct)
+    result = GC.@preserve response event try
+        result = @ccall rust_lib.iceberg_table_open(
+            table_path::Cstring,
+            metadata_path::Cstring,
+            response::Ref{IcebergTableResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
 
-            wait_or_cancel(event, response)
+        wait_or_cancel(event, response)
 
-            result
-        finally
-            unpreserve_task(ct)
-        end
-
-        if result == -2  # CRESULT_BACKOFF
-            sleep(0.01)
-            continue
-        end
-
-        @throw_on_error(response, "table_open", TableOpenException)
-
-        return response.table
+        result
+    finally
+        unpreserve_task(ct)
     end
+
+    @throw_on_error(response, "table_open", TableOpenException)
+
+    return response.table
 end
 
 """
@@ -274,31 +267,24 @@ function iceberg_table_scan(table::IcebergTable)
     event = Base.Event()
     handle = pointer_from_objref(event)
     
-    while true
-        preserve_task(ct)
-        result = GC.@preserve response event try
-            result = @ccall rust_lib.iceberg_table_scan(
-                table::IcebergTable,
-                response::Ref{IcebergScanResponse},
-                handle::Ptr{Cvoid}
-            )::Cint
+    preserve_task(ct)
+    result = GC.@preserve response event try
+        result = @ccall rust_lib.iceberg_table_scan(
+            table::IcebergTable,
+            response::Ref{IcebergScanResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
 
-            wait_or_cancel(event, response)
+        wait_or_cancel(event, response)
 
-            result
-        finally
-            unpreserve_task(ct)
-        end
-
-        if result == -2  # CRESULT_BACKOFF
-            sleep(0.01)
-            continue
-        end
-
-        @throw_on_error(response, "table_scan", ScanException)
-
-        return response.scan
+        result
+    finally
+        unpreserve_task(ct)
     end
+
+    @throw_on_error(response, "table_scan", ScanException)
+
+    return response.scan
 end
 
 """
@@ -312,32 +298,25 @@ function iceberg_scan_init_stream(scan::IcebergScan)
     event = Base.Event()
     handle = pointer_from_objref(event)
     
-    while true
-        preserve_task(ct)
-        result = GC.@preserve response event try
-            result = @ccall rust_lib.iceberg_scan_init_stream(
-                scan::IcebergScan,
-                response::Ref{IcebergBoolResponse},
-                handle::Ptr{Cvoid}
-            )::Cint
+    preserve_task(ct)
+    result = GC.@preserve response event try
+        result = @ccall rust_lib.iceberg_scan_init_stream(
+            scan::IcebergScan,
+            response::Ref{IcebergBoolResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
 
-            wait_or_cancel(event, response)
+        wait_or_cancel(event, response)
 
-            result
-        finally
-            unpreserve_task(ct)
-        end
-
-        if result == -2  # CRESULT_BACKOFF
-            sleep(0.01)
-            continue
-        end
-
-        @throw_on_error(response, "scan_init_stream", BatchException)
-
-        # Stream is automatically stored in the scan by the Rust function
-        return nothing
+        result
+    finally
+        unpreserve_task(ct)
     end
+
+    @throw_on_error(response, "scan_init_stream", BatchException)
+
+    # Stream is automatically stored in the scan by the Rust function
+    return nothing
 end
 
 """
@@ -351,32 +330,25 @@ function iceberg_scan_wait_batch_from_stream(scan::IcebergScan)
     event = Base.Event()
     handle = pointer_from_objref(event)
     
-    while true
-        preserve_task(ct)
-        result = GC.@preserve response event try
-            result = @ccall rust_lib.iceberg_scan_next_batch_from_stream(
-                scan::IcebergScan,
-                response::Ref{IcebergBoolResponse},
-                handle::Ptr{Cvoid}
-            )::Cint
+    preserve_task(ct)
+    result = GC.@preserve response event try
+        result = @ccall rust_lib.iceberg_scan_next_batch_from_stream(
+            scan::IcebergScan,
+            response::Ref{IcebergBoolResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
 
-            wait_or_cancel(event, response)
+        wait_or_cancel(event, response)
 
-            result
-        finally
-            unpreserve_task(ct)
-        end
-
-        if result == -2  # CRESULT_BACKOFF
-            sleep(0.01)
-            continue
-        end
-
-        @throw_on_error(response, "scan_wait_batch_from_stream", BatchException)
-
-        # Batch is automatically stored in the scan by the Rust function
-        return nothing
+        result
+    finally
+        unpreserve_task(ct)
     end
+
+    @throw_on_error(response, "scan_wait_batch_from_stream", BatchException)
+
+    # Batch is automatically stored in the scan by the Rust function
+    return nothing
 end
 
 """
