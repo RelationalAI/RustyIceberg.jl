@@ -445,6 +445,39 @@ mutable struct IcebergTableIteratorState
     table::IcebergTable
     scan::IcebergScan
     is_open::Bool
+    has_pending_batch::Bool  # Track if we have an unfreed batch to prevent double-free
+    
+    function IcebergTableIteratorState(table, scan, is_open)
+        state = new(table, scan, is_open, false)
+        # Ensure cleanup happens even if iterator is abandoned
+        finalizer(cleanup_iceberg_state, state)
+        return state
+    end
+end
+
+"""
+    cleanup_iceberg_state(state::IcebergTableIteratorState)
+
+Cleanup function for IcebergTableIteratorState finalizer.
+Ensures Rust resources are freed even if iterator is abandoned.
+"""
+function cleanup_iceberg_state(state::IcebergTableIteratorState)
+    if state.is_open
+        try
+            # Only free batch if we know we have one pending to prevent double-free
+            if state.has_pending_batch
+                iceberg_arrow_batch_free(state.scan)
+            end
+            iceberg_scan_free(state.scan)
+            iceberg_table_free(state.table)
+        catch e
+            # Log but don't throw in finalizer
+            @error "Error in IcebergTableIteratorState finalizer: $e"
+        finally
+            state.is_open = false
+            state.has_pending_batch = false
+        end
+    end
 end
 
 """
@@ -483,20 +516,33 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
         # End of stream - cleanup and return nothing
         iceberg_scan_free(state.scan)
         iceberg_table_free(state.table)
+        # Mark as closed to prevent finalizer from double-freeing
+        state.is_open = false
+        state.has_pending_batch = false
         return nothing
     end
 
-    # Convert ArrowBatch pointer to ArrowBatch struct
-    batch = unsafe_load(batch_ptr)
+    # Mark that we have a pending batch that needs to be freed
+    state.has_pending_batch = true
 
-    # Create IOBuffer from the serialized Arrow data
-    io = IOBuffer(unsafe_wrap(Array, batch.data, batch.length))
+    # Exception-safe batch processing with try-finally
+    local arrow_table
+    try
+        # Convert ArrowBatch pointer to ArrowBatch struct
+        batch = unsafe_load(batch_ptr)
 
-    # Read Arrow data
-    arrow_table = Arrow.Table(io)
+        # Create IOBuffer from the serialized Arrow data
+        io = IOBuffer(unsafe_wrap(Array, batch.data, batch.length))
 
-    # Free the batch
-    iceberg_arrow_batch_free(state.scan)
+        # Read Arrow data
+        arrow_table = Arrow.Table(io)
+    finally
+        # Always free the batch, even if exception occurs
+        if state.has_pending_batch
+            iceberg_arrow_batch_free(state.scan)
+            state.has_pending_batch = false
+        end
+    end
 
     return arrow_table, state
 end
