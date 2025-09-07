@@ -234,7 +234,7 @@ function iceberg_table_open(table_path::String, metadata_path::String)
     ct = current_task()
     event = Base.Event()
     handle = pointer_from_objref(event)
-    
+
     preserve_task(ct)
     result = GC.@preserve response event try
         result = @ccall rust_lib.iceberg_table_open(
@@ -266,7 +266,7 @@ function iceberg_table_scan(table::IcebergTable)
     ct = current_task()
     event = Base.Event()
     handle = pointer_from_objref(event)
-    
+
     preserve_task(ct)
     result = GC.@preserve response event try
         result = @ccall rust_lib.iceberg_table_scan(
@@ -297,7 +297,7 @@ function iceberg_scan_init_stream(scan::IcebergScan)
     ct = current_task()
     event = Base.Event()
     handle = pointer_from_objref(event)
-    
+
     preserve_task(ct)
     result = GC.@preserve response event try
         result = @ccall rust_lib.iceberg_scan_init_stream(
@@ -329,7 +329,7 @@ function iceberg_scan_wait_batch_from_stream(scan::IcebergScan)
     ct = current_task()
     event = Base.Event()
     handle = pointer_from_objref(event)
-    
+
     preserve_task(ct)
     result = GC.@preserve response event try
         result = @ccall rust_lib.iceberg_scan_next_batch_from_stream(
@@ -368,10 +368,10 @@ function iceberg_scan_wait_batch(scan::IcebergScan)
             rethrow(e)
         end
     end
-    
+
     # Then get the next batch from the stream
     iceberg_scan_wait_batch_from_stream(scan)
-    
+
     return nothing
 end
 
@@ -399,7 +399,7 @@ function iceberg_scan_select_columns(scan::IcebergScan, column_names::Vector{Str
         pointer(c_strings)::Ptr{Cstring},
         length(column_names)::Csize_t
     )::Cint
-    
+
     if result != 0
         error("Failed to select columns")
     end
@@ -446,7 +446,7 @@ mutable struct IcebergTableIteratorState
     scan::IcebergScan
     is_open::Bool
     has_pending_batch::Bool  # Track if we have an unfreed batch to prevent double-free
-    
+
     function IcebergTableIteratorState(table, scan, is_open)
         state = new(table, scan, is_open, false)
         # Ensure cleanup happens even if iterator is abandoned
@@ -506,9 +506,9 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
         state = IcebergTableIteratorState(table, scan, true)
     end
 
-    # Wait for next batch asynchronously 
+    # Wait for next batch asynchronously
     iceberg_scan_wait_batch(state.scan)
-    
+
     # Get the stored batch synchronously
     batch_ptr = iceberg_scan_get_current_batch(state.scan)
 
@@ -570,6 +570,5 @@ Read an Iceberg table and return an iterator over Arrow.Table objects.
 function read_iceberg_table(table_path::String, metadata_path::String; columns::Vector{String}=String[])
     return IcebergTableIterator(table_path, metadata_path, columns)
 end
-
 
 end # module RustyIceberg
