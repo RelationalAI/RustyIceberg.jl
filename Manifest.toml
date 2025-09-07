@@ -347,7 +347,9 @@ version = "1.5.7+1"
 
 [[deps.iceberg_rust_ffi_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
-git-tree-sha1 = "f92cda6a47dc404e19e1df5e2f01915baeb0591a"
+git-tree-sha1 = "d20fbf80a8a3637a50e2fe49810bfc8b53141117"
+repo-rev = "vs-async-2"
+repo-url = "https://github.com/RelationalAI/iceberg_rust_ffi_jll.jl"
 uuid = "6bd5c94f-693c-53e3-983d-a09fad412f22"
 version = "0.1.0+0"
 
