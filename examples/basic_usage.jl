@@ -8,6 +8,7 @@ println("Loading RustyIceberg package...")
 include("../src/RustyIceberg.jl")
 using .RustyIceberg
 using DataFrames
+using BenchmarkTools
 
 println("✅ Package loaded successfully!")
 
@@ -57,81 +58,92 @@ metadata_path = "metadata/00001-0789fc06-57dd-45b5-b5cc-42ef1386b497.metadata.js
 println("Table path: $table_path")
 println("Metadata path: $metadata_path")
 
-try
-    # Read the table using the high-level function - now returns an iterator
-    println("Reading Iceberg table...")
-    table_iterator = read_iceberg_table(table_path, metadata_path)
+function read_table(table_path, metadata_path, benchmark::Bool=false)
+    try
+        # Read the table using the high-level function - now returns an iterator
+        !benchmark && println("Reading Iceberg table...")
+        table_iterator = read_iceberg_table(table_path, metadata_path)
 
-    println("✅ Table iterator created successfully!")
+        !benchmark && println("✅ Table iterator created successfully!")
 
-    # Iterate over Arrow.Table objects and convert to DataFrames
-    all_dataframes = DataFrame[]
-    batch_count = 0
+        # Iterate over Arrow.Table objects and convert to DataFrames
+        all_dataframes = DataFrame[]
+        batch_count = 0
 
-    for arrow_table in table_iterator
-        batch_count += 1
-        df = DataFrame(arrow_table)
-        push!(all_dataframes, df)
-
-        println("📦 Batch $batch_count:")
-        println("   - Rows: $(nrow(df))")
-        println("   - Columns: $(ncol(df))")
-        println("   - Column names: $(names(df))")
-
-        # Show first few rows of first batch
-        if batch_count == 1 && nrow(df) > 0
-            println("📋 First few rows:")
-            println(first(df, 30))
-        end
-    end
-
-    # Combine all DataFrames
-    if !isempty(all_dataframes)
-        combined_df = reduce(vcat, all_dataframes)
-        println("\n📊 Combined DataFrame info:")
-        println("   - Total rows: $(nrow(combined_df))")
-        println("   - Total columns: $(ncol(combined_df))")
-        println("   - Total batches: $batch_count")
-    else
-        println("\n📊 No data found in table")
-    end
-
-    # Test with specific columns
-    println("\nTesting column selection...")
-    if !isempty(all_dataframes) && !isempty(names(all_dataframes[1]))
-        selected_columns = names(all_dataframes[1])[1:min(2, length(names(all_dataframes[1])))]
-        println("Selecting columns: $selected_columns")
-
-        selected_iterator = read_iceberg_table(table_path, metadata_path, columns=selected_columns)
-        selected_dataframes = DataFrame[]
-
-        for arrow_table in selected_iterator
+        for arrow_table in table_iterator
+            batch_count += 1
             df = DataFrame(arrow_table)
-            push!(selected_dataframes, df)
+            push!(all_dataframes, df)
+
+            if !benchmark
+                println("📦 Batch $batch_count:")
+                println("   - Rows: $(nrow(df))")
+                println("   - Columns: $(ncol(df))")
+                println("   - Column names: $(names(df))")
+
+                # Show first few rows of first batch
+                if batch_count == 1 && nrow(df) > 0
+                    println("📋 First few rows:")
+                    println(first(df, 30))
+                end
+            end
         end
 
-        if !isempty(selected_dataframes)
-            combined_selected = reduce(vcat, selected_dataframes)
-            println("✅ Column selection successful!")
-            println("   - Selected columns: $(names(combined_selected))")
-            println("   - Rows: $(nrow(combined_selected))")
-        end
-    end
+        if !benchmark
+            # Combine all DataFrames
+            if !isempty(all_dataframes)
+                combined_df = reduce(vcat, all_dataframes)
+                println("\n📊 Combined DataFrame info:")
+                println("   - Total rows: $(nrow(combined_df))")
+                println("   - Total columns: $(ncol(combined_df))")
+                println("   - Total batches: $batch_count")
+            else
+                println("\n📊 No data found in table")
+            end
 
-catch e
-    println("❌ Error reading table: $e")
-    if env_loaded
-        println("\n💡 Troubleshooting tips:")
-        println("   1. Make sure your .env file has correct AWS credentials")
-        println("   2. Verify the S3 endpoint is accessible")
-        println("   3. Check that the table path and metadata path are correct")
-        println("   4. Ensure the library path in .env points to the correct location")
-    else
-        println("\n💡 Please configure your .env file first:")
-        println("   cp env.example .env")
-        println("   # Then edit .env with your actual credentials and paths")
+            # Test with specific columns
+            println("\nTesting column selection...")
+            if !isempty(all_dataframes) && !isempty(names(all_dataframes[1]))
+                selected_columns = names(all_dataframes[1])[1:min(2, length(names(all_dataframes[1])))]
+                println("Selecting columns: $selected_columns")
+
+                selected_iterator = read_iceberg_table(table_path, metadata_path, columns=selected_columns)
+                selected_dataframes = DataFrame[]
+
+                for arrow_table in selected_iterator
+                    df = DataFrame(arrow_table)
+                    push!(selected_dataframes, df)
+                end
+
+                if !isempty(selected_dataframes)
+                    combined_selected = reduce(vcat, selected_dataframes)
+                    println("✅ Column selection successful!")
+                    println("   - Selected columns: $(names(combined_selected))")
+                    println("   - Rows: $(nrow(combined_selected))")
+                end
+            end
+        end
+
+    catch e
+        println("❌ Error reading table: $e")
+        if env_loaded
+            println("\n💡 Troubleshooting tips:")
+            println("   1. Make sure your .env file has correct AWS credentials")
+            println("   2. Verify the S3 endpoint is accessible")
+            println("   3. Check that the table path and metadata path are correct")
+            println("   4. Ensure the library path in .env points to the correct location")
+        else
+            println("\n💡 Please configure your .env file first:")
+            println("   cp env.example .env")
+            println("   # Then edit .env with your actual credentials and paths")
+        end
     end
 end
+
+read_table(table_path, metadata_path)
+
+# 140.559 ms (11660 allocations: 3.60 MiB)
+@btime read_table(table_path, metadata_path, true)
 
 println("\n✅ Basic usage example completed!")
 println("\nTo use with your own data:")
