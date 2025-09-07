@@ -150,12 +150,20 @@ function wait_or_cancel(event::Base.Event, response)
     try
         return wait(event)
     catch e
-        # Note: context cancellation not fully implemented in iceberg_rust_ffi yet
+        # Cancel the operation on the Rust side
+        if response.context != C_NULL
+            @ccall rust_lib.iceberg_cancel_context(response.context::Ptr{Cvoid})::Cint
+        end
         ensure_wait(event)
         if response.error_message != C_NULL
             @ccall rust_lib.iceberg_destroy_cstring(response.error_message::Ptr{Cchar})::Cint
         end
         rethrow(e)
+    finally
+        # Always cleanup the context
+        if response.context != C_NULL
+            @ccall rust_lib.iceberg_destroy_context(response.context::Ptr{Cvoid})::Cint
+        end
     end
 end
 
