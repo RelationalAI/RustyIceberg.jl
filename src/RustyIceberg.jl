@@ -2,6 +2,7 @@ module RustyIceberg
 
 using Base.Libc.Libdl: dlext
 using Base: @kwdef, @lock
+using Base.Threads: Atomic
 using Libdl
 using Arrow
 using iceberg_rust_ffi_jll
@@ -41,7 +42,7 @@ function default_panic_hook()
     exit(1)
 end
 
-const _ICEBERG_STARTED = Ref(false)
+const _ICEBERG_STARTED = Atomic{Bool}(false)
 const _INIT_LOCK::ReentrantLock = ReentrantLock()
 _PANIC_HOOK::Function = default_panic_hook
 
@@ -198,13 +199,12 @@ mutable struct IcebergScanResponse
 end
 
 
-mutable struct IcebergBoolResponse
+mutable struct IcebergResponse
     result::Cint
-    success::Bool
     error_message::Ptr{Cchar}
     context::Ptr{Cvoid}
 
-    IcebergBoolResponse() = new(-1, false, C_NULL, C_NULL)
+    IcebergResponse() = new(-1, C_NULL, C_NULL)
 end
 
 mutable struct IcebergBatchResponse
@@ -302,7 +302,7 @@ end
 Initialize the stream for the scan asynchronously.
 """
 function iceberg_scan_init_stream(scan::IcebergScan)
-    response = IcebergBoolResponse()
+    response = IcebergResponse()
     ct = current_task()
     event = Base.Event()
     handle = pointer_from_objref(event)
@@ -311,7 +311,7 @@ function iceberg_scan_init_stream(scan::IcebergScan)
     result = GC.@preserve response event try
         result = @ccall rust_lib.iceberg_scan_init_stream(
             scan::IcebergScan,
-            response::Ref{IcebergBoolResponse}, # TODO @vustef: This doesn't use the bool from the response?
+            response::Ref{IcebergResponse},
             handle::Ptr{Cvoid}
         )::Cint
 
@@ -461,45 +461,41 @@ end
 Iterate over Arrow.Table objects from the Iceberg table.
 """
 function Base.iterate(iter::IcebergTableIterator, state=nothing)
-    if state === nothing
-        # First iteration - ensure runtime is initialized
-        if !_ICEBERG_STARTED[]
-            init_iceberg_runtime()
-        end
-
-        # Open table
-        table = iceberg_table_open(iter.table_path, iter.metadata_path)
-
-        # Create scan
-        scan = iceberg_table_scan(table)
-
-        # Select columns if specified
-        if !isempty(iter.columns)
-            iceberg_scan_select_columns(scan, iter.columns)
-        end
-
-        iceberg_scan_init_stream(scan)
-
-        state = IcebergTableIteratorState(table, scan, true)
-    end
-
-    # Wait for next batch asynchronously
-    state.batch_ptr = iceberg_scan_next_batch(state.scan)
-
-    if state.batch_ptr == C_NULL
-        # End of stream - cleanup and return nothing
-        iceberg_scan_free(state.scan)
-        iceberg_table_free(state.table)
-        # Mark as closed to prevent finalizer from double-freeing
-        state.is_open = false
-        return nothing
-    end
-
-    # Mark that we have a pending batch that needs to be freed
-
-    # Exception-safe batch processing with try-finally
     local arrow_table
+    local should_cleanup_resources = false
+    
     try
+        if state === nothing
+            # First iteration - ensure runtime is initialized
+            if !_ICEBERG_STARTED[]
+                init_iceberg_runtime()
+            end
+
+            # Open table
+            table = iceberg_table_open(iter.table_path, iter.metadata_path)
+
+            # Create scan
+            scan = iceberg_table_scan(table)
+
+            # Select columns if specified
+            if !isempty(iter.columns)
+                iceberg_scan_select_columns(scan, iter.columns)
+            end
+
+            iceberg_scan_init_stream(scan)
+
+            state = IcebergTableIteratorState(table, scan, true)
+        end
+
+        # Wait for next batch asynchronously
+        state.batch_ptr = iceberg_scan_next_batch(state.scan)
+
+        if state.batch_ptr == C_NULL
+            # End of stream - mark for cleanup and return nothing
+            should_cleanup_resources = true
+            return nothing
+        end
+
         # Convert ArrowBatch pointer to ArrowBatch struct
         batch = unsafe_load(state.batch_ptr)
 
@@ -508,15 +504,28 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
 
         # Read Arrow data
         arrow_table = Arrow.Table(io)
+
+        return arrow_table, state
+
+    catch e
+        # On exception, mark resources for cleanup before rethrowing
+        should_cleanup_resources = true
+        rethrow(e)
     finally
-        # Always free the batch, even if exception occurs
-        if state.batch_ptr != C_NULL
+        # Always clean up batch if we have one
+        if state !== nothing && state.batch_ptr != C_NULL
             iceberg_arrow_batch_free(state.batch_ptr)
             state.batch_ptr = C_NULL
         end
+        
+        # Clean up scan and table resources only if needed (end of stream or exception)
+        if should_cleanup_resources && state !== nothing && state.is_open
+            iceberg_scan_free(state.scan)
+            iceberg_table_free(state.table)
+            # Mark as closed to prevent finalizer from double-freeing
+            state.is_open = false
+        end
     end
-
-    return arrow_table, state
 end
 
 """
