@@ -144,7 +144,7 @@ end
 
 read_table(table_path, metadata_path)
 
-# 144.162 ms (12105 allocations: 3.62 MiB)
+# 139.667 ms (11774 allocations: 3.61 MiB)
 @btime read_table(table_path, metadata_path, true)
 
 println("\n✅ Basic usage example completed!")
