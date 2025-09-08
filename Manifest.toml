@@ -200,6 +200,12 @@ deps = ["Artifacts", "CompilerSupportLibraries_jll", "Libdl"]
 uuid = "4536629a-c528-5b80-bd46-f80d51c5b363"
 version = "0.3.23+4"
 
+[[deps.OpenSSL_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "2ae7d4ddec2e13ad3bddf5c0796f7547cf682391"
+uuid = "458c3c95-2e84-50aa-8efc-19380b2a3a95"
+version = "3.5.2+0"
+
 [[deps.OrderedCollections]]
 git-tree-sha1 = "05868e21324cede2207c6f0f466b4bfef6d5e7ee"
 uuid = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
@@ -346,12 +352,12 @@ uuid = "3161d3a3-bdf6-5164-811a-617609db77b4"
 version = "1.5.7+1"
 
 [[deps.iceberg_rust_ffi_jll]]
-deps = ["Artifacts", "JLLWrappers", "Libdl"]
-git-tree-sha1 = "750b231df875f89b1739886cec6c1cc761ebc955"
-repo-rev = "fc1847ca980586f58662358fe55d0c4056461801"
+deps = ["Artifacts", "JLLWrappers", "Libdl", "OpenSSL_jll"]
+git-tree-sha1 = "dafcaaadc7efebe723a0a85e5a5e750b6be1aa26"
+repo-rev = "254b6361c8c669042df89d9f52f01ad58bab1490"
 repo-url = "https://github.com/RelationalAI/iceberg_rust_ffi_jll.jl"
 uuid = "6bd5c94f-693c-53e3-983d-a09fad412f22"
-version = "0.1.0+0"
+version = "0.2.4+0"
 
 [[deps.libblastrampoline_jll]]
 deps = ["Artifacts", "Libdl"]
