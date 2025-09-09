@@ -133,7 +133,6 @@ function throw_on_error(response, operation, exception)
     return :( $(esc(:($response.result != 0))) ? throw($exception($response_error_to_string($(esc(response)), $operation))) : $(nothing) )
 end
 
-# TODO @vustef: Not sure what this is for.
 function ensure_wait(event::Base.Event)
     for _ in 1:20
         try
