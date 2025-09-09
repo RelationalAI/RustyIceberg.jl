@@ -51,14 +51,14 @@ struct InitException <: Exception
     return_code::Cint
 end
 
-Base.@ccallable function panic_hook_wrapper()::Cint
+Base.@ccallable function panic_hook_wrapper_iceberg()::Cint
     global _PANIC_HOOK
     _PANIC_HOOK()
     return 0
 end
 
 # This is the callback that Rust calls to notify a Julia task of a completed operation.
-Base.@ccallable function notify_result(event_ptr::Ptr{Nothing})::Cint
+Base.@ccallable function notify_result_iceberg(event_ptr::Ptr{Nothing})::Cint
     event = unsafe_pointer_to_objref(event_ptr)::Base.Event
     notify(event)
     return 0
@@ -108,8 +108,8 @@ function init_iceberg_runtime(
             return nothing
         end
         _PANIC_HOOK = on_rust_panic
-        panic_fn_ptr = @cfunction(panic_hook_wrapper, Cint, ())
-        fn_ptr = @cfunction(notify_result, Cint, (Ptr{Nothing},))
+        panic_fn_ptr = @cfunction(panic_hook_wrapper_iceberg, Cint, ())
+        fn_ptr = @cfunction(notify_result_iceberg, Cint, (Ptr{Nothing},))
         res = @ccall rust_lib.iceberg_init_runtime(config::IcebergConfig, panic_fn_ptr::Ptr{Nothing}, fn_ptr::Ptr{Nothing})::Cint
         if res != 0
             throw(InitException("Failed to initialize Iceberg runtime.", res))
@@ -463,7 +463,7 @@ Iterate over Arrow.Table objects from the Iceberg table.
 function Base.iterate(iter::IcebergTableIterator, state=nothing)
     local arrow_table
     local should_cleanup_resources = false
-    
+
     try
         if state === nothing
             # First iteration - ensure runtime is initialized
@@ -517,7 +517,7 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
             iceberg_arrow_batch_free(state.batch_ptr)
             state.batch_ptr = C_NULL
         end
-        
+
         # Clean up scan and table resources only if needed (end of stream or exception)
         if should_cleanup_resources && state !== nothing && state.is_open
             iceberg_scan_free(state.scan)
