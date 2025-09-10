@@ -498,11 +498,8 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
         # Convert ArrowBatch pointer to ArrowBatch struct
         batch = unsafe_load(state.batch_ptr)
 
-        # Create IOBuffer from the serialized Arrow data
-        io = IOBuffer(unsafe_wrap(Array, batch.data, batch.length))
-
         # Read Arrow data
-        arrow_table = Arrow.Table(io)
+        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
 
         return arrow_table, state
 
