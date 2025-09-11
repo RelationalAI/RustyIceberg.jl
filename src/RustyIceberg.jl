@@ -7,7 +7,7 @@ using Libdl
 using Arrow
 using iceberg_rust_ffi_jll
 
-export IcebergTable, IcebergScan, ArrowBatch, IcebergConfig
+export IcebergTable, IcebergScan, ArrowBatch, IcebergStaticConfig, IcebergArrowStream
 export IcebergTableIterator, IcebergTableIteratorState
 export init_iceberg_runtime, read_iceberg_table
 export iceberg_scan_init_stream, iceberg_scan_next_batch
@@ -33,7 +33,7 @@ end
 """
 Runtime configuration for the Iceberg library.
 """
-struct IcebergConfig
+struct IcebergStaticConfig
     n_threads::Culonglong
 end
 
@@ -99,7 +99,7 @@ This starts a `tokio` runtime for handling Iceberg requests.
 It must be called before sending a request.
 """
 function init_iceberg_runtime(
-    config::IcebergConfig=IcebergConfig(0);
+    config::IcebergStaticConfig=IcebergStaticConfig(0);
     on_rust_panic::Function=default_panic_hook
 )
     global _PANIC_HOOK
@@ -110,7 +110,7 @@ function init_iceberg_runtime(
         _PANIC_HOOK = on_rust_panic
         panic_fn_ptr = @cfunction(panic_hook_wrapper_iceberg, Cint, ())
         fn_ptr = @cfunction(notify_result_iceberg, Cint, (Ptr{Nothing},))
-        res = @ccall rust_lib.iceberg_init_runtime(config::IcebergConfig, panic_fn_ptr::Ptr{Nothing}, fn_ptr::Ptr{Nothing})::Cint
+        res = @ccall rust_lib.iceberg_init_runtime(config::IcebergStaticConfig, panic_fn_ptr::Ptr{Nothing}, fn_ptr::Ptr{Nothing})::Cint
         if res != 0
             throw(InitException("Failed to initialize Iceberg runtime.", res))
         end
@@ -170,6 +170,8 @@ end
 # Opaque pointer types
 const IcebergTable = Ptr{Cvoid}
 const IcebergScan = Ptr{Cvoid}
+const IcebergScanRef = Ref{IcebergScan}
+const IcebergArrowStream = Ptr{Cvoid}
 
 # Arrow batch structure
 struct ArrowBatch
@@ -188,22 +190,21 @@ mutable struct IcebergTableResponse
     IcebergTableResponse() = new(-1, C_NULL, C_NULL, C_NULL)
 end
 
-mutable struct IcebergScanResponse
-    result::Cint
-    scan::IcebergScan
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    IcebergScanResponse() = new(-1, C_NULL, C_NULL, C_NULL)
-end
-
-
 mutable struct IcebergResponse
     result::Cint
     error_message::Ptr{Cchar}
     context::Ptr{Cvoid}
 
     IcebergResponse() = new(-1, C_NULL, C_NULL)
+end
+
+mutable struct IcebergArrowStreamResponse
+    result::Cint
+    stream::IcebergArrowStream
+    error_message::Ptr{Cchar}
+    context::Ptr{Cvoid}
+
+    IcebergArrowStreamResponse() = new(-1, C_NULL, C_NULL, C_NULL)
 end
 
 mutable struct IcebergBatchResponse
@@ -265,75 +266,86 @@ function iceberg_table_open(table_path::String, metadata_path::String)
 end
 
 """
-    iceberg_table_scan(table::IcebergTable) -> IcebergScan
+    new_iceberg_scan(table::IcebergTable) -> IcebergScan
 
 Create a scan for the given table.
 """
-function iceberg_table_scan(table::IcebergTable)
-    response = IcebergScanResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
-
-    preserve_task(ct)
-    result = GC.@preserve response event try
-        result = @ccall rust_lib.iceberg_table_scan(
-            table::IcebergTable,
-            response::Ref{IcebergScanResponse},
-            handle::Ptr{Cvoid}
-        )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
-    end
-
-    @throw_on_error(response, "table_scan", ScanException)
-
-    return response.scan
+function iceberg_new_scan(table::IcebergTable)
+    scan = @ccall rust_lib.iceberg_new_scan(table::IcebergTable)::Ptr{Cvoid}
+    return Ref(scan)
 end
 
 """
-    iceberg_scan_init_stream(scan::IcebergScan) -> Nothing
+    iceberg_select_columns(scan::IcebergScanRef, column_names::Vector{String}) -> Cint
 
-Initialize the stream for the scan asynchronously.
+Select specific columns for the scan.
 """
-function iceberg_scan_init_stream(scan::IcebergScan)
-    response = IcebergResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
+function iceberg_select_columns!(scan::IcebergScanRef, column_names::Vector{String})
+    # Convert String vector to Cstring array
+    c_strings = [pointer(col) for col in column_names]
+    result = @ccall rust_lib.iceberg_select_columns(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        pointer(c_strings)::Ptr{Cstring},
+        length(column_names)::Csize_t
+    )::Cint
 
-    preserve_task(ct)
-    result = GC.@preserve response event try
-        result = @ccall rust_lib.iceberg_scan_init_stream(
-            scan::IcebergScan,
-            response::Ref{IcebergResponse},
-            handle::Ptr{Cvoid}
-        )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
+    if result != 0
+        error("Failed to select columns")
     end
-
-    @throw_on_error(response, "scan_init_stream", BatchException)
-
-    # Stream is automatically stored in the scan by the Rust function
     return nothing
 end
 
 """
-    _iceberg_scan_next_batch(scan::IcebergScan) -> Ptr{ArrowBatch}
+    iceberg_scan!(scan::IcebergScanRef) -> Cint
+
+Build the provided table scan object.
+"""
+function iceberg_scan!(scan::IcebergScanRef)
+    return _iceberg_scan!(convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan)))
+end
+
+function _iceberg_scan!(scan::Ptr{Ptr{Cvoid}})
+    return @ccall rust_lib.iceberg_scan(scan::Ptr{Ptr{Cvoid}})::Cint
+end
+
+"""
+    iceberg_arrow_stream(scan::IcebergScan) -> IcebergArrowStream
+
+Initialize an Arrow stream for the scan asynchronously.
+"""
+function iceberg_arrow_stream(scan::IcebergScan)
+    response = IcebergArrowStreamResponse()
+    ct = current_task()
+    event = Base.Event()
+    handle = pointer_from_objref(event)
+
+    preserve_task(ct)
+    result = GC.@preserve response event try
+        result = @ccall rust_lib.iceberg_arrow_stream(
+            scan::IcebergScan,
+            response::Ref{IcebergArrowStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+
+        wait_or_cancel(event, response)
+
+        result
+    finally
+        unpreserve_task(ct)
+    end
+
+    @throw_on_error(response, "iceberg_arrow_stream", BatchException)
+
+    return response.stream
+end
+
+"""
+    iceberg_next_batch(scan::IcebergScan) -> Ptr{ArrowBatch}
 
 Wait for the next batch from the initialized stream asynchronously and return it directly.
 Returns C_NULL if end of stream is reached.
 """
-function iceberg_scan_next_batch(scan::IcebergScan)
+function iceberg_next_batch(stream::IcebergArrowStream)
     response = IcebergBatchResponse()
     ct = current_task()
     event = Base.Event()
@@ -341,8 +353,8 @@ function iceberg_scan_next_batch(scan::IcebergScan)
 
     preserve_task(ct)
     result = GC.@preserve response event try
-        result = @ccall rust_lib.iceberg_scan_next_batch(
-            scan::IcebergScan,
+        result = @ccall rust_lib.iceberg_next_batch(
+            stream::IcebergArrowStream,
             response::Ref{IcebergBatchResponse},
             handle::Ptr{Cvoid}
         )::Cint
@@ -354,30 +366,10 @@ function iceberg_scan_next_batch(scan::IcebergScan)
         unpreserve_task(ct)
     end
 
-    @throw_on_error(response, "scan_wait_batch", BatchException)
+    @throw_on_error(response, "iceberg_next_batch", BatchException)
 
     # Return the batch pointer directly
     return response.batch
-end
-
-"""
-    iceberg_scan_select_columns(scan::IcebergScan, column_names::Vector{String}) -> Nothing
-
-Select specific columns for the scan.
-"""
-function iceberg_scan_select_columns(scan::IcebergScan, column_names::Vector{String})
-    # Convert String vector to Cstring array
-    c_strings = [pointer(col) for col in column_names]
-    result = @ccall rust_lib.iceberg_scan_select_columns(
-        scan::IcebergScan,
-        pointer(c_strings)::Ptr{Cstring},
-        length(column_names)::Csize_t
-    )::Cint
-
-    if result != 0
-        error("Failed to select columns")
-    end
-    return nothing
 end
 
 """
@@ -390,12 +382,23 @@ function iceberg_table_free(table::IcebergTable)
 end
 
 """
-    iceberg_scan_free(scan::IcebergScan)
+    iceberg_scan_free!(scan::IcebergScanRef)
 
 Free the memory associated with a scan.
 """
-function iceberg_scan_free(scan::IcebergScan)
-    @ccall rust_lib.iceberg_scan_free(scan::IcebergScan)::Cvoid
+function iceberg_scan_free!(scan::IcebergScanRef)
+    @ccall rust_lib.iceberg_scan_free(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
+    )::Cvoid
+end
+
+"""
+    iceberg_arrow_stream_free(stream::IcebergArrowStream)
+
+Free the memory associated with an Arrow stream.
+"""
+function iceberg_arrow_stream_free(stream::IcebergArrowStream)
+    @ccall rust_lib.iceberg_arrow_stream_free(stream::IcebergArrowStream)::Cvoid
 end
 
 """
@@ -417,12 +420,13 @@ end
 # Iterator state
 mutable struct IcebergTableIteratorState
     table::IcebergTable
-    scan::IcebergScan
+    scan::Ref{Ptr{Cvoid}}
+    stream::IcebergArrowStream
     is_open::Bool
     batch_ptr::Ptr{ArrowBatch}
 
-    function IcebergTableIteratorState(table, scan, is_open)
-        state = new(table, scan, is_open, C_NULL)
+    function IcebergTableIteratorState(table, scan, stream, is_open)
+        state = new(table, scan, stream, is_open, C_NULL)
         # Ensure cleanup happens even if iterator is abandoned
         finalizer(cleanup_iceberg_state, state)
         return state
@@ -439,10 +443,12 @@ function cleanup_iceberg_state(state::IcebergTableIteratorState)
     if state.is_open
         try
             # Only free batch if we know we have one pending to prevent double-free
-            if state.batch_ptr != C_NULL
-                iceberg_arrow_batch_free(state.batch_ptr)
-            end
-            iceberg_scan_free(state.scan)
+            state.batch_ptr != C_NULL && iceberg_arrow_batch_free(state.batch_ptr)
+            @assert state.stream != C_NULL
+            @assert state.scan != C_NULL
+            @assert state.table != C_NULL
+            iceberg_arrow_stream_free(state.stream)
+            iceberg_scan_free!(state.scan)
             iceberg_table_free(state.table)
         catch e
             # Log but don't throw in finalizer
@@ -450,6 +456,9 @@ function cleanup_iceberg_state(state::IcebergTableIteratorState)
         finally
             state.is_open = false
             state.batch_ptr = C_NULL
+            state.stream = C_NULL
+            state.scan = C_NULL
+            state.table = C_NULL
         end
     end
 end
@@ -474,20 +483,25 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
             table = iceberg_table_open(iter.table_path, iter.metadata_path)
 
             # Create scan
-            scan = iceberg_table_scan(table)
+            scan = iceberg_new_scan(table)
 
             # Select columns if specified
             if !isempty(iter.columns)
-                iceberg_scan_select_columns(scan, iter.columns)
+                iceberg_select_columns!(scan, iter.columns)
+            end
+            result = iceberg_scan!(scan)
+            if result != 0
+                error("Failed to scan")
             end
 
-            iceberg_scan_init_stream(scan)
+            @show scan
 
-            state = IcebergTableIteratorState(table, scan, true)
+            stream = iceberg_arrow_stream(scan[])
+            state = IcebergTableIteratorState(table, scan, stream, true)
         end
 
         # Wait for next batch asynchronously
-        state.batch_ptr = iceberg_scan_next_batch(state.scan)
+        state.batch_ptr = iceberg_next_batch(state.stream)
 
         if state.batch_ptr == C_NULL
             # End of stream - mark for cleanup and return nothing
@@ -506,6 +520,7 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
     catch e
         # On exception, mark resources for cleanup before rethrowing
         should_cleanup_resources = true
+        @show e
         rethrow(e)
     finally
         # Always clean up batch if we have one
@@ -513,11 +528,14 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
             iceberg_arrow_batch_free(state.batch_ptr)
             state.batch_ptr = C_NULL
         end
-
         # Clean up scan and table resources only if needed (end of stream or exception)
         if should_cleanup_resources && state !== nothing && state.is_open
-            iceberg_scan_free(state.scan)
+            iceberg_arrow_stream_free(state.stream)
+            iceberg_scan_free!(state.scan)
             iceberg_table_free(state.table)
+            state.stream = C_NULL
+            state.scan = C_NULL
+            state.table = C_NULL
             # Mark as closed to prevent finalizer from double-freeing
             state.is_open = false
         end

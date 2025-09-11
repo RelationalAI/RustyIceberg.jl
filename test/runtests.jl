@@ -7,17 +7,17 @@ using Arrow
     @testset "Runtime Initialization" begin
         # Test runtime initialization - this should work
         @test_nowarn init_iceberg_runtime()
-        
+
         # Test that we can initialize multiple times safely
         @test_nowarn init_iceberg_runtime()
-        
+
         println("✅ Runtime initialization successful")
     end
 
     @testset "High-level API" begin
         # Test with the actual customer table that we know works
-        table_path = "s3://vustef-dev/tpch-sf0.1-no-part/customer"
-        metadata_path = "metadata/00001-0789fc06-57dd-45b5-b5cc-42ef1386b497.metadata.json"
+        table_path = "s3://warehouse/tpch.sf01/customer"
+        metadata_path = "metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
 
         println("Testing high-level API...")
         println("  Table path: $table_path")
@@ -42,13 +42,13 @@ using Arrow
                 df = DataFrame(arrow_table)
                 @test !isempty(df)
                 total_rows += nrow(df)
-                
+
                 # Only print details for first few batches to avoid spam
                 if batch_count <= 3
                     println("📦 Batch $batch_count: $(size(df)) rows × $(length(names(df))) columns")
                     println("   → Columns: $(names(df))")
                 end
-                
+
                 # Stop after a few batches for testing to avoid long test times
                 if batch_count >= 5
                     println("   ... stopping after $batch_count batches for testing")
@@ -79,7 +79,7 @@ using Arrow
                     for arrow_table in selected_iterator
                         selected_batch_count += 1
                         push!(selected_arrow_tables, arrow_table)
-                        
+
                         # Only process first batch for column selection test
                         if selected_batch_count >= 1
                             break
@@ -97,7 +97,6 @@ using Arrow
                     end
                 end
             end
-
         catch e
             println("❌ High-level API test failed: $e")
             println("This may be expected if S3 is not accessible or credentials are missing")
