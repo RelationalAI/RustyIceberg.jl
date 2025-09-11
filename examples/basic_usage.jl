@@ -43,7 +43,7 @@ env_loaded = load_env_file(joinpath(@__DIR__, ".env"))
 
 # Initialize Iceberg runtime
 println("Initializing Iceberg runtime...")
-init_iceberg_runtime()
+init_runtime()
 println("✅ Runtime initialized!")
 
 # Test actual table reading using the same paths as integration test
@@ -62,7 +62,7 @@ function read_table(table_path, metadata_path, benchmark::Bool=false)
     try
         # Read the table using the high-level function - now returns an iterator
         !benchmark && println("Reading Iceberg table...")
-        table_iterator = read_iceberg_table(table_path, metadata_path)
+        table_iterator = read_table(table_path, metadata_path)
 
         !benchmark && println("✅ Table iterator created successfully!")
 
@@ -109,7 +109,7 @@ function read_table(table_path, metadata_path, benchmark::Bool=false)
                 selected_columns = names(all_dataframes[1])[1:min(2, length(names(all_dataframes[1])))]
                 println("Selecting columns: $selected_columns")
 
-                selected_iterator = read_iceberg_table(table_path, metadata_path, columns=selected_columns)
+                selected_iterator = RustyIceberg.read_table(table_path, metadata_path; columns=selected_columns)
                 selected_dataframes = DataFrame[]
 
                 for arrow_table in selected_iterator

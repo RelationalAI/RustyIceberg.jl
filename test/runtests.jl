@@ -6,10 +6,10 @@ using Arrow
 @testset "RustyIceberg.jl" begin
     @testset "Runtime Initialization" begin
         # Test runtime initialization - this should work
-        @test_nowarn init_iceberg_runtime()
+        @test_nowarn init_runtime()
 
         # Test that we can initialize multiple times safely
-        @test_nowarn init_iceberg_runtime()
+        @test_nowarn init_runtime()
 
         println("✅ Runtime initialization successful")
     end
@@ -25,8 +25,8 @@ using Arrow
 
         try
             # Test creating table iterator
-            table_iterator = read_iceberg_table(table_path, metadata_path)
-            @test table_iterator isa IcebergTableIterator
+            table_iterator = read_table(table_path, metadata_path)
+            @test table_iterator isa TableIterator
             println("✅ Table iterator created successfully")
 
             # Test iteration over Arrow.Table objects
@@ -71,8 +71,8 @@ using Arrow
                 if !isempty(names(first_df))
                     # Select first two columns for testing
                     selected_columns = names(first_df)[1:min(2, length(names(first_df)))]
-                    selected_iterator = read_iceberg_table(table_path, metadata_path, columns=selected_columns)
-                    @test selected_iterator isa IcebergTableIterator
+                    selected_iterator = read_table(table_path, metadata_path, columns=selected_columns)
+                    @test selected_iterator isa TableIterator
 
                     selected_arrow_tables = Arrow.Table[]
                     selected_batch_count = 0
@@ -109,7 +109,7 @@ using Arrow
         table_path = "s3://vustef-dev/tpch-sf0.1-no-part/customer"
         metadata_path = "metadata/00001-0789fc06-57dd-45b5-b5cc-42ef1386b497.metadata.json"
 
-        table_iterator = read_iceberg_table(table_path, metadata_path)
+        table_iterator = read_table(table_path, metadata_path)
 
         # Test eltype
         @test Base.eltype(table_iterator) == Arrow.Table
@@ -123,7 +123,7 @@ using Arrow
     @testset "Error Handling" begin
         # Test with invalid paths - this should throw an exception in our async API
         try
-            invalid_iterator = read_iceberg_table("invalid/path", "invalid/metadata.json")
+            invalid_iterator = read_table("invalid/path", "invalid/metadata.json")
             # Try to iterate - this should fail
             for arrow_table in invalid_iterator
                 @test false  # Should not reach here
