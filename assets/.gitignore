@@ -1,0 +1,4 @@
+**/.minio*
+rest/*.so
+rest/*.so.lck
+rest/hsperfdata*
