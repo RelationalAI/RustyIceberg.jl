@@ -300,7 +300,7 @@ end
 
 Initialize the stream for the scan asynchronously.
 """
-function iceberg_scan_init_stream(scan::IcebergScan)
+function iceberg_scan_init_stream(scan::IcebergScan, batch_size::Csize_t)
     response = IcebergResponse()
     ct = current_task()
     event = Base.Event()
@@ -310,6 +310,7 @@ function iceberg_scan_init_stream(scan::IcebergScan)
     result = GC.@preserve response event try
         result = @ccall rust_lib.iceberg_scan_init_stream(
             scan::IcebergScan,
+            batch_size::Csize_t,
             response::Ref{IcebergResponse},
             handle::Ptr{Cvoid}
         )::Cint
@@ -412,6 +413,7 @@ struct IcebergTableIterator
     table_path::String
     metadata_path::String
     columns::Vector{String}
+    batch_size::UInt
 end
 
 # Iterator state
@@ -481,9 +483,12 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
                 iceberg_scan_select_columns(scan, iter.columns)
             end
 
-            iceberg_scan_init_stream(scan)
+            iceberg_scan_init_stream(scan, Csize_t(iter.batch_size))
 
             state = IcebergTableIteratorState(table, scan, true)
+        elseif state.batch_ptr != C_NULL
+            # Always clean up batch if we have one
+            iceberg_arrow_batch_free(state.batch_ptr)
         end
 
         # Wait for next batch asynchronously
@@ -508,14 +513,12 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
         should_cleanup_resources = true
         rethrow(e)
     finally
-        # Always clean up batch if we have one
-        if state !== nothing && state.batch_ptr != C_NULL
-            iceberg_arrow_batch_free(state.batch_ptr)
-            state.batch_ptr = C_NULL
-        end
-
         # Clean up scan and table resources only if needed (end of stream or exception)
         if should_cleanup_resources && state !== nothing && state.is_open
+            if state.batch_ptr != C_NULL
+                # Always clean up batch if we have one
+                iceberg_arrow_batch_free(state.batch_ptr)
+            end
             iceberg_scan_free(state.scan)
             iceberg_table_free(state.table)
             # Mark as closed to prevent finalizer from double-freeing
@@ -540,12 +543,15 @@ Base.IteratorSize(::Type{IcebergTableIterator}) = Base.SizeUnknown()
 
 # High-level Julia interface
 """
-    read_iceberg_table(table_path::String, metadata_path::String; columns::Vector{String}=String[]) -> IcebergTableIterator
+    read_iceberg_table(table_path::String, metadata_path::String; batch_size::UInt=0, columns::Vector{String}=String[]) -> IcebergTableIterator
 
 Read an Iceberg table and return an iterator over Arrow.Table objects.
 """
-function read_iceberg_table(table_path::String, metadata_path::String; columns::Vector{String}=String[])
-    return IcebergTableIterator(table_path, metadata_path, columns)
+function read_iceberg_table(
+    table_path::String, metadata_path::String;
+    columns::Vector{String}=String[], batch_size::UInt=UInt(0),
+)
+    return IcebergTableIterator(table_path, metadata_path, columns, batch_size)
 end
 
 end # module RustyIceberg
