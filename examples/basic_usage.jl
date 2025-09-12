@@ -89,40 +89,40 @@ function read_table(table_path, metadata_path, benchmark::Bool=false)
             end
         end
 
-        # Combine all DataFrames
-        if !benchmark
-            if !isempty(all_dataframes)
-                combined_df = reduce(vcat, all_dataframes)
-                println("\n📊 Combined DataFrame info:")
-                println("   - Total rows: $(nrow(combined_df))")
-                println("   - Total columns: $(ncol(combined_df))")
-                println("   - Total batches: $batch_count")
-            else
-                println("\n📊 No data found in table")
-            end
+        # # Combine all DataFrames
+        # if !benchmark
+        #     if !isempty(all_dataframes)
+        #         combined_df = reduce(vcat, all_dataframes)
+        #         println("\n📊 Combined DataFrame info:")
+        #         println("   - Total rows: $(nrow(combined_df))")
+        #         println("   - Total columns: $(ncol(combined_df))")
+        #         println("   - Total batches: $batch_count")
+        #     else
+        #         println("\n📊 No data found in table")
+        #     end
 
-            # Test with specific columns
-            println("\nTesting column selection...")
-            if !isempty(all_dataframes) && !isempty(names(all_dataframes[1]))
-                selected_columns = names(all_dataframes[1])[1:min(2, length(names(all_dataframes[1])))]
-                println("Selecting columns: $selected_columns")
+        #     # Test with specific columns
+        #     println("\nTesting column selection...")
+        #     if !isempty(all_dataframes) && !isempty(names(all_dataframes[1]))
+        #         selected_columns = names(all_dataframes[1])[1:min(2, length(names(all_dataframes[1])))]
+        #         println("Selecting columns: $selected_columns")
 
-                selected_iterator = read_iceberg_table(table_path, metadata_path, columns=selected_columns)
-                selected_dataframes = DataFrame[]
+        #         selected_iterator = read_iceberg_table(table_path, metadata_path, columns=selected_columns)
+        #         selected_dataframes = DataFrame[]
 
-                for arrow_table in selected_iterator
-                    df = DataFrame(arrow_table)
-                    push!(selected_dataframes, df)
-                end
+        #         for arrow_table in selected_iterator
+        #             df = DataFrame(arrow_table)
+        #             push!(selected_dataframes, df)
+        #         end
 
-                if !isempty(selected_dataframes)
-                    combined_selected = reduce(vcat, selected_dataframes)
-                    println("✅ Column selection successful!")
-                    println("   - Selected columns: $(names(combined_selected))")
-                    println("   - Rows: $(nrow(combined_selected))")
-                end
-            end
-        end
+        #         if !isempty(selected_dataframes)
+        #             combined_selected = reduce(vcat, selected_dataframes)
+        #             println("✅ Column selection successful!")
+        #             println("   - Selected columns: $(names(combined_selected))")
+        #             println("   - Rows: $(nrow(combined_selected))")
+        #         end
+        #     end
+        # end
 
     catch e
         println("❌ Error reading table: $e")
