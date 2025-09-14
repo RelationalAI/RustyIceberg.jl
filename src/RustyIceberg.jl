@@ -300,7 +300,7 @@ end
 
 Initialize the stream for the scan asynchronously.
 """
-function iceberg_scan_init_stream(scan::IcebergScan, batch_size::Csize_t)
+function iceberg_scan_init_stream(scan::IcebergScan, batch_size::Csize_t, concurrency_limit::Csize_t)
     response = IcebergResponse()
     ct = current_task()
     event = Base.Event()
@@ -311,6 +311,7 @@ function iceberg_scan_init_stream(scan::IcebergScan, batch_size::Csize_t)
         result = @ccall rust_lib.iceberg_scan_init_stream(
             scan::IcebergScan,
             batch_size::Csize_t,
+            concurrency_limit::Csize_t,
             response::Ref{IcebergResponse},
             handle::Ptr{Cvoid}
         )::Cint
@@ -414,6 +415,7 @@ struct IcebergTableIterator
     metadata_path::String
     columns::Vector{String}
     batch_size::UInt
+    concurrency_limit::UInt
 end
 
 # Iterator state
@@ -483,7 +485,7 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
                 iceberg_scan_select_columns(scan, iter.columns)
             end
 
-            iceberg_scan_init_stream(scan, Csize_t(iter.batch_size))
+            iceberg_scan_init_stream(scan, Csize_t(iter.batch_size), Csize_t(iter.concurrency_limit))
 
             state = IcebergTableIteratorState(table, scan, true)
         elseif state.batch_ptr != C_NULL
@@ -543,15 +545,15 @@ Base.IteratorSize(::Type{IcebergTableIterator}) = Base.SizeUnknown()
 
 # High-level Julia interface
 """
-    read_iceberg_table(table_path::String, metadata_path::String; batch_size::UInt=0, columns::Vector{String}=String[]) -> IcebergTableIterator
+    read_iceberg_table(table_path::String, metadata_path::String; batch_size::UInt=0, concurrency_limit::UInt=0, columns::Vector{String}=String[]) -> IcebergTableIterator
 
 Read an Iceberg table and return an iterator over Arrow.Table objects.
 """
 function read_iceberg_table(
     table_path::String, metadata_path::String;
-    columns::Vector{String}=String[], batch_size::UInt=UInt(0),
+    columns::Vector{String}=String[], batch_size::UInt=UInt(0), concurrency_limit::UInt=UInt(0),
 )
-    return IcebergTableIterator(table_path, metadata_path, columns, batch_size)
+    return IcebergTableIterator(table_path, metadata_path, columns, batch_size, concurrency_limit)
 end
 
 end # module RustyIceberg
