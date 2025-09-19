@@ -10,7 +10,6 @@ using iceberg_rust_ffi_jll
 export Table, Scan, ArrowBatch, StaticConfig, ArrowStream
 export TableIterator, TableIteratorState
 export init_runtime, read_table
-export iceberg_scan_init_stream, iceberg_scan_next_batch
 export IcebergException
 
 const Option{T} = Union{T, Nothing}
@@ -43,13 +42,13 @@ function default_panic_hook()
 end
 
 const _ICEBERG_STARTED = Atomic{Bool}(false)
+
+function iceberg_started()
+    return _ICEBERG_STARTED[]
+end
+
 const _INIT_LOCK::ReentrantLock = ReentrantLock()
 _PANIC_HOOK::Function = default_panic_hook
-
-struct InitException <: Exception
-    msg::String
-    return_code::Cint
-end
 
 Base.@ccallable function panic_hook_wrapper_iceberg()::Cint
     global _PANIC_HOOK
@@ -112,7 +111,7 @@ function init_runtime(
         fn_ptr = @cfunction(notify_result_iceberg, Cint, (Ptr{Nothing},))
         res = @ccall rust_lib.iceberg_init_runtime(config::StaticConfig, panic_fn_ptr::Ptr{Nothing}, fn_ptr::Ptr{Nothing})::Cint
         if res != 0
-            throw(InitException("Failed to initialize Iceberg runtime.", res))
+            throw(IcebergException("Failed to initialize Iceberg runtime.", res))
         end
         _ICEBERG_STARTED[] = true
     end
@@ -217,24 +216,15 @@ mutable struct BatchResponse
 end
 
 # Exception types
-abstract type IcebergException <: Exception end
-
-struct TableOpenException <: IcebergException
+struct IcebergException <: Exception
     msg::String
-end
-
-struct ScanException <: IcebergException
-    msg::String
-end
-
-struct BatchException <: IcebergException
-    msg::String
+    code::Union{Int,Nothing}
 end
 
 # High-level functions using the async API pattern from RustyObjectStore.jl
 
 """
-    table_open(table_path::String, metadata_path::String) -> IcebergTable
+    table_open(table_path::String, metadata_path::String)::IcebergTable
 
 Open an Iceberg table from the given path and metadata file.
 """
@@ -276,7 +266,7 @@ function new_scan(table::Table)
 end
 
 """
-    select_columns!(scan::ScanRef, column_names::Vector{String}) -> Cint
+    select_columns!(scan::ScanRef, column_names::Vector{String})::Cint
 
 Select specific columns for the scan.
 """
@@ -296,20 +286,70 @@ function select_columns!(scan::ScanRef, column_names::Vector{String})
 end
 
 """
+    with_data_file_concurrency_limit!(scan::ScanRef, n::UInt)::Cint
+
+Sets the data file concurrency level for the scan.
+"""
+function with_data_file_concurrency_limit!(scan::ScanRef, n::UInt)
+    return @ccall rust_lib.iceberg_scan_with_data_file_concurrency(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+end
+
+"""
+    with_manifest_entry_concurrency_limit!(scan::ScanRef, n::UInt)::Cint
+
+Sets the manifest entry concurrency level for the scan.
+"""
+function with_manifest_entry_concurrency_limit!(scan::ScanRef, n::UInt)
+    return @ccall rust_lib.iceberg_scan_with_manifest_entry_concurrency(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+end
+
+"""
+    with_batch_size!(scan::ScanRef, n::UInt)::Cint
+
+Sets the batch size for the scan.
+"""
+function with_batch_size!(scan::ScanRef, n::UInt)
+    return @ccall rust_lib.iceberg_scan_with_batch_size(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+end
+
+"""
+    build!(scan::ScanRef)::Cint
+
+Build the provided table scan object.
+"""
+function build!(scan::ScanRef)
+    return _build!(convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan)))
+end
+
+function _build!(scan::Ptr{Ptr{Cvoid}})
+    return @ccall rust_lib.iceberg_scan_build(scan::Ptr{Ptr{Cvoid}})::Cint
+end
+
+"""
     scan!(scan::ScanRef) -> Cint
 
 Build the provided table scan object.
 """
 function scan!(scan::ScanRef)
-    return _scan!(convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan)))
-end
+    result = build!(scan)
+    if result != 0
+        throw(IcebergException("Failed to build scan", results))
+    end
 
-function _scan!(scan::Ptr{Ptr{Cvoid}})
-    return @ccall rust_lib.iceberg_scan(scan::Ptr{Ptr{Cvoid}})::Cint
+    return arrow_stream(scan[])
 end
 
 """
-    arrow_stream(scan::Scan) -> IcebergArrowStream
+    arrow_stream(scan::Scan)::IcebergArrowStream
 
 Initialize an Arrow stream for the scan asynchronously.
 """
@@ -340,7 +380,7 @@ function arrow_stream(scan::Scan)
 end
 
 """
-    next_batch(scan::Scan) -> Ptr{ArrowBatch}
+    next_batch(scan::Scan)::Ptr{ArrowBatch}
 
 Wait for the next batch from the initialized stream asynchronously and return it directly.
 Returns C_NULL if end of stream is reached.
@@ -416,6 +456,9 @@ struct TableIterator
     table_path::String
     metadata_path::String
     columns::Vector{String}
+    batch_size::Union{UInt,Nothing}
+    data_file_concurrency_limit::Union{UInt,Nothing}
+    manifest_entry_concurrency_limit::Union{UInt,Nothing}
 end
 
 # Iterator state
@@ -438,7 +481,7 @@ function _cleanup_iterator_state(state::TableIteratorState)
     if state.is_open
         try
             # Only free batch if we know we have one pending to prevent double-free
-            state.batch_ptr != C_NULL && free(state.batch_ptr)
+            state.batch_ptr != C_NULL && free_batch(state.batch_ptr)
             @assert state.stream != C_NULL
             @assert state.scan != C_NULL
             @assert state.table != C_NULL
@@ -447,7 +490,8 @@ function _cleanup_iterator_state(state::TableIteratorState)
             free_table(state.table)
         catch e
             # Log but don't throw in finalizer
-            @error "Error in IcebergTableIteratorState finalizer: $e"
+            # TODO: should we keep this log or throw?
+            @error "Error in IcebergTableIteratorState finalizer: $(e)"
         finally
             state.is_open = false
             state.batch_ptr = C_NULL
@@ -470,7 +514,7 @@ function Base.iterate(iter::TableIterator, state=nothing)
     try
         if state === nothing
             # First iteration - ensure runtime is initialized
-            if !_ICEBERG_STARTED[]
+            if !iceberg_started()
                 init_runtime()
             end
 
@@ -484,13 +528,27 @@ function Base.iterate(iter::TableIterator, state=nothing)
             if !isempty(iter.columns)
                 select_columns!(scan, iter.columns)
             end
-            result = scan!(scan)
-            if result != 0
-                error("Failed to scan")
+
+            if !isnothing(iter.data_file_concurrency_limit)
+                with_data_file_concurrency_limit!(scan, iter.data_file_concurrency_limit)
             end
 
-            stream = arrow_stream(scan[])
+            if !isnothing(iter.manifest_entry_concurrency_limit)
+                with_manifest_entry_concurrency_limit!(scan, iter.manifest_entry_concurrency_limit)
+            end
+
+            if !isnothing(iter.batch_size)
+                with_batch_size!(scan, iter.batch_size)
+            end
+
+            stream = scan!(scan)
             state = TableIteratorState(table, scan, stream, true)
+        else
+            # Clean up the batch from the previous iteration.
+            if state.batch_ptr != C_NULL
+                free_batch(state.batch_ptr)
+                state.batch_ptr = C_NULL
+            end
         end
 
         # Wait for next batch asynchronously
@@ -515,13 +573,9 @@ function Base.iterate(iter::TableIterator, state=nothing)
         should_cleanup_resources = true
         rethrow(e)
     finally
-        # Always clean up batch if we have one
-        if state !== nothing && state.batch_ptr != C_NULL
-            free_batch(state.batch_ptr)
-            state.batch_ptr = C_NULL
-        end
         # Clean up scan and table resources only if needed (end of stream or exception)
         if should_cleanup_resources && state !== nothing && state.is_open
+            state.batch_ptr != C_NULL && free_batch(state.batch_ptr)
             free_stream(state.stream)
             free_scan!(state.scan)
             free_table(state.table)
@@ -554,8 +608,22 @@ Base.IteratorSize(::Type{TableIterator}) = Base.SizeUnknown()
 
 Read an Iceberg table and return an iterator over Arrow.Table objects.
 """
-function read_table(table_path::String, metadata_path::String; columns::Vector{String}=String[])
-    return TableIterator(table_path, metadata_path, columns)
+function read_table(
+    table_path::String,
+    metadata_path::String;
+    columns::Vector{String}=String[],
+    batch_size::Union{UInt, Nothing}=nothing,
+    data_file_concurrency_limit::Union{UInt, Nothing}=nothing,
+    manifest_entry_concurrency_limit::Union{UInt, Nothing}=nothing
+)
+    return TableIterator(
+        table_path,
+        metadata_path,
+        columns,
+        batch_size,
+        data_file_concurrency_limit,
+        manifest_entry_concurrency_limit
+    )
 end
 
 end # module RustyIceberg

@@ -23,91 +23,88 @@ using Arrow
         println("  Table path: $table_path")
         println("  Metadata path: $metadata_path")
 
-        try
-            # Test creating table iterator
-            table_iterator = read_table(table_path, metadata_path)
-            @test table_iterator isa TableIterator
-            println("✅ Table iterator created successfully")
+        # Test creating table iterator
+        table_iterator = read_table(table_path, metadata_path)
+        @test table_iterator isa TableIterator
+        println("✅ Table iterator created successfully")
 
-            # Test iteration over Arrow.Table objects
-            arrow_tables = Arrow.Table[]
-            batch_count = 0
-            total_rows = 0
+        # Test iteration over Arrow.Table objects
+        arrow_tables = Arrow.Table[]
+        batch_count = 0
+        total_rows = 0
 
-            for arrow_table in table_iterator
-                batch_count += 1
-                push!(arrow_tables, arrow_table)
+        for arrow_table in table_iterator
+            batch_count += 1
+            push!(arrow_tables, arrow_table)
 
-                # Convert to DataFrame for testing
-                df = DataFrame(arrow_table)
-                @test !isempty(df)
-                total_rows += nrow(df)
+            # Convert to DataFrame for testing
+            df = DataFrame(arrow_table)
+            @test !isempty(df)
+            total_rows += nrow(df)
 
-                # Only print details for first few batches to avoid spam
-                if batch_count <= 3
-                    println("📦 Batch $batch_count: $(size(df)) rows × $(length(names(df))) columns")
-                    println("   → Columns: $(names(df))")
-                end
-
-                # Stop after a few batches for testing to avoid long test times
-                if batch_count >= 5
-                    println("   ... stopping after $batch_count batches for testing")
-                    break
-                end
+            # Only print details for first few batches to avoid spam
+            if batch_count <= 3
+                println("📦 Batch $batch_count: $(size(df)) rows × $(length(names(df))) columns")
+                println("   → Columns: $(names(df))")
             end
 
-            @test batch_count > 0
-            @test total_rows > 0
-            @test !isempty(arrow_tables)
-            println("✅ High-level API iteration test successful")
-            println("   - Total batches processed: $batch_count")
-            println("   - Total rows processed: $total_rows")
-            println("   - Total Arrow tables: $(length(arrow_tables))")
+            # Stop after a few batches for testing to avoid long test times
+            if batch_count >= 5
+                println("   ... stopping after $batch_count batches for testing")
+                break
+            end
+        end
 
-            # Test reading with column selection
-            if !isempty(arrow_tables)
-                # Get column names from first batch
-                first_df = DataFrame(arrow_tables[1])
-                if !isempty(names(first_df))
-                    # Select first two columns for testing
-                    selected_columns = names(first_df)[1:min(2, length(names(first_df)))]
-                    selected_iterator = read_table(table_path, metadata_path, columns=selected_columns)
-                    @test selected_iterator isa TableIterator
+        @test batch_count > 0
+        @test total_rows > 0
+        @test !isempty(arrow_tables)
+        println("✅ High-level API iteration test successful")
+        println("   - Total batches processed: $batch_count")
+        println("   - Total rows processed: $total_rows")
+        println("   - Total Arrow tables: $(length(arrow_tables))")
 
-                    selected_arrow_tables = Arrow.Table[]
-                    selected_batch_count = 0
-                    for arrow_table in selected_iterator
-                        selected_batch_count += 1
-                        push!(selected_arrow_tables, arrow_table)
+        # Test reading with column selection
+        if !isempty(arrow_tables)
+            # Get column names from first batch
+            first_df = DataFrame(arrow_tables[1])
+            if !isempty(names(first_df))
+                # Select first two columns for testing
+                selected_columns = names(first_df)[1:min(2, length(names(first_df)))]
+                selected_iterator = read_table(
+                    table_path, metadata_path; columns=selected_columns, batch_size=UInt(8)
+                )
+                @test selected_iterator isa TableIterator
 
-                        # Only process first batch for column selection test
-                        if selected_batch_count >= 1
-                            break
-                        end
-                    end
+                selected_arrow_tables = Arrow.Table[]
+                selected_batch_count = 0
+                for arrow_table in selected_iterator
+                    @test length(arrow_table) <= 8
+                    selected_batch_count += 1
+                    push!(selected_arrow_tables, arrow_table)
 
-                    @test !isempty(selected_arrow_tables)
-
-                    # Check that selected columns match
-                    if !isempty(selected_arrow_tables)
-                        selected_df = DataFrame(selected_arrow_tables[1])
-                        @test names(selected_df) == selected_columns
-                        println("✅ Column selection test successful")
-                        println("   - Selected columns: $(names(selected_df))")
+                    # Only process first batch for column selection test
+                    if selected_batch_count >= 1
+                        break
                     end
                 end
+
+                @test !isempty(selected_arrow_tables)
+
+                # Check that selected columns match
+                if !isempty(selected_arrow_tables)
+                    selected_df = DataFrame(selected_arrow_tables[1])
+                    @test names(selected_df) == selected_columns
+                    println("✅ Column selection test successful")
+                    println("   - Selected columns: $(names(selected_df))")
+                end
             end
-        catch e
-            println("❌ High-level API test failed: $e")
-            println("This may be expected if S3 is not accessible or credentials are missing")
-            @test_broken false  # Mark as broken since this might fail due to external dependencies
         end
     end
 
     @testset "Iterator Properties" begin
         # Test iterator type properties
-        table_path = "s3://vustef-dev/tpch-sf0.1-no-part/customer"
-        metadata_path = "metadata/00001-0789fc06-57dd-45b5-b5cc-42ef1386b497.metadata.json"
+        table_path = "s3://warehouse/tpch.sf01/customer"
+        metadata_path = "metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
 
         table_iterator = read_table(table_path, metadata_path)
 

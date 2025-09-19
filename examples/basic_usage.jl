@@ -8,6 +8,7 @@ println("=== RustyIceberg.jl Basic Usage Example ===")
 println("Loading RustyIceberg package...")
 include("../src/RustyIceberg.jl")
 using .RustyIceberg
+using .RustyIceberg: init_runtime, read_table
 using DataFrames
 
 println("✅ Package loaded successfully!")
@@ -49,14 +50,11 @@ println("✅ Runtime initialized!")
 # Test actual table reading using the same paths as integration test
 println("Testing table reading with actual data...")
 
-# Use the same table and metadata paths as in integration_test.c
-# table_path = "s3://vustef-dev/tpch-sf0.1-no-part/nation"
-# metadata_path = "metadata/00001-1744d9f4-1472-4f8c-ac86-b0b7c291248e.metadata.json"
-table_path = "s3://vustef-dev/tpch-sf0.1-no-part/customer"
-metadata_path = "metadata/00001-0789fc06-57dd-45b5-b5cc-42ef1386b497.metadata.json"
+table_path = "s3://warehouse/tpch.sf01/customer"
+metadata_path = "metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
 
-println("Table path: $table_path")
-println("Metadata path: $metadata_path")
+println("Table path: $(table_path)")
+println("Metadata path: $(metadata_path)")
 
 function read_table(table_path, metadata_path, benchmark::Bool=false)
     try
