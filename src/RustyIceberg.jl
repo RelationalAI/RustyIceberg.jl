@@ -505,7 +505,7 @@ end
 """
     Base.iterate(iter::IcebergTableIterator, state=nothing)
 
-Iterate over Arrow.Table objects from the Iceberg table.
+Iterate over `Arrow.Table` objects from the Iceberg table.
 """
 function Base.iterate(iter::TableIterator, state=nothing)
     local arrow_table
