@@ -449,9 +449,20 @@ Ensures Rust resources are freed even if iterator is abandoned.
 function cleanup_iceberg_state(state::IcebergTableIteratorState)
     if state.is_open
         try
+            # Mark as closed first to prevent double cleanup
+            state.is_open = false
+            
             # Close channels to signal tasks to stop
-            close(state.batch_channel)
-            close(state.arrow_channel)
+            try
+                close(state.batch_channel)
+            catch
+                # Channel might already be closed
+            end
+            try
+                close(state.arrow_channel)
+            catch
+                # Channel might already be closed
+            end
 
             # Wait for tasks to complete
             if state.producer_task !== nothing
@@ -472,20 +483,22 @@ function cleanup_iceberg_state(state::IcebergTableIteratorState)
             end
 
             # Free any remaining batches in channel
-            while isready(state.batch_channel)
-                batch_ptr = take!(state.batch_channel)
-                if batch_ptr != C_NULL
-                    iceberg_arrow_batch_free(batch_ptr)
+            try
+                while isready(state.batch_channel)
+                    batch_ptr = take!(state.batch_channel)
+                    if batch_ptr != C_NULL
+                        iceberg_arrow_batch_free(batch_ptr)
+                    end
                 end
+            catch
+                # Channel might be closed or corrupted
             end
 
             iceberg_scan_free(state.scan)
             iceberg_table_free(state.table)
         catch e
             # Log but don't throw in finalizer
-            @error "Error in IcebergTableIteratorState finalizer: $e"
-        finally
-            state.is_open = false
+            @error "Error in IcebergTableIteratorState cleanup: $e"
         end
     end
 end
@@ -593,26 +606,54 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
             end
 
             # Set up a task to close arrow_channel when all consumers are done
-            @spawn begin
-                # Wait for producer to finish
-                wait(state.producer_task)
-                # Wait for all consumers to finish
-                for task in state.consumer_tasks
-                    wait(task)
+            cleanup_task = @spawn begin
+                try
+                    # Wait for producer to finish
+                    wait(state.producer_task)
+                    # Wait for all consumers to finish
+                    for task in state.consumer_tasks
+                        wait(task)
+                    end
+                    # Close arrow channel to signal end
+                    close(state.arrow_channel)
+                catch e
+                    @error "Cleanup task failed: $e"
+                    # Ensure channel gets closed even if tasks fail
+                    try
+                        close(state.arrow_channel)
+                    catch
+                        # Channel might already be closed
+                    end
                 end
-                # Close arrow channel to signal end
-                close(state.arrow_channel)
             end
         end
 
         # Get next Arrow table from channel
-        if isopen(state.arrow_channel) || isready(state.arrow_channel)
-            arrow_table = take!(state.arrow_channel)
-            return arrow_table, state
-        else
-            # End of stream - cleanup
-            cleanup_iceberg_state(state)
-            return nothing
+        try
+            if isopen(state.arrow_channel) || isready(state.arrow_channel)
+                arrow_table = take!(state.arrow_channel)
+                return arrow_table, state
+            else
+                # End of stream - cleanup only if still open
+                if state.is_open
+                    cleanup_iceberg_state(state)
+                end
+                return nothing
+            end
+        catch e
+            if isa(e, InvalidStateException) && occursin("Channel is closed", string(e))
+                # Channel was closed, this means end of stream
+                if state.is_open
+                    cleanup_iceberg_state(state)
+                end
+                return nothing
+            else
+                # Some other error, cleanup and rethrow
+                if state.is_open
+                    cleanup_iceberg_state(state)
+                end
+                rethrow(e)
+            end
         end
 
     catch e
