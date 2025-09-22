@@ -427,8 +427,8 @@ mutable struct IcebergTableIteratorState
     is_open::Bool
     batch_channel::Channel{Ptr{ArrowBatch}}
     arrow_channel::Channel{Arrow.Table}
-    producer_task::Union{Task, Nothing}
-    consumer_tasks::Vector{Task}
+    consumer_task::Union{Task, Nothing}
+    producer_tasks::Vector{Task}
 
     function IcebergTableIteratorState(table, scan, is_open, channel_size, arrow_tasks)
         batch_channel = Channel{Ptr{ArrowBatch}}(channel_size)
@@ -465,16 +465,16 @@ function cleanup_iceberg_state(state::IcebergTableIteratorState)
             end
 
             # Wait for tasks to complete
-            if state.producer_task !== nothing
+            if state.consumer_task !== nothing
                 # Don't wait indefinitely in finalizer
                 try
-                    wait(state.producer_task)
+                    wait(state.consumer_task)
                 catch
                     # Task may have failed, continue cleanup
                 end
             end
 
-            for task in state.consumer_tasks
+            for task in state.producer_tasks
                 try
                     wait(task)
                 catch
@@ -507,13 +507,14 @@ end
     producer_task_fn(scan, batch_channel)
 
 Producer task that fetches batches from Rust and puts them in the batch channel.
+Multiple producer tasks can run concurrently, each calling iceberg_scan_next_batch.
 """
 function producer_task_fn(scan, batch_channel)
     try
         while true
             batch_ptr = iceberg_scan_next_batch(scan)
             if batch_ptr == C_NULL
-                # End of stream
+                # End of stream for this producer
                 break
             end
             put!(batch_channel, batch_ptr)
@@ -521,15 +522,15 @@ function producer_task_fn(scan, batch_channel)
     catch e
         @error "Producer task failed: $e"
         rethrow(e)
-    finally
-        close(batch_channel)
     end
+    # Note: Don't close channel here since multiple producers are running
 end
 
 """
     consumer_task_fn(batch_channel, arrow_channel)
 
-Consumer task that converts batches to Arrow.Table objects.
+Single consumer task that converts batches to Arrow.Table objects.
+Takes batches from multiple producers and converts them to Arrow tables.
 """
 function consumer_task_fn(batch_channel, arrow_channel)
     try
@@ -596,33 +597,36 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
             # Create state with channels
             state = IcebergTableIteratorState(table, scan, true, iter.channel_size, iter.arrow_tasks)
 
-            # Start producer task
-            state.producer_task = @spawn producer_task_fn(scan, state.batch_channel)
-
-            # Start consumer tasks
+            # Start N producer tasks
             for i in 1:iter.arrow_tasks
-                consumer_task = @spawn consumer_task_fn(state.batch_channel, state.arrow_channel)
-                push!(state.consumer_tasks, consumer_task)
+                producer_task = @spawn producer_task_fn(scan, state.batch_channel)
+                push!(state.producer_tasks, producer_task)
             end
 
-            # Set up a task to close arrow_channel when all consumers are done
+            # Start single consumer task
+            state.consumer_task = @spawn consumer_task_fn(state.batch_channel, state.arrow_channel)
+
+            # Set up a task to close channels when all tasks are done
             cleanup_task = @spawn begin
                 try
-                    # Wait for producer to finish
-                    wait(state.producer_task)
-                    # Wait for all consumers to finish
-                    for task in state.consumer_tasks
+                    # Wait for all producers to finish
+                    for task in state.producer_tasks
                         wait(task)
                     end
+                    # Close batch channel to signal end to consumer
+                    close(state.batch_channel)
+                    # Wait for consumer to finish
+                    wait(state.consumer_task)
                     # Close arrow channel to signal end
                     close(state.arrow_channel)
                 catch e
                     @error "Cleanup task failed: $e"
-                    # Ensure channel gets closed even if tasks fail
+                    # Ensure channels get closed even if tasks fail
                     try
+                        close(state.batch_channel)
                         close(state.arrow_channel)
                     catch
-                        # Channel might already be closed
+                        # Channels might already be closed
                     end
                 end
             end
@@ -688,8 +692,8 @@ Read an Iceberg table and return an iterator over Arrow.Table objects.
 Parameters:
 - `batch_size`: Size of batches to fetch from Rust (0 = default)
 - `concurrency_limit`: Data file concurrency limit (0 = default)
-- `channel_size`: Size of the channel buffer between producer and consumers (M)
-- `arrow_tasks`: Number of Arrow conversion tasks to spawn (N)
+- `channel_size`: Size of the channel buffer between producers and consumer (M)  
+- `arrow_tasks`: Number of producer tasks to spawn (N) - each calls iceberg_scan_next_batch
 - `columns`: Specific columns to select
 """
 function read_iceberg_table(
