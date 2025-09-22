@@ -60,7 +60,12 @@ function read_table(table_path, metadata_path, benchmark::Bool=false)
     try
         # Read the table using the high-level function - now returns an iterator
         !benchmark && println("Reading Iceberg table...")
-        table_iterator = read_iceberg_table(table_path, metadata_path; batch_size=UInt(2048), concurrency_limit=UInt(256))
+        table_iterator = read_iceberg_table(
+            table_path, metadata_path;
+            batch_size=UInt(2048),
+            concurrency_limit=UInt(256),
+            channel_size=UInt(1024),
+            arrow_tasks=UInt(8))
 
         !benchmark && println("✅ Table iterator created successfully!")
 
