@@ -451,7 +451,7 @@ function cleanup_iceberg_state(state::IcebergTableIteratorState)
         try
             # Mark as closed first to prevent double cleanup
             state.is_open = false
-            
+
             # Close channels to signal tasks to stop
             try
                 close(state.batch_channel)
@@ -599,6 +599,7 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
 
             # Start N producer tasks
             for i in 1:iter.arrow_tasks
+                # TODO @vustef: This doesn't improve perf, because they lock the stream with a mutex on the Rust side.
                 producer_task = @spawn producer_task_fn(scan, state.batch_channel)
                 push!(state.producer_tasks, producer_task)
             end
@@ -692,7 +693,7 @@ Read an Iceberg table and return an iterator over Arrow.Table objects.
 Parameters:
 - `batch_size`: Size of batches to fetch from Rust (0 = default)
 - `concurrency_limit`: Data file concurrency limit (0 = default)
-- `channel_size`: Size of the channel buffer between producers and consumer (M)  
+- `channel_size`: Size of the channel buffer between producers and consumer (M)
 - `arrow_tasks`: Number of producer tasks to spawn (N) - each calls iceberg_scan_next_batch
 - `columns`: Specific columns to select
 """
