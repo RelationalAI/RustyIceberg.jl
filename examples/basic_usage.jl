@@ -65,7 +65,8 @@ function read_table(table_path, metadata_path, benchmark::Bool=false)
             batch_size=UInt(2048),
             concurrency_limit=UInt(256),
             channel_size=UInt(1024),
-            arrow_tasks=UInt(8))
+            arrow_tasks=UInt(8),
+        )
 
         !benchmark && println("✅ Table iterator created successfully!")
 
