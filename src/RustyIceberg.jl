@@ -599,7 +599,8 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
 
             # Start N producer tasks
             for i in 1:iter.arrow_tasks
-                # TODO @vustef: This doesn't improve perf, because they lock the stream with a mutex on the Rust side.
+                # TODO: We should implement this on the Rust side, and avoid the lock there,
+                # but map, spawning tasks, and using try_buffer_unordered
                 producer_task = @spawn producer_task_fn(scan, state.batch_channel)
                 push!(state.producer_tasks, producer_task)
             end
