@@ -425,9 +425,10 @@ mutable struct IcebergTableIteratorState
     table::IcebergTable
     scan::IcebergScan
     is_open::Bool
+    current_batch_ptr::Ptr{ArrowBatch}
 
     function IcebergTableIteratorState(table, scan, is_open)
-        state = new(table, scan, is_open)
+        state = new(table, scan, is_open, C_NULL)
         # Ensure cleanup happens even if iterator is abandoned
         finalizer(cleanup_iceberg_state, state)
         return state
@@ -445,6 +446,12 @@ function cleanup_iceberg_state(state::IcebergTableIteratorState)
         try
             # Mark as closed first to prevent double cleanup
             state.is_open = false
+
+            # Free any remaining batch
+            if state.current_batch_ptr != C_NULL
+                iceberg_arrow_batch_free(state.current_batch_ptr)
+                state.current_batch_ptr = C_NULL
+            end
 
             # Free Rust resources
             iceberg_scan_free(state.scan)
@@ -464,7 +471,6 @@ Iterate over Arrow.Table objects from the Iceberg table.
 Parallelization is handled internally by the Rust stream using try_buffer_unordered.
 """
 function Base.iterate(iter::IcebergTableIterator, state=nothing)
-    batch_ptr = C_NULL
     try
         if state === nothing
             # First iteration - ensure runtime is initialized
@@ -487,8 +493,12 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
 
             # Create simple state
             state = IcebergTableIteratorState(table, scan, true)
-        elseif batch_ptr != C_NULL
-            iceberg_arrow_batch_free(batch_ptr)
+        else
+            # Free previous batch if it exists
+            if state.current_batch_ptr != C_NULL
+                iceberg_arrow_batch_free(state.current_batch_ptr)
+                state.current_batch_ptr = C_NULL
+            end
         end
 
         # Get next batch directly from Rust stream
@@ -502,6 +512,9 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
             return nothing
         end
 
+        # Store the batch pointer in state for cleanup on next iteration
+        state.current_batch_ptr = batch_ptr
+
         # Convert ArrowBatch pointer to ArrowBatch struct and then to Arrow.Table
         try
             batch = unsafe_load(batch_ptr)
@@ -510,6 +523,7 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
         catch e
             # Make sure to free the batch even if conversion fails
             iceberg_arrow_batch_free(batch_ptr)
+            state.current_batch_ptr = C_NULL
             @error "Arrow conversion failed: $e"
             rethrow(e)
         end
