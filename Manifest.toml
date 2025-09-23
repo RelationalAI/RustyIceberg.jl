@@ -353,11 +353,11 @@ version = "1.5.7+1"
 
 [[deps.iceberg_rust_ffi_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "OpenSSL_jll"]
-git-tree-sha1 = "029f0c9c5f7ecf4afe14ed4a358167171f77477f"
-repo-rev = "6bae2c0514abf7a2e33d013f4dc5341ac1aec72f"
+git-tree-sha1 = "efeba9cbe565a5951c55f4501ad24eb9ddf7f522"
+repo-rev = "e5802a0dd7e5d2db11759aa25db619ecc0f2cd23"
 repo-url = "https://github.com/RelationalAI/iceberg_rust_ffi_jll.jl"
 uuid = "6bd5c94f-693c-53e3-983d-a09fad412f22"
-version = "0.2.10+0"
+version = "0.2.11+0"
 
 [[deps.libblastrampoline_jll]]
 deps = ["Artifacts", "Libdl"]
