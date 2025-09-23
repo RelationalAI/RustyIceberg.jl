@@ -300,7 +300,7 @@ end
 
 Initialize the stream for the scan asynchronously.
 """
-function iceberg_scan_init_stream(scan::IcebergScan, batch_size::Csize_t, concurrency_limit::Csize_t)
+function iceberg_scan_init_stream(scan::IcebergScan, batch_size::Csize_t, concurrency_limit::Csize_t, serialization_concurrency_limit::Csize_t)
     response = IcebergResponse()
     ct = current_task()
     event = Base.Event()
@@ -312,6 +312,7 @@ function iceberg_scan_init_stream(scan::IcebergScan, batch_size::Csize_t, concur
             scan::IcebergScan,
             batch_size::Csize_t,
             concurrency_limit::Csize_t,
+            serialization_concurrency_limit::Csize_t,
             response::Ref{IcebergResponse},
             handle::Ptr{Cvoid}
         )::Cint
@@ -416,24 +417,17 @@ struct IcebergTableIterator
     columns::Vector{String}
     batch_size::UInt
     concurrency_limit::UInt
-    channel_size::UInt
-    arrow_tasks::UInt
+    serialization_concurrency_limit::UInt
 end
 
-# Iterator state with producer-consumer pattern
+# Iterator state - simplified without channels/tasks
 mutable struct IcebergTableIteratorState
     table::IcebergTable
     scan::IcebergScan
     is_open::Bool
-    batch_channel::Channel{Ptr{ArrowBatch}}
-    arrow_channel::Channel{Arrow.Table}
-    consumer_task::Union{Task, Nothing}
-    producer_tasks::Vector{Task}
 
-    function IcebergTableIteratorState(table, scan, is_open, channel_size, arrow_tasks)
-        batch_channel = Channel{Ptr{ArrowBatch}}(channel_size)
-        arrow_channel = Channel{Arrow.Table}(channel_size)
-        state = new(table, scan, is_open, batch_channel, arrow_channel, nothing, Task[])
+    function IcebergTableIteratorState(table, scan, is_open)
+        state = new(table, scan, is_open)
         # Ensure cleanup happens even if iterator is abandoned
         finalizer(cleanup_iceberg_state, state)
         return state
@@ -452,48 +446,7 @@ function cleanup_iceberg_state(state::IcebergTableIteratorState)
             # Mark as closed first to prevent double cleanup
             state.is_open = false
 
-            # Close channels to signal tasks to stop
-            try
-                close(state.batch_channel)
-            catch
-                # Channel might already be closed
-            end
-            try
-                close(state.arrow_channel)
-            catch
-                # Channel might already be closed
-            end
-
-            # Wait for tasks to complete
-            if state.consumer_task !== nothing
-                # Don't wait indefinitely in finalizer
-                try
-                    wait(state.consumer_task)
-                catch
-                    # Task may have failed, continue cleanup
-                end
-            end
-
-            for task in state.producer_tasks
-                try
-                    wait(task)
-                catch
-                    # Task may have failed, continue cleanup
-                end
-            end
-
-            # Free any remaining batches in channel
-            try
-                while isready(state.batch_channel)
-                    batch_ptr = take!(state.batch_channel)
-                    if batch_ptr != C_NULL
-                        iceberg_arrow_batch_free(batch_ptr)
-                    end
-                end
-            catch
-                # Channel might be closed or corrupted
-            end
-
+            # Free Rust resources
             iceberg_scan_free(state.scan)
             iceberg_table_free(state.table)
         catch e
@@ -503,77 +456,15 @@ function cleanup_iceberg_state(state::IcebergTableIteratorState)
     end
 end
 
-"""
-    producer_task_fn(scan, batch_channel)
-
-Producer task that fetches batches from Rust and puts them in the batch channel.
-Multiple producer tasks can run concurrently, each calling iceberg_scan_next_batch.
-"""
-function producer_task_fn(scan, batch_channel)
-    try
-        while true
-            batch_ptr = iceberg_scan_next_batch(scan)
-            if batch_ptr == C_NULL
-                # End of stream for this producer
-                break
-            end
-            put!(batch_channel, batch_ptr)
-        end
-    catch e
-        @error "Producer task failed: $e"
-        rethrow(e)
-    end
-    # Note: Don't close channel here since multiple producers are running
-end
-
-"""
-    consumer_task_fn(batch_channel, arrow_channel)
-
-Single consumer task that converts batches to Arrow.Table objects.
-Takes batches from multiple producers and converts them to Arrow tables.
-"""
-function consumer_task_fn(batch_channel, arrow_channel)
-    try
-        for batch_ptr in batch_channel
-            if batch_ptr == C_NULL
-                continue
-            end
-
-            try
-                # Convert ArrowBatch pointer to ArrowBatch struct
-                batch = unsafe_load(batch_ptr)
-
-                # Read Arrow data
-                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
-
-                # Free the batch immediately after conversion
-                iceberg_arrow_batch_free(batch_ptr)
-
-                # Put the Arrow table in the output channel
-                put!(arrow_channel, arrow_table)
-            catch e
-                # Make sure to free the batch even if conversion fails
-                iceberg_arrow_batch_free(batch_ptr)
-                @error "Arrow conversion failed: $e"
-                rethrow(e)
-            end
-        end
-    catch e
-        @error "Consumer task failed: $e"
-        rethrow(e)
-    finally
-        # Signal completion by closing arrow channel when all consumers are done
-        # Note: This should only be done by the last consumer, but for simplicity
-        # we'll handle this in the main iterator logic
-    end
-end
 
 """
     Base.iterate(iter::IcebergTableIterator, state=nothing)
 
-Iterate over Arrow.Table objects from the Iceberg table using producer-consumer pattern.
+Iterate over Arrow.Table objects from the Iceberg table.
+Parallelization is handled internally by the Rust stream using try_buffer_unordered.
 """
 function Base.iterate(iter::IcebergTableIterator, state=nothing)
+    batch_ptr = C_NULL
     try
         if state === nothing
             # First iteration - ensure runtime is initialized
@@ -592,74 +483,35 @@ function Base.iterate(iter::IcebergTableIterator, state=nothing)
                 iceberg_scan_select_columns(scan, iter.columns)
             end
 
-            iceberg_scan_init_stream(scan, Csize_t(iter.batch_size), Csize_t(iter.concurrency_limit))
+            iceberg_scan_init_stream(scan, Csize_t(iter.batch_size), Csize_t(iter.concurrency_limit), Csize_t(iter.serialization_concurrency_limit))
 
-            # Create state with channels
-            state = IcebergTableIteratorState(table, scan, true, iter.channel_size, iter.arrow_tasks)
-
-            # Start N producer tasks
-            for i in 1:iter.arrow_tasks
-                # TODO: We should implement this on the Rust side, and avoid the lock there,
-                # but map, spawning tasks, and using try_buffer_unordered
-                producer_task = @spawn producer_task_fn(scan, state.batch_channel)
-                push!(state.producer_tasks, producer_task)
-            end
-
-            # Start single consumer task
-            state.consumer_task = @spawn consumer_task_fn(state.batch_channel, state.arrow_channel)
-
-            # Set up a task to close channels when all tasks are done
-            cleanup_task = @spawn begin
-                try
-                    # Wait for all producers to finish
-                    for task in state.producer_tasks
-                        wait(task)
-                    end
-                    # Close batch channel to signal end to consumer
-                    close(state.batch_channel)
-                    # Wait for consumer to finish
-                    wait(state.consumer_task)
-                    # Close arrow channel to signal end
-                    close(state.arrow_channel)
-                catch e
-                    @error "Cleanup task failed: $e"
-                    # Ensure channels get closed even if tasks fail
-                    try
-                        close(state.batch_channel)
-                        close(state.arrow_channel)
-                    catch
-                        # Channels might already be closed
-                    end
-                end
-            end
+            # Create simple state
+            state = IcebergTableIteratorState(table, scan, true)
+        elseif batch_ptr != C_NULL
+            iceberg_arrow_batch_free(batch_ptr)
         end
 
-        # Get next Arrow table from channel
+        # Get next batch directly from Rust stream
+        batch_ptr = iceberg_scan_next_batch(state.scan)
+
+        if batch_ptr == C_NULL
+            # End of stream - cleanup
+            if state.is_open
+                cleanup_iceberg_state(state)
+            end
+            return nothing
+        end
+
+        # Convert ArrowBatch pointer to ArrowBatch struct and then to Arrow.Table
         try
-            if isopen(state.arrow_channel) || isready(state.arrow_channel)
-                arrow_table = take!(state.arrow_channel)
-                return arrow_table, state
-            else
-                # End of stream - cleanup only if still open
-                if state.is_open
-                    cleanup_iceberg_state(state)
-                end
-                return nothing
-            end
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            return arrow_table, state
         catch e
-            if isa(e, InvalidStateException) && occursin("Channel is closed", string(e))
-                # Channel was closed, this means end of stream
-                if state.is_open
-                    cleanup_iceberg_state(state)
-                end
-                return nothing
-            else
-                # Some other error, cleanup and rethrow
-                if state.is_open
-                    cleanup_iceberg_state(state)
-                end
-                rethrow(e)
-            end
+            # Make sure to free the batch even if conversion fails
+            iceberg_arrow_batch_free(batch_ptr)
+            @error "Arrow conversion failed: $e"
+            rethrow(e)
         end
 
     catch e
@@ -687,15 +539,15 @@ Base.IteratorSize(::Type{IcebergTableIterator}) = Base.SizeUnknown()
 
 # High-level Julia interface
 """
-    read_iceberg_table(table_path::String, metadata_path::String; batch_size::UInt=0, concurrency_limit::UInt=0, channel_size::UInt=1, arrow_tasks::UInt=1, columns::Vector{String}=String[]) -> IcebergTableIterator
+    read_iceberg_table(table_path::String, metadata_path::String; batch_size::UInt=0, concurrency_limit::UInt=0, serialization_concurrency_limit::UInt=0, columns::Vector{String}=String[]) -> IcebergTableIterator
 
 Read an Iceberg table and return an iterator over Arrow.Table objects.
+Parallelization is handled internally by the Rust stream using try_buffer_unordered.
 
 Parameters:
 - `batch_size`: Size of batches to fetch from Rust (0 = default)
 - `concurrency_limit`: Data file concurrency limit (0 = default)
-- `channel_size`: Size of the channel buffer between producers and consumer (M)
-- `arrow_tasks`: Number of producer tasks to spawn (N) - each calls iceberg_scan_next_batch
+- `serialization_concurrency_limit`: Number of concurrent serialization tasks (0 = use available parallelism)
 - `columns`: Specific columns to select
 """
 function read_iceberg_table(
@@ -703,10 +555,9 @@ function read_iceberg_table(
     columns::Vector{String}=String[],
     batch_size::UInt=UInt(0),
     concurrency_limit::UInt=UInt(0),
-    channel_size::UInt=UInt(1),
-    arrow_tasks::UInt=UInt(1)
+    serialization_concurrency_limit::UInt=UInt(0)
 )
-    return IcebergTableIterator(table_path, metadata_path, columns, batch_size, concurrency_limit, channel_size, arrow_tasks)
+    return IcebergTableIterator(table_path, metadata_path, columns, batch_size, concurrency_limit, serialization_concurrency_limit)
 end
 
 end # module RustyIceberg
