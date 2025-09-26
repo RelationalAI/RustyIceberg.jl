@@ -16,15 +16,13 @@ using Arrow
 
     @testset "High-level API" begin
         # Test with the actual customer table that we know works
-        table_path = "s3://warehouse/tpch.sf01/customer"
-        metadata_path = "metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
+        snapshot_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
 
         println("Testing high-level API...")
-        println("  Table path: $table_path")
-        println("  Metadata path: $metadata_path")
+        println("  Snapshot path: $snapshot_path")
 
         # Test creating table iterator
-        table_iterator = read_table(table_path, metadata_path)
+        table_iterator = read_table(snapshot_path)
         @test table_iterator isa TableIterator
         println("✅ Table iterator created successfully")
 
@@ -71,7 +69,7 @@ using Arrow
                 # Select first two columns for testing
                 selected_columns = names(first_df)[1:min(2, length(names(first_df)))]
                 selected_iterator = read_table(
-                    table_path, metadata_path; columns=selected_columns, batch_size=UInt(8)
+                    snapshot_path; columns=selected_columns, batch_size=UInt(8)
                 )
                 @test selected_iterator isa TableIterator
 
@@ -103,10 +101,9 @@ using Arrow
 
     @testset "Iterator Properties" begin
         # Test iterator type properties
-        table_path = "s3://warehouse/tpch.sf01/customer"
-        metadata_path = "metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
+        snapshot_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
 
-        table_iterator = read_table(table_path, metadata_path)
+        table_iterator = read_table(snapshot_path)
 
         # Test eltype
         @test Base.eltype(table_iterator) == Arrow.Table

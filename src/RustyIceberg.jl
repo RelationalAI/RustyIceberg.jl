@@ -224,11 +224,11 @@ end
 # High-level functions using the async API pattern from RustyObjectStore.jl
 
 """
-    table_open(table_path::String, metadata_path::String)::IcebergTable
+    table_open(snapshot_path::String)::IcebergTable
 
-Open an Iceberg table from the given path and metadata file.
+Open an Iceberg table from the given snapshot path.
 """
-function table_open(table_path::String, metadata_path::String)
+function table_open(snapshot_path::String)
     response = TableResponse()
     ct = current_task()
     event = Base.Event()
@@ -237,8 +237,7 @@ function table_open(table_path::String, metadata_path::String)
     preserve_task(ct)
     result = GC.@preserve response event try
         result = @ccall rust_lib.iceberg_table_open(
-            table_path::Cstring,
-            metadata_path::Cstring,
+            snapshot_path::Cstring,
             response::Ref{TableResponse},
             handle::Ptr{Cvoid}
         )::Cint
@@ -453,8 +452,7 @@ end
 
 # Iterator type for Arrow batches
 struct TableIterator
-    table_path::String
-    metadata_path::String
+    snapshot_path::String
     columns::Vector{String}
     batch_size::Union{UInt,Nothing}
     data_file_concurrency_limit::Union{UInt,Nothing}
@@ -519,7 +517,7 @@ function Base.iterate(iter::TableIterator, state=nothing)
             end
 
             # Open table
-            table = table_open(iter.table_path, iter.metadata_path)
+            table = table_open(iter.snapshot_path)
 
             # Create scan
             scan = new_scan(table)
@@ -609,16 +607,14 @@ Base.IteratorSize(::Type{TableIterator}) = Base.SizeUnknown()
 Read an Iceberg table and return an iterator over Arrow.Table objects.
 """
 function read_table(
-    table_path::String,
-    metadata_path::String;
+    snapshot_path::String;
     columns::Vector{String}=String[],
     batch_size::Union{UInt, Nothing}=nothing,
     data_file_concurrency_limit::Union{UInt, Nothing}=nothing,
     manifest_entry_concurrency_limit::Union{UInt, Nothing}=nothing
 )
     return TableIterator(
-        table_path,
-        metadata_path,
+        snapshot_path,
         columns,
         batch_size,
         data_file_concurrency_limit,

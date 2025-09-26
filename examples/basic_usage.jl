@@ -50,8 +50,7 @@ println("✅ Runtime initialized!")
 # Test actual table reading using the same paths as integration test
 println("Testing table reading with actual data...")
 
-table_path = "s3://warehouse/tpch.sf01/customer"
-metadata_path = "metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
+snapshot_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
 
 println("Table path: $(table_path)")
 println("Metadata path: $(metadata_path)")
@@ -60,7 +59,7 @@ function read_table(table_path, metadata_path, benchmark::Bool=false)
     try
         # Read the table using the high-level function - now returns an iterator
         !benchmark && println("Reading Iceberg table...")
-        table_iterator = read_table(table_path, metadata_path)
+        table_iterator = read_table(snapshot_path)
 
         !benchmark && println("✅ Table iterator created successfully!")
 
@@ -107,7 +106,7 @@ function read_table(table_path, metadata_path, benchmark::Bool=false)
                 selected_columns = names(all_dataframes[1])[1:min(2, length(names(all_dataframes[1])))]
                 println("Selecting columns: $selected_columns")
 
-                selected_iterator = RustyIceberg.read_table(table_path, metadata_path; columns=selected_columns)
+                selected_iterator = RustyIceberg.read_table(snapshot_path; columns=selected_columns)
                 selected_dataframes = DataFrame[]
 
                 for arrow_table in selected_iterator
@@ -140,18 +139,18 @@ function read_table(table_path, metadata_path, benchmark::Bool=false)
     end
 end
 
-read_table(table_path, metadata_path)
+read_table(snapshot_path)
 
 # 139.667 ms (11774 allocations: 3.61 MiB)
-@btime read_table(table_path, metadata_path, true)
+@btime read_table(snapshot_path, true)
 
 println("\n✅ Basic usage example completed!")
 println("\nTo use with your own data:")
 println("  # Get iterator over Arrow.Table objects:")
-println("  iterator = read_iceberg_table(\"your-table-path\", \"your-metadata-path\")")
+println("  iterator = read_iceberg_table(\"your-snapshot-path\")")
 println("  for arrow_table in iterator")
 println("      df = DataFrame(arrow_table)  # Convert to DataFrame if needed")
 println("      # Process your data...")
 println("  end")
 println("\n  # Or with column selection:")
-println("  iterator = read_iceberg_table(\"your-table-path\", \"your-metadata-path\", columns=[\"col1\", \"col2\"])")
+println("  iterator = read_iceberg_table(\"your-snapshot-path\", columns=[\"col1\", \"col2\"])")
