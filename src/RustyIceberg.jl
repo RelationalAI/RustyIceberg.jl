@@ -50,7 +50,7 @@ end
 const _INIT_LOCK::ReentrantLock = ReentrantLock()
 _PANIC_HOOK::Function = default_panic_hook
 
-Base.@ccallable function panic_hook_wrapper_iceberg()::Cint
+Base.@ccallable function iceberg_panic_hook_wrapper()::Cint
     global _PANIC_HOOK
     _PANIC_HOOK()
     return 0
@@ -107,7 +107,7 @@ function init_runtime(
             return nothing
         end
         _PANIC_HOOK = on_rust_panic
-        panic_fn_ptr = @cfunction(panic_hook_wrapper_iceberg, Cint, ())
+        panic_fn_ptr = @cfunction(iceberg_panic_hook_wrapper, Cint, ())
         fn_ptr = @cfunction(notify_result_iceberg, Cint, (Ptr{Nothing},))
         res = @ccall rust_lib.iceberg_init_runtime(config::StaticConfig, panic_fn_ptr::Ptr{Nothing}, fn_ptr::Ptr{Nothing})::Cint
         if res != 0
@@ -510,37 +510,46 @@ function Base.iterate(iter::TableIterator, state=nothing)
     local should_cleanup_resources = false
 
     try
-        if state === nothing
+        if isnothing(state)
             # First iteration - ensure runtime is initialized
             if !iceberg_started()
                 init_runtime()
             end
 
-            # Open table
-            table = table_open(iter.snapshot_path)
+            table, scan, stream = nothing, nothing, nothing
 
-            # Create scan
-            scan = new_scan(table)
+            try
+                # Open table
+                table = table_open(iter.snapshot_path)
 
-            # Select columns if specified
-            if !isempty(iter.columns)
-                select_columns!(scan, iter.columns)
+                # Create scan
+                scan = new_scan(table)
+
+                # Select columns if specified
+                if !isempty(iter.columns)
+                    select_columns!(scan, iter.columns)
+                end
+
+                if !isnothing(iter.data_file_concurrency_limit)
+                    with_data_file_concurrency_limit!(scan, iter.data_file_concurrency_limit)
+                end
+
+                if !isnothing(iter.manifest_entry_concurrency_limit)
+                    with_manifest_entry_concurrency_limit!(scan, iter.manifest_entry_concurrency_limit)
+                end
+
+                if !isnothing(iter.batch_size)
+                    with_batch_size!(scan, iter.batch_size)
+                end
+
+                stream = scan!(scan)
+                state = TableIteratorState(table, scan, stream, true)
+            catch e
+                !isnothing(stream) && free_stream(stream)
+                !isnothing(scan) && free_scan!(scan)
+                !isnothing(table) && free_table(table)
+                rethrow(e)
             end
-
-            if !isnothing(iter.data_file_concurrency_limit)
-                with_data_file_concurrency_limit!(scan, iter.data_file_concurrency_limit)
-            end
-
-            if !isnothing(iter.manifest_entry_concurrency_limit)
-                with_manifest_entry_concurrency_limit!(scan, iter.manifest_entry_concurrency_limit)
-            end
-
-            if !isnothing(iter.batch_size)
-                with_batch_size!(scan, iter.batch_size)
-            end
-
-            stream = scan!(scan)
-            state = TableIteratorState(table, scan, stream, true)
         else
             # Clean up the batch from the previous iteration.
             if state.batch_ptr != C_NULL
