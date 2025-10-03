@@ -470,12 +470,12 @@ mutable struct TableIteratorState
     function TableIteratorState(table, scan, stream, is_open)
         state = new(table, scan, stream, is_open, C_NULL)
         # Ensure cleanup happens even if iterator is abandoned
-        finalizer(_cleanup_iterator_state, state)
+        finalizer(_cleanup_iterator_state!, state)
         return state
     end
 end
 
-function _cleanup_iterator_state(state::TableIteratorState)
+function _cleanup_iterator_state!(state::TableIteratorState)
     if state.is_open
         try
             # Only free batch if we know we have one pending to prevent double-free
