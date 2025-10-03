@@ -52,10 +52,9 @@ println("Testing table reading with actual data...")
 
 snapshot_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
 
-println("Table path: $(table_path)")
-println("Metadata path: $(metadata_path)")
+println("Snapshot path: $(snapshot_path)")
 
-function read_table(table_path, metadata_path, benchmark::Bool=false)
+function _read_table(snapshot_path, benchmark::Bool=false)
     try
         # Read the table using the high-level function - now returns an iterator
         !benchmark && println("Reading Iceberg table...")
@@ -139,10 +138,9 @@ function read_table(table_path, metadata_path, benchmark::Bool=false)
     end
 end
 
-read_table(snapshot_path)
+_read_table(snapshot_path)
 
-# 139.667 ms (11774 allocations: 3.61 MiB)
-@btime read_table(snapshot_path, true)
+@btime _read_table(snapshot_path, true)
 
 println("\n✅ Basic usage example completed!")
 println("\nTo use with your own data:")
