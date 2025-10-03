@@ -133,8 +133,6 @@ function _read_table(snapshot_path, benchmark::Bool=false)
             println("   # Then edit .env with your actual credentials and paths")
         end
         rethrow(e)
-    finally
-        GC.gc(true)
     end
 end
 
