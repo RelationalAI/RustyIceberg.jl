@@ -134,7 +134,7 @@ end
     nations_snapshot_path = "s3://warehouse/tpch.sf01/nation/metadata/00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
 
     println("Testing reading nations table...")
-    nations_iterator = read_table(nations_snapshot_path)
+    nations_iterator = read_table(nations_snapshot_path; batch_size=UInt(5))
     @test nations_iterator isa TableIterator
 
     rows = Tuple[]

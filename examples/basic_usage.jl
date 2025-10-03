@@ -65,24 +65,22 @@ function _read_table(snapshot_path, benchmark::Bool=false)
         all_dataframes = DataFrame[]
         batch_count = 0
 
-        for arrow_table in table_iterator
+        iter = !benchmark ? Iterators.take(table_iterator, 2) : table_iterator
+        for arrow_table in iter
             batch_count += 1
-            df = DataFrame(arrow_table)
+            benchmark && continue
+            df = copy(DataFrame((arrow_table)))
             push!(all_dataframes, df)
 
-            if !benchmark
-                println("📦 Batch $batch_count:")
-                println("   - Rows: $(nrow(df))")
-                println("   - Columns: $(ncol(df))")
-                println("   - Column names: $(names(df))")
-            end
+            println("📦 Batch $batch_count:")
+            println("   - Rows: $(nrow(df))")
+            println("   - Columns: $(ncol(df))")
+            println("   - Column names: $(names(df))")
 
             # Show first few rows of first batch
-            if !benchmark
-                if batch_count == 1 && nrow(df) > 0
-                        println("📋 First few rows:")
-                        println(first(df, 30))
-                end
+            if batch_count == 1 && nrow(df) > 0
+                    println("📋 First few rows:")
+                    println(first(df, 10))
             end
         end
 
@@ -107,8 +105,8 @@ function _read_table(snapshot_path, benchmark::Bool=false)
                 selected_iterator = RustyIceberg.read_table(snapshot_path; columns=selected_columns)
                 selected_dataframes = DataFrame[]
 
-                for arrow_table in selected_iterator
-                    df = DataFrame(arrow_table)
+                for arrow_table in Iterators.take(selected_iterator, 2)
+                    df = copy(DataFrame(arrow_table))
                     push!(selected_dataframes, df)
                 end
 
@@ -135,11 +133,14 @@ function _read_table(snapshot_path, benchmark::Bool=false)
             println("   # Then edit .env with your actual credentials and paths")
         end
         rethrow(e)
+    finally
+        GC.gc(true)
     end
 end
 
 _read_table(snapshot_path)
 
+# Locally using minio: 51.170 ms (9308 allocations: 504.50 KiB)
 @btime _read_table(snapshot_path, true)
 
 println("\n✅ Basic usage example completed!")
