@@ -6,9 +6,8 @@ println("=== RustyIceberg.jl Basic Usage Example ===")
 
 # Load the package
 println("Loading RustyIceberg package...")
-include("../src/RustyIceberg.jl")
-using .RustyIceberg
-using .RustyIceberg: init_runtime, read_table
+using RustyIceberg
+using RustyIceberg: init_runtime, read_table
 using DataFrames
 
 println("✅ Package loaded successfully!")
@@ -94,7 +93,7 @@ function _read_table(snapshot_path, benchmark::Bool=false)
                 println("\n📊 Combined DataFrame info:")
                 println("   - Total rows: $(nrow(combined_df))")
                 println("   - Total columns: $(ncol(combined_df))")
-                println("   - Total batches: $batch_count")
+                println("   - Total batches: $(batch_count)")
             else
                 println("\n📊 No data found in table")
             end
@@ -103,7 +102,7 @@ function _read_table(snapshot_path, benchmark::Bool=false)
             println("\nTesting column selection...")
             if !isempty(all_dataframes) && !isempty(names(all_dataframes[1]))
                 selected_columns = names(all_dataframes[1])[1:min(2, length(names(all_dataframes[1])))]
-                println("Selecting columns: $selected_columns")
+                println("Selecting columns: $(selected_columns)")
 
                 selected_iterator = RustyIceberg.read_table(snapshot_path; columns=selected_columns)
                 selected_dataframes = DataFrame[]
@@ -135,6 +134,7 @@ function _read_table(snapshot_path, benchmark::Bool=false)
             println("   cp env.example .env")
             println("   # Then edit .env with your actual credentials and paths")
         end
+        rethrow(e)
     end
 end
 
