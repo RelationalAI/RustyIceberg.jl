@@ -221,6 +221,10 @@ struct IcebergException <: Exception
     code::Union{Int,Nothing}
 end
 
+function IcebergException(msg::String)
+    return IcebergException(msg, nothing)
+end
+
 # High-level functions using the async API pattern from RustyObjectStore.jl
 
 """
@@ -249,7 +253,7 @@ function table_open(snapshot_path::String)
         unpreserve_task(ct)
     end
 
-    @throw_on_error(response, "table_open", TableOpenException)
+    @throw_on_error(response, "table_open", IcebergException)
 
     return response.table
 end
@@ -341,7 +345,7 @@ Build the provided table scan object.
 function scan!(scan::ScanRef)
     result = build!(scan)
     if result != 0
-        throw(IcebergException("Failed to build scan", results))
+        throw(IcebergException("Failed to build scan", result))
     end
 
     return arrow_stream(scan[])
@@ -373,7 +377,7 @@ function arrow_stream(scan::Scan)
         unpreserve_task(ct)
     end
 
-    @throw_on_error(response, "iceberg_arrow_stream", BatchException)
+    @throw_on_error(response, "iceberg_arrow_stream", IcebergException)
 
     return response.stream
 end
@@ -405,7 +409,7 @@ function next_batch(stream::ArrowStream)
         unpreserve_task(ct)
     end
 
-    @throw_on_error(response, "iceberg_next_batch", BatchException)
+    @throw_on_error(response, "iceberg_next_batch", IcebergException)
 
     # Return the batch pointer directly
     return response.batch
