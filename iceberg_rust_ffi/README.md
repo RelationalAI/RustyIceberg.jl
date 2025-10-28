@@ -1,6 +1,6 @@
 # Iceberg Rust FFI
 
-This directory contains Rust FFI code that is needed for Julia bindings.
+This directory contains the Rust FFI code that is needed for Julia bindings.
 
 ## Quick Start
 
