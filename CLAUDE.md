@@ -4,20 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Common Development Commands
 
-### Building
+### Building (in the iceberg_rust_ffi folder)
 - `cargo build` - Build the Rust FFI library (debug)
-- `cargo build --release --no-default-features` - Build the Rust FFI library (production)
-- `make build-lib` - Build the Rust library and generate C header using cbindgen
+- `cargo build --release` - Build the Rust FFI library (production)
 
-### Testing
-- `./run_integration_test.sh` - Recommended way to run the full integration test (builds everything and runs test with colored output) locally (requires containers).
-- `make all` - Build everything and run integration test (requires containers)
+### Testing (in the root folder)
 - `make run-containers` - Start Docker containers for S3 testing
-- `make test` - Run the integration test (requires build and containers)
+- `make test` - Run the Julia tests (requires build and containers)
 - `make stop-containers` - Stop Docker containers
-- `cargo test` - Run Rust unit tests
 
-### Code Quality
+### Code Quality (in the iceberg_rust_ffi folder)
 - `cargo fmt` - Format Rust code
 - `cargo clippy` - Run Rust linter
 - `cargo check` - Quick check for Rust compilation errors
@@ -43,11 +39,6 @@ This project provides a **Foreign Function Interface (FFI)** for Apache Iceberg,
 - **C99 Compatible**: Ensures compatibility with standard C compilers
 - **Response Structures**: Async operations return response structures with context for cancellation
 
-#### Integration Test (`tests/integration_test.c`)
-- **Dynamic Loading**: Uses `dlopen`/`dlsym` to load the Rust library at runtime
-- **Async API Testing**: Tests the new async API with response structures and callbacks
-- **S3 Integration**: Connects to S3 (or MinIO) to test real object storage operations
-
 ### FFI Design Patterns
 
 #### Async Operations with Callbacks
@@ -68,7 +59,7 @@ The FFI uses an async callback pattern where:
 
 ### S3 Configuration
 
-The integration test expects AWS S3 credentials through environment variables:
+The test expects AWS S3 credentials through environment variables:
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `AWS_REGION` or `AWS_DEFAULT_REGION`
@@ -81,14 +72,11 @@ Use the `.env` file or export variables directly. The test is designed to fail w
 #### Cargo Features
 - Default features: `["julia"]`
 - `julia` feature: Enables Julia thread adoption and GC integration
-- Integration tests use `--no-default-features` to avoid Julia dependencies
 
 ### RustyIceberg.jl
 
 Whenever making API changes in the iceberg_rust_ffi, the corresponding changes should be made in its parent folder. The parent folder is home for Julia package, which provides Julia bindings on top of the FFI.
-Once changes are made there, they should be tested by:
-1. Doing `cargo build` (with default features) for the iceberg_rust_ffi.
-2. Invoking `ICEBERG_RUST_LIB=<path_to_iceberg_rust_ffi_folder>/target/debug julia --project=. examples/basic_usage.jl` in the RustyIceberg.jl directory.
+Once changes are made there, they should be tested by running `make test`. If error is related to missing minio/s3 or Iceberg REST catalog server etc., suggest to user to run `make run-containers`.
 
 ## Development Notes
 
@@ -98,10 +86,7 @@ Once changes are made there, they should be tested by:
 - Error messages are allocated strings that must be freed with `iceberg_destroy_cstring`
 
 ### Testing Changes
-Run the integration test after making changes to verify the FFI still works:
-```bash
-./run_integration_test.sh
-```
+Run `make test` after making changes to verify the FFI still works.
 
 ### Object Store Integration
 This crate depends on `object_store_ffi` for async runtime management and callback handling. The integration provides:
