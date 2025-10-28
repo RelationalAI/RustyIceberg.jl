@@ -1,9 +1,7 @@
-name: CI
+name: Release
 on:
-  push:
-    branches: [main]
-    tags: ["*"]
-  pull_request:
+  release:
+    types: [created]
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
@@ -11,7 +9,7 @@ jobs:
   test-julia-1-10:
     uses: ./.github/workflows/test.yml
     with:
-      build_rust: true
+      build_rust: false
       julia_version: '1.10'
       os: ubuntu-latest
       arch: x64
@@ -19,7 +17,7 @@ jobs:
   test-julia-1-11:
     uses: ./.github/workflows/test.yml
     with:
-      build_rust: true
+      build_rust: false
       julia_version: '1.11'
       os: ubuntu-latest
       arch: x64
