@@ -1,8 +1,6 @@
-# Iceberg C API Build and Test Tools
+# Iceberg Rust FFI
 
-[![CI](https://github.com/RelationalAI/iceberg_rust_ffi/actions/workflows/CI.yml/badge.svg)](https://github.com/RelationalAI/iceberg_rust_ffi/actions/workflows/CI.yml)
-
-This directory contains tools for building and testing the Iceberg C API integration test.
+This directory contains Rust FFI code that is needed for Julia bindings.
 
 ## Quick Start
 
