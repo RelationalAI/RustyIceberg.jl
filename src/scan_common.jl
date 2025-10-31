@@ -1,0 +1,64 @@
+# Common scan utilities shared between full and incremental scans
+
+# Opaque pointer types for scans and streams
+const ArrowStream = Ptr{Cvoid}
+
+mutable struct BatchResponse
+    result::Cint
+    batch::Ptr{ArrowBatch}
+    error_message::Ptr{Cchar}
+    context::Ptr{Cvoid}
+
+    BatchResponse() = new(-1, C_NULL, C_NULL, C_NULL)
+end
+
+"""
+    next_batch(stream::ArrowStream)::Ptr{ArrowBatch}
+
+Wait for the next batch from the initialized stream asynchronously and return it directly.
+Returns C_NULL if end of stream is reached.
+"""
+function next_batch(stream::ArrowStream)
+    response = BatchResponse()
+    ct = current_task()
+    event = Base.Event()
+    handle = pointer_from_objref(event)
+
+    preserve_task(ct)
+    result = GC.@preserve response event try
+        result = @ccall rust_lib.iceberg_next_batch(
+            stream::ArrowStream,
+            response::Ref{BatchResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+
+        wait_or_cancel(event, response)
+
+        result
+    finally
+        unpreserve_task(ct)
+    end
+
+    @throw_on_error(response, "iceberg_next_batch", IcebergException)
+
+    # Return the batch pointer directly
+    return response.batch
+end
+
+"""
+    free_batch(batch::Ptr{ArrowBatch})
+
+Free the memory associated with an Arrow batch.
+"""
+function free_batch(batch::Ptr{ArrowBatch})
+    @ccall rust_lib.iceberg_arrow_batch_free(batch::Ptr{ArrowBatch})::Cvoid
+end
+
+"""
+    free_stream(stream::ArrowStream)
+
+Free the memory associated with an Arrow stream.
+"""
+function free_stream(stream::ArrowStream)
+    @ccall rust_lib.iceberg_arrow_stream_free(stream::ArrowStream)::Cvoid
+end
