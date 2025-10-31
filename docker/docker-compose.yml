@@ -65,6 +65,7 @@ services:
       iceberg_net:
     volumes:
       - ../assets/tpch:/input
+      - ../assets/incremental:/input_incremental
     environment:
       - AWS_ACCESS_KEY_ID=root
       - AWS_SECRET_ACCESS_KEY=password
@@ -75,5 +76,6 @@ services:
       /usr/bin/mc rm -r --force minio/warehouse
       /usr/bin/mc mb minio/warehouse;
       /usr/bin/mc cp -r /input/tpch.sf01/ minio/warehouse/tpch.sf01/;
+      /usr/bin/mc cp -r /input_incremental/ minio/warehouse/incremental/;
       tail -f /dev/null
       "

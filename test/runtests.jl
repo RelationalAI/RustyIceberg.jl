@@ -179,6 +179,149 @@ end
     println("✅ Nations table read and verified successfully")
 end
 
+@testset "Incremental Scan API" begin
+    println("Testing incremental scan API...")
+
+    # Use the test table created specifically for incremental scan testing
+    test_snapshot_path = "s3://warehouse/incremental/test1/metadata/00003-359e8bb8-1e5d-46d2-bcde-fdaeaa41114f.metadata.json"
+
+    # Open the table
+    table = RustyIceberg.table_open(test_snapshot_path)
+    @test table != C_NULL
+    println("✅ Table opened successfully")
+
+    # Use real snapshot IDs from the test table
+    from_snapshot_id = Int64(6540713100348352610)
+    to_snapshot_id = Int64(6832180054960511692)
+
+    # The table is created with these transactions. Above snapshot IDs are for the 2nd and the 4th txn below:
+    #=
+        CREATE TABLE demo.incremental.test1 using iceberg
+        TBLPROPERTIES ('write.delete.mode' = 'merge-on-read')
+        AS (SELECT n FROM range(1, 11) r(n));
+
+        INSERT INTO incremental.test1
+        select n from range(101, 200) r(n);
+
+        INSERT INTO incremental.test1
+        select n from range(201, 300) r(n);
+
+        delete from incremental.test1 where n = 150 or n = 250;
+    =#
+
+    @testset "Incremental Scan E2E Test" begin
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        @test scan isa RustyIceberg.IncrementalScan
+        @test scan.ptr != C_NULL
+        println("✅ Incremental scan created (from snapshot $from_snapshot_id to $to_snapshot_id)")
+
+        # Test builder methods
+        @test_nowarn RustyIceberg.with_batch_size!(scan, UInt(50))
+        println("✅ Batch size configured")
+
+        # Build and get streams
+        inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
+        @test inserts_stream != C_NULL
+        @test deletes_stream != C_NULL
+        println("✅ Streams obtained successfully")
+
+        # Read and validate from both streams
+        inserts_values = Int64[]
+        deletes_values = Int64[]
+        inserts_batches = 0
+        deletes_batches = 0
+
+        # Read from inserts stream
+        while true
+            batch_ptr = RustyIceberg.next_batch(inserts_stream)
+            if batch_ptr == C_NULL
+                break
+            end
+            inserts_batches += 1
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            @test arrow_table isa Arrow.Table
+
+            # Convert to DataFrame and collect values from column "n"
+            df = DataFrame(arrow_table)
+            @test "n" in names(df)
+            append!(inserts_values, df.n)
+
+            RustyIceberg.free_batch(batch_ptr)
+        end
+
+        # Read from deletes stream
+        # Position deletes return metadata (pos, file_path) not actual row data
+        deletes_values = Tuple{String, Int64}[]
+        while true
+            batch_ptr = RustyIceberg.next_batch(deletes_stream)
+            if batch_ptr == C_NULL
+                break
+            end
+            deletes_batches += 1
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            @test arrow_table isa Arrow.Table
+
+            # Convert to DataFrame and extract position delete metadata
+            df = DataFrame(arrow_table)
+            for row in eachrow(df)
+                push!(deletes_values, (row.file_path, row.pos))
+            end
+
+            RustyIceberg.free_batch(batch_ptr)
+        end
+
+        println("✅ Successfully read from incremental scan streams")
+        println("   - Inserts batches: $inserts_batches")
+        println("   - Deletes batches: $deletes_batches")
+        println("   - Inserts rows: $(length(inserts_values))")
+        println("   - Delete records: $(length(deletes_values))")
+
+        # Validate deletes: should have 1 delete record for row 150
+        # (row 250 was added and deleted in the same incremental range, so it's filtered out)
+        @test length(deletes_values) == 1
+
+        # Sort by position for consistent ordering
+        sort!(deletes_values, by = x -> x[2])
+
+        # Extract positions and file paths
+        positions = [x[2] for x in deletes_values]
+        file_paths = [x[1] for x in deletes_values]
+
+        # Validate the position values and file paths
+        @test positions == [10]  # position for row 150 in corresponding data file
+        @test all(endswith.(file_paths, "s3://warehouse/incremental/test1/data/00002-40-a951d037-3439-447f-8ab4-7f8c40f42daa-0-00001.parquet"))
+
+        # Validate inserts: should have n from 201 to 299 inclusive, except 250
+        # That's 98 rows: 201-249 (49) + 251-299 (49)
+        @test length(inserts_values) == 98
+
+        # Sort for easier validation
+        sort!(inserts_values)
+
+        # Check range and missing 250
+        @test minimum(inserts_values) == 201
+        @test maximum(inserts_values) == 299
+        @test 250 ∉ inserts_values
+
+        # Verify exact expected set
+        expected_inserts = vcat(201:249, 251:299)
+        @test inserts_values == expected_inserts
+        println("✅ Inserts validated: n from 201-299 (excluding 250), total $(length(inserts_values)) rows")
+
+        # Clean up
+        RustyIceberg.free_stream(inserts_stream)
+        RustyIceberg.free_stream(deletes_stream)
+        RustyIceberg.free_incremental_scan!(scan)
+        println("✅ Resources cleaned up")
+    end
+
+    # Clean up table
+    RustyIceberg.free_table(table)
+    println("✅ Incremental scan test completed successfully!")
+end
+
 end # End of testset
 
 println("\n🎉 All tests completed!")
