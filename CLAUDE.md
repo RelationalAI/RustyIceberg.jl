@@ -34,11 +34,6 @@ This project provides a **Foreign Function Interface (FFI)** for Apache Iceberg,
 - **Julia Integration**: Conditional compilation features for Julia interop (`julia` feature flag)
 - **Memory Management**: Safe FFI patterns with proper cleanup functions
 
-#### C header (`include/iceberg_rust_ffi.h`)
-- **Manual Generation**: C header is not generated right now. Whenever you make a change in the Rust library, examine whether the header should be updated.
-- **C99 Compatible**: Ensures compatibility with standard C compilers
-- **Response Structures**: Async operations return response structures with context for cancellation
-
 ### FFI Design Patterns
 
 #### Async Operations with Callbacks

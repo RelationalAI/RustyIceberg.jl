@@ -7,7 +7,6 @@ use anyhow::Result;
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
 use iceberg::io::FileIOBuilder;
-use iceberg::scan::{TableScan, TableScanBuilder};
 use iceberg::table::{StaticTable, Table};
 use iceberg::TableIdent;
 
@@ -17,6 +16,15 @@ use object_store_ffi::{
     with_cancellation, CResult, Context, NotifyGuard, PanicCallback, RawResponse, ResponseGuard,
     ResultCallback, RESULT_CB, RT,
 };
+
+// Modules for scan functionality
+mod scan_common;
+mod full;
+mod incremental;
+
+// Re-export scan types and functions
+pub use full::IcebergScan;
+pub use incremental::{IcebergIncrementalScan, IcebergUnzippedStreamsResponse};
 
 // We use `jl_adopt_thread` to ensure Rust can call into Julia when notifying
 // the Base.Event that is waiting for the Rust result.
@@ -80,13 +88,6 @@ pub struct IcebergTable {
     pub table: Table,
 }
 
-#[repr(C)]
-pub struct IcebergScan {
-    pub builder: Option<TableScanBuilder<'static>>,
-    pub scan: Option<TableScan>,
-}
-
-unsafe impl Send for IcebergScan {}
 
 // Stream wrapper for FFI - using async mutex to avoid blocking calls
 #[repr(C)]
@@ -320,175 +321,6 @@ export_runtime_op!(
     snapshot_path: *const c_char
 );
 
-#[no_mangle]
-pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan {
-    if table.is_null() {
-        return ptr::null_mut();
-    }
-    let table_ref = unsafe { &*table };
-    let scan_builder = table_ref.table.scan();
-    return Box::into_raw(Box::new(IcebergScan {
-        builder: Some(scan_builder),
-        scan: None,
-    }));
-}
-
-#[no_mangle]
-pub extern "C" fn iceberg_select_columns(
-    scan: &mut *mut IcebergScan,
-    column_names: *const *const c_char,
-    num_columns: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() || column_names.is_null() {
-        return CResult::Error;
-    }
-
-    let mut columns = Vec::new();
-
-    for i in 0..num_columns {
-        let col_ptr = unsafe { *column_names.add(i) };
-        if col_ptr.is_null() {
-            return CResult::Error;
-        }
-
-        let col_str = unsafe {
-            match CStr::from_ptr(col_ptr).to_str() {
-                Ok(s) => s,
-                Err(_) => return CResult::Error,
-            }
-        };
-        columns.push(col_str.to_string());
-    }
-
-    let scan_ref = unsafe { Box::from_raw(*scan) };
-
-    if scan_ref.builder.is_none() {
-        return CResult::Error;
-    }
-    *scan = Box::into_raw(Box::new(IcebergScan {
-        builder: scan_ref.builder.map(|b| b.select(columns)),
-        scan: scan_ref.scan,
-    }));
-
-    return CResult::Ok;
-}
-
-#[no_mangle]
-pub extern "C" fn iceberg_scan_with_data_file_concurrency_limit(
-    scan: &mut *mut IcebergScan,
-    n: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    let scan_ref = unsafe { Box::from_raw(*scan) };
-
-    if scan_ref.builder.is_none() {
-        return CResult::Error;
-    }
-
-    *scan = Box::into_raw(Box::new(IcebergScan {
-        builder: scan_ref
-            .builder
-            .map(|b| b.with_data_file_concurrency_limit(n)),
-        scan: scan_ref.scan,
-    }));
-
-    return CResult::Ok;
-}
-
-#[no_mangle]
-pub extern "C" fn iceberg_scan_with_manifest_entry_concurrency_limit(
-    scan: &mut *mut IcebergScan,
-    n: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    let scan_ref = unsafe { Box::from_raw(*scan) };
-
-    if scan_ref.builder.is_none() {
-        return CResult::Error;
-    }
-
-    *scan = Box::into_raw(Box::new(IcebergScan {
-        builder: scan_ref
-            .builder
-            .map(|b| b.with_manifest_entry_concurrency_limit(n)),
-        scan: scan_ref.scan,
-    }));
-
-    return CResult::Ok;
-}
-
-#[no_mangle]
-pub extern "C" fn iceberg_scan_with_batch_size(scan: &mut *mut IcebergScan, n: usize) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    let scan_ref = unsafe { Box::from_raw(*scan) };
-
-    if scan_ref.builder.is_none() {
-        return CResult::Error;
-    }
-
-    assert!(scan_ref.scan.is_none());
-
-    *scan = Box::into_raw(Box::new(IcebergScan {
-        builder: scan_ref.builder.map(|b| b.with_batch_size(Some(n))),
-        scan: None,
-    }));
-
-    return CResult::Ok;
-}
-
-#[no_mangle]
-pub extern "C" fn iceberg_scan_build(scan: &mut *mut IcebergScan) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    let scan_ref = unsafe { Box::from_raw(*scan) };
-    if scan_ref.builder.is_none() {
-        return CResult::Error;
-    }
-    let builder = scan_ref.builder.unwrap();
-
-    match builder.build() {
-        Ok(table_scan) => {
-            *scan = Box::into_raw(Box::new(IcebergScan {
-                builder: None,
-                scan: Some(table_scan),
-            }));
-            CResult::Ok
-        }
-        Err(_) => CResult::Error,
-    }
-}
-
-// Async function to initialize stream from a table scan without getting first batch
-export_runtime_op!(
-    iceberg_arrow_stream,
-    IcebergArrowStreamResponse,
-    || {
-        if scan.is_null() {
-            return Err(anyhow::anyhow!("Null scan pointer provided"));
-        }
-        let scan_ref = unsafe { &(*scan).scan };
-        if scan_ref.is_none() {
-            return Err(anyhow::anyhow!("Scan not initialized"));
-        }
-
-        return Ok(scan_ref.as_ref().unwrap());
-    },
-    scan_ref,
-    async {
-        let stream = scan_ref.to_arrow().await?;
-        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
-            stream: AsyncMutex::new(stream),
-        })
-    },
-    scan: *mut IcebergScan
-);
 
 // Async function to get next batch from existing stream
 export_runtime_op!(
@@ -526,16 +358,6 @@ pub extern "C" fn iceberg_table_free(table: *mut IcebergTable) {
     if !table.is_null() {
         unsafe {
             let _ = Box::from_raw(table);
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn iceberg_scan_free(scan: &mut *mut IcebergScan) {
-    if !scan.is_null() {
-        unsafe {
-            let _ = Box::from_raw(*scan);
-            *scan = ptr::null_mut();
         }
     }
 }
