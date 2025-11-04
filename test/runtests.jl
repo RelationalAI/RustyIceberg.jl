@@ -235,17 +235,17 @@ end
 
     # The table is created with these transactions. Above snapshot IDs are for the 2nd and the 4th txn below:
     #=
-        CREATE TABLE demo.incremental.test1 using iceberg
+        CREATE TABLE demo.incremental.test1 USING iceberg
         TBLPROPERTIES ('write.delete.mode' = 'merge-on-read')
         AS (SELECT n FROM range(1, 11) r(n));
 
         INSERT INTO incremental.test1
-        select n from range(101, 200) r(n);
+        SELECT n FROM range(101, 200) r(n);
 
         INSERT INTO incremental.test1
-        select n from range(201, 300) r(n);
+        SELECT n FROM range(201, 300) r(n);
 
-        delete from incremental.test1 where n = 150 or n = 250;
+        DELETE FROM incremental.test1 WHERE n = 150 OR n = 250;
     =#
 
     @testset "Incremental Scan E2E Test" begin
