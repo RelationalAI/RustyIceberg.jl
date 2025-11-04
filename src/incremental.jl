@@ -1,11 +1,43 @@
 # Incremental table scan implementation
 
-# Wrapper type for incremental scan to enable multiple dispatch
+"""
+    IncrementalScan
+
+A mutable wrapper around a pointer to an incremental table scan.
+
+Incremental scans read changes between two snapshots in an Iceberg table.
+Use `new_incremental_scan` to create a scan between two snapshot IDs, configure it
+with builder methods, and call `scan!` to obtain separate Arrow streams for inserts and deletes.
+
+# Example
+```julia
+table = table_open("s3://path/to/table/metadata.json")
+scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+with_batch_size!(scan, UInt(1024))
+inserts_stream, deletes_stream = scan!(scan)
+# ... process batches from both streams
+free_stream(inserts_stream)
+free_stream(deletes_stream)
+free_incremental_scan!(scan)
+free_table(table)
+```
+"""
 mutable struct IncrementalScan
     ptr::Ptr{Cvoid}
 end
 
-# Response structure for unzipped streams
+"""
+    UnzippedStreamsResponse
+
+Response structure for asynchronous incremental scan operations that return separate streams.
+
+# Fields
+- `result::Cint`: Result code from the operation (0 for success)
+- `inserts_stream::ArrowStream`: Stream containing inserted rows
+- `deletes_stream::ArrowStream`: Stream containing position delete metadata
+- `error_message::Ptr{Cchar}`: Error message string if operation failed
+- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
+"""
 mutable struct UnzippedStreamsResponse
     result::Cint
     inserts_stream::ArrowStream

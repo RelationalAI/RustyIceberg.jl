@@ -1,6 +1,27 @@
 # Regular (full) table scan implementation
 
-# Wrapper type for regular scan to enable multiple dispatch
+"""
+    Scan
+
+A mutable wrapper around a pointer to a regular (full) table scan.
+
+This type enables multiple dispatch and safe memory management for Iceberg table scans.
+Use `new_scan` to create a scan, configure it with builder methods, and call `scan!`
+to build the scan and obtain an Arrow stream.
+
+# Example
+```julia
+table = table_open("s3://path/to/table/metadata.json")
+scan = new_scan(table)
+select_columns!(scan, ["col1", "col2"])
+with_batch_size!(scan, UInt(1024))
+stream = scan!(scan)
+# ... process batches from stream
+free_stream(stream)
+free_scan!(scan)
+free_table(table)
+```
+"""
 mutable struct Scan
     ptr::Ptr{Cvoid}
 end
@@ -102,7 +123,17 @@ function build!(scan::Scan)
     return nothing
 end
 
-# Response structure for async arrow stream operations
+"""
+    ArrowStreamResponse
+
+Response structure for asynchronous Arrow stream initialization operations.
+
+# Fields
+- `result::Cint`: Result code from the operation (0 for success)
+- `stream::ArrowStream`: The initialized Arrow stream
+- `error_message::Ptr{Cchar}`: Error message string if operation failed
+- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
+"""
 mutable struct ArrowStreamResponse
     result::Cint
     stream::ArrowStream

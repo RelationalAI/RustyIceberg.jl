@@ -1,8 +1,24 @@
 # Common scan utilities shared between full and incremental scans
 
-# Opaque pointer types for scans and streams
+"""
+    ArrowStream
+
+Opaque pointer type representing an Arrow stream from the Rust FFI layer.
+This stream can be used to fetch batches of Arrow data asynchronously.
+"""
 const ArrowStream = Ptr{Cvoid}
 
+"""
+    BatchResponse
+
+Response structure for asynchronous batch operations.
+
+# Fields
+- `result::Cint`: Result code from the operation (0 for success)
+- `batch::Ptr{ArrowBatch}`: Pointer to the Arrow batch data
+- `error_message::Ptr{Cchar}`: Error message string if operation failed
+- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
+"""
 mutable struct BatchResponse
     result::Cint
     batch::Ptr{ArrowBatch}
