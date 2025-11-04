@@ -358,9 +358,309 @@ end
         end
     end
 
+    @testset "Incremental Scan with Column Selection" begin
+        scan2 = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+
+        # Select only the "n" column
+        RustyIceberg.select_columns!(scan2, ["n"])
+
+        inserts_stream2, deletes_stream2 = RustyIceberg.scan!(scan2)
+
+        try
+            # Read one batch from inserts to verify column selection
+            batch_ptr = RustyIceberg.next_batch(inserts_stream2)
+            if batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+
+                # Should only have the "n" column
+                @test names(df) == ["n"]
+                @test !isempty(df)
+
+                RustyIceberg.free_batch(batch_ptr)
+                println("✅ Incremental scan column selection test successful")
+            end
+        finally
+            RustyIceberg.free_stream(inserts_stream2)
+            RustyIceberg.free_stream(deletes_stream2)
+            RustyIceberg.free_incremental_scan!(scan2)
+        end
+    end
+
     # Clean up table
     RustyIceberg.free_table(table)
     println("✅ Incremental scan test completed successfully!")
+end
+
+@testset "Builder API Tests" begin
+    println("Testing builder API methods...")
+
+    customer_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
+    incremental_path = "s3://warehouse/incremental/test1/metadata/00003-359e8bb8-1e5d-46d2-bcde-fdaeaa41114f.metadata.json"
+    from_snapshot_id = Int64(6540713100348352610)
+    to_snapshot_id = Int64(6832180054960511692)
+
+    @testset "select_columns! - Full Scan" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Select specific columns
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            df = DataFrame(arrow_table)
+
+            @test names(df) == ["c_custkey", "c_name"]
+            @test !isempty(df)
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ select_columns! test passed for full scan")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "select_columns! - Incremental Scan" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+
+        RustyIceberg.select_columns!(scan, ["n"])
+        inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(inserts_stream)
+            if batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+
+                @test names(df) == ["n"]
+                @test !isempty(df)
+
+                RustyIceberg.free_batch(batch_ptr)
+            end
+            println("✅ select_columns! test passed for incremental scan")
+        finally
+            RustyIceberg.free_stream(inserts_stream)
+            RustyIceberg.free_stream(deletes_stream)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "with_batch_size! - Full Scan" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Set small batch size
+        RustyIceberg.with_batch_size!(scan, UInt(10))
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+
+            # Batch size should be respected (at most 10 rows)
+            @test length(arrow_table) <= 10
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ with_batch_size! test passed for full scan")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "with_batch_size! - Incremental Scan" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+
+        RustyIceberg.with_batch_size!(scan, UInt(10))
+        inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(inserts_stream)
+            if batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+
+                @test length(arrow_table) <= 10
+
+                RustyIceberg.free_batch(batch_ptr)
+            end
+            println("✅ with_batch_size! test passed for incremental scan")
+        finally
+            RustyIceberg.free_stream(inserts_stream)
+            RustyIceberg.free_stream(deletes_stream)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "with_data_file_concurrency_limit! - Full Scan" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Set concurrency limit (should not error)
+        @test_nowarn RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(4))
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ with_data_file_concurrency_limit! test passed for full scan")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "with_data_file_concurrency_limit! - Incremental Scan" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+
+        @test_nowarn RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(4))
+        inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(inserts_stream)
+            if batch_ptr != C_NULL
+                RustyIceberg.free_batch(batch_ptr)
+            end
+            println("✅ with_data_file_concurrency_limit! test passed for incremental scan")
+        finally
+            RustyIceberg.free_stream(inserts_stream)
+            RustyIceberg.free_stream(deletes_stream)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "with_manifest_entry_concurrency_limit! - Full Scan" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Set concurrency limit (should not error)
+        @test_nowarn RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(4))
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ with_manifest_entry_concurrency_limit! test passed for full scan")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "with_manifest_entry_concurrency_limit! - Incremental Scan" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+
+        @test_nowarn RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(4))
+        inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(inserts_stream)
+            if batch_ptr != C_NULL
+                RustyIceberg.free_batch(batch_ptr)
+            end
+            println("✅ with_manifest_entry_concurrency_limit! test passed for incremental scan")
+        finally
+            RustyIceberg.free_stream(inserts_stream)
+            RustyIceberg.free_stream(deletes_stream)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "Combined Builder Methods - Full Scan" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Combine multiple builder methods
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_address"])
+        RustyIceberg.with_batch_size!(scan, UInt(5))
+        RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(2))
+        RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(2))
+
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            df = DataFrame(arrow_table)
+
+            # Verify all configurations
+            @test names(df) == ["c_custkey", "c_name", "c_address"]
+            @test length(arrow_table) <= 5
+            @test !isempty(df)
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ Combined builder methods test passed for full scan")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "Combined Builder Methods - Incremental Scan" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+
+        # Combine multiple builder methods
+        RustyIceberg.select_columns!(scan, ["n"])
+        RustyIceberg.with_batch_size!(scan, UInt(5))
+        RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(2))
+        RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(2))
+
+        inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(inserts_stream)
+            if batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+
+                @test names(df) == ["n"]
+                @test length(arrow_table) <= 5
+                @test !isempty(df)
+
+                RustyIceberg.free_batch(batch_ptr)
+            end
+            println("✅ Combined builder methods test passed for incremental scan")
+        finally
+            RustyIceberg.free_stream(inserts_stream)
+            RustyIceberg.free_stream(deletes_stream)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
 end
 
 end # End of testset
