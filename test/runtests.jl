@@ -245,7 +245,7 @@ end
         INSERT INTO incremental.test1
         select n from range(201, 300) r(n);
 
-        delete from incremental.test1 where n = 150 or n = 250;
+        DELETE FROM incremental.test1 WHERE n = 150 OR n = 250;
     =#
 
     @testset "Incremental Scan E2E Test" begin
