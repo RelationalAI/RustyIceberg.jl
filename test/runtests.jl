@@ -240,10 +240,10 @@ end
         AS (SELECT n FROM range(1, 11) r(n));
 
         INSERT INTO incremental.test1
-        select n from range(101, 200) r(n);
+        SELECT n FROM range(101, 200) r(n);
 
         INSERT INTO incremental.test1
-        select n from range(201, 300) r(n);
+        SELECT n FROM range(201, 300) r(n);
 
         DELETE FROM incremental.test1 WHERE n = 150 OR n = 250;
     =#
