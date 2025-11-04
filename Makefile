@@ -48,7 +48,7 @@ test: build
 		exit 1; \
 	fi
 	@set -a && . ./.env && set +a && \
-		export ICEBERG_RUST_LIB=$(TARGET_DIR) && \
+		export ICEBERG_RUST_LIB=$$(pwd)/$(TARGET_DIR) && \
 		$(JULIA_THREADS_ENV) julia --project=. -e 'using Pkg; Pkg.test()'
 
 # Start Julia REPL with environment configured (requires .env file)
@@ -58,7 +58,7 @@ repl: build
 		exit 1; \
 	fi
 	@set -a && . ./.env && set +a && \
-		export ICEBERG_RUST_LIB=$(TARGET_DIR) && \
+		export ICEBERG_RUST_LIB=$$(pwd)/$(TARGET_DIR) && \
 		$(JULIA_THREADS_ENV) julia --project=.
 
 # Clean build artifacts

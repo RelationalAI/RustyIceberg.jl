@@ -1,5 +1,7 @@
 **/.env
 iceberg_rust_ffi/target
+iceberg_rust_ffi/target/**/*
 iceberg_rust_ffi/integration_test
 **/*.dylib
 **/.claude
+**/.DS_Store
