@@ -235,7 +235,7 @@ end
 
     # The table is created with these transactions. Above snapshot IDs are for the 2nd and the 4th txn below:
     #=
-        CREATE TABLE demo.incremental.test1 using iceberg
+        CREATE TABLE demo.incremental.test1 USING iceberg
         TBLPROPERTIES ('write.delete.mode' = 'merge-on-read')
         AS (SELECT n FROM range(1, 11) r(n));
 
