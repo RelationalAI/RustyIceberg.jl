@@ -5,3 +5,4 @@ iceberg_rust_ffi/integration_test
 **/*.dylib
 **/.claude
 **/.DS_Store
+Manifest.toml
