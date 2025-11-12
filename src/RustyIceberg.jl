@@ -260,20 +260,80 @@ end
 # High-level functions using the async API pattern from RustyObjectStore.jl
 
 """
-    table_open(snapshot_path::String)::IcebergTable
+    PropertyEntry
+
+FFI structure for passing key-value properties to Rust.
+
+# Fields
+- `key::Ptr{Cchar}`: Pointer to the key string
+- `value::Ptr{Cchar}`: Pointer to the value string
+"""
+struct PropertyEntry
+    key::Ptr{Cchar}
+    value::Ptr{Cchar}
+end
+
+"""
+    table_open(snapshot_path::String; scheme::String="s3", properties::Dict{String,String}=Dict{String,String}())::Table
 
 Open an Iceberg table from the given snapshot path.
+
+# Arguments
+- `snapshot_path::String`: Path to the metadata.json file for the table snapshot
+- `scheme::String`: Storage scheme (e.g., "s3", "file"). Defaults to "s3"
+- `properties::Dict{String,String}`: Optional key-value properties for the FileIO configuration.
+  By default (empty dict), credentials are read from environment variables (AWS_ACCESS_KEY_ID,
+  AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_ENDPOINT_URL, etc.).
+
+  Common S3 properties include:
+  - "s3.endpoint": Custom S3 endpoint URL
+  - "s3.access-key-id": AWS access key ID
+  - "s3.secret-access-key": AWS secret access key
+  - "s3.session-token": AWS session token
+  - "s3.region": AWS region
+  - "s3.allow-anonymous": Set to "true" for anonymous access (no credentials)
+
+# Example
+```julia
+# Open with credentials from environment variables (default)
+table = table_open("s3://bucket/path/metadata/metadata.json")
+
+# Open with anonymous S3 access
+table = table_open(
+    "s3://bucket/path/metadata/metadata.json",
+    properties=Dict("s3.allow-anonymous" => "true")
+)
+
+# Open with custom S3 credentials
+table = table_open(
+    "s3://bucket/path/metadata/metadata.json",
+    scheme="s3",
+    properties=Dict(
+        "s3.endpoint" => "http://localhost:9000",
+        "s3.access-key-id" => "minioadmin",
+        "s3.secret-access-key" => "minioadmin",
+        "s3.region" => "us-east-1"
+    )
+)
+```
 """
-function table_open(snapshot_path::String)
+function table_open(snapshot_path::String; scheme::String="s3", properties::Dict{String,String}=Dict{String,String}())
     response = TableResponse()
     ct = current_task()
     event = Base.Event()
     handle = pointer_from_objref(event)
 
+    # Convert properties dict to array of PropertyEntry structs
+    property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
+    properties_len = length(property_entries)
+
     preserve_task(ct)
-    result = GC.@preserve response event try
+    result = GC.@preserve response event property_entries properties try
         result = @ccall rust_lib.iceberg_table_open(
             snapshot_path::Cstring,
+            scheme::Cstring,
+            (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
+            properties_len::Csize_t,
             response::Ref{TableResponse},
             handle::Ptr{Cvoid}
         )::Cint
