@@ -49,7 +49,7 @@ test: build
 	fi
 	@set -a && . ./.env && set +a && \
 		export ICEBERG_RUST_LIB=$$(pwd)/$(TARGET_DIR) && \
-		$(JULIA_THREADS_ENV) julia --project=. -e 'using Pkg; Pkg.test()'
+		$(JULIA_THREADS_ENV) julia --project=. -e 'Base.compilecache(Base.identify_package("RustyIceberg")); using Pkg; Pkg.test()'
 
 # Start Julia REPL with environment configured (requires .env file)
 repl: build

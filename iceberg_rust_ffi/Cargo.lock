@@ -1518,7 +1518,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.7.0"
-source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=ccb1e0c9983a1bdcb5b70fa637759df526a9a75e#ccb1e0c9983a1bdcb5b70fa637759df526a9a75e"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=37e79b805407a0340d08823373cafed9cdac0083#37e79b805407a0340d08823373cafed9cdac0083"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -1540,6 +1540,7 @@ dependencies = [
  "chrono",
  "derive_builder",
  "expect-test",
+ "flate2",
  "fnv",
  "futures",
  "itertools",
@@ -1572,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "iceberg_rust_ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow-array",

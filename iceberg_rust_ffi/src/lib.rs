@@ -82,6 +82,15 @@ impl Default for IcebergStaticConfig {
     }
 }
 
+// FFI structure for passing key-value properties
+#[repr(C)]
+pub struct PropertyEntry {
+    pub key: *const c_char,
+    pub value: *const c_char,
+}
+
+unsafe impl Send for PropertyEntry {}
+
 // Direct structures - no opaque wrappers
 #[repr(C)]
 pub struct IcebergTable {
@@ -302,12 +311,42 @@ export_runtime_op!(
                 .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in snapshot path: {}", e))?
         };
 
-        Ok(snapshot_path_str.to_string())
+        let scheme_str = unsafe {
+            CStr::from_ptr(scheme).to_str()
+                .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in scheme: {}", e))?
+        };
+
+        // Convert properties from FFI to Rust Vec
+        let mut props = Vec::new();
+        if !properties.is_null() && properties_len > 0 {
+            let properties_slice = unsafe {
+                std::slice::from_raw_parts(properties, properties_len)
+            };
+
+            for prop in properties_slice {
+                let key = unsafe {
+                    CStr::from_ptr(prop.key).to_str()
+                        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in property key: {}", e))?
+                };
+                let value = unsafe {
+                    CStr::from_ptr(prop.value).to_str()
+                        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in property value: {}", e))?
+                };
+                props.push((key.to_string(), value.to_string()));
+            }
+        }
+
+        Ok((snapshot_path_str.to_string(), scheme_str.to_string(), props))
     },
-    full_metadata_path,
+    result_tuple,
     async {
-        // Create file IO for S3
-        let file_io = FileIOBuilder::new("s3").build()?;
+        let (full_metadata_path, scheme_string, props) = result_tuple;
+
+        // Create file IO with the specified scheme
+        // Default behavior (when props is empty) uses environment variables for credentials
+        let file_io = FileIOBuilder::new(&scheme_string)
+            .with_props(props)
+            .build()?;
 
         // Create table identifier
         let table_ident = TableIdent::from_strs(["default", "table"])?;
@@ -318,7 +357,10 @@ export_runtime_op!(
 
         Ok::<IcebergTable, anyhow::Error>(IcebergTable { table: static_table.into_table() })
     },
-    snapshot_path: *const c_char
+    snapshot_path: *const c_char,
+    scheme: *const c_char,
+    properties: *const PropertyEntry,
+    properties_len: usize
 );
 
 
