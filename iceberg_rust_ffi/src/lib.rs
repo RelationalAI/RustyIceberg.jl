@@ -6,7 +6,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use anyhow::Result;
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
-use iceberg::io::FileIOBuilder;
+use iceberg::io::{FileIOBuilder, S3_ALLOW_ANONYMOUS};
 use iceberg::table::{StaticTable, Table};
 use iceberg::TableIdent;
 
@@ -307,7 +307,11 @@ export_runtime_op!(
     full_metadata_path,
     async {
         // Create file IO for S3
-        let file_io = FileIOBuilder::new("s3").build()?;
+        let file_io = FileIOBuilder::new("s3")
+            .with_props(vec![
+                (S3_ALLOW_ANONYMOUS, "true".to_string()),
+            ])
+            .build()?;
 
         // Create table identifier
         let table_ident = TableIdent::from_strs(["default", "table"])?;
