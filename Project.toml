@@ -1,6 +1,6 @@
 name = "RustyIceberg"
 uuid = "390bdf5b-b624-43dc-a846-0ef7a3405804"
-version = "0.3.1"
+version = "0.3.2"
 
 [deps]
 Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
