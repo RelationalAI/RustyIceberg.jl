@@ -26,3 +26,23 @@ jobs:
         with:
             ssh: ${{ secrets.DOCUMENTER_KEY }}
             token: ${{ secrets.GITHUB_TOKEN }}
+
+  test-julia-1-10:
+    needs: TagBot
+    if: success()
+    uses: ./.github/workflows/test.yml
+    with:
+      build_rust: false
+      julia_version: '1.10'
+      os: ubuntu-latest
+      arch: x64
+
+  test-julia-1-11:
+    needs: TagBot
+    if: success()
+    uses: ./.github/workflows/test.yml
+    with:
+      build_rust: false
+      julia_version: '1.11'
+      os: ubuntu-latest
+      arch: x64
