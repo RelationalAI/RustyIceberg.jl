@@ -47,15 +47,6 @@ jobs:
           cd iceberg_rust_ffi
           cargo build --release
 
-      - name: Set JLL override preference for local Rust library
-        if: inputs.build_rust
-        run: |
-          julia --project=. -e 'using Libdl; using Preferences; lib_path = joinpath("${{ github.workspace }}/iceberg_rust_ffi/target/release", "libiceberg_rust_ffi." * Libdl.dlext); set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => lib_path; force=true); println("Set preference to: ", lib_path)'
-
-      - name: Clear JLL override preference (use JLL package)
-        if: ${{ !inputs.build_rust }}
-        run: julia --project=. -e 'using Preferences; delete_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path")'
-
       - name: Initialize containers
         uses: gacts/run-and-post-run@v1
         with:
@@ -104,6 +95,17 @@ jobs:
             ${{ runner.os }}-
 
       - uses: julia-actions/julia-buildpkg@v1
+
+      - name: Set JLL override preference for local Rust library
+        if: inputs.build_rust
+        run: |
+          julia --project=. -e 'using Libdl; using Preferences; lib_path = joinpath("${{ github.workspace }}/iceberg_rust_ffi/target/release", "libiceberg_rust_ffi." * Libdl.dlext); set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => lib_path; force=true); println("Set preference to: ", lib_path)'
+
+      - name: Clear JLL override preference (use JLL package)
+        if: ${{ !inputs.build_rust }}
+        run: |
+          julia --project=. -e 'using Preferences; delete_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path")'
+
       - uses: julia-actions/julia-runtest@v1
       - uses: julia-actions/julia-processcoverage@v1
       - uses: codecov/codecov-action@v3
