@@ -43,8 +43,7 @@ build-release:
 
 # Helper target: Set local library preference for development
 set-local-lib:
-	@julia --project=. -e 'using Preferences; set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => "$(shell pwd)/$(TARGET_DIR)/"; force=true)'
-	@echo "Set local library preference to: $(shell pwd)/$(TARGET_DIR)/"
+	@julia --project=. -e 'using Libdl; using Preferences; lib_path = joinpath("$(shell pwd)/$(TARGET_DIR)", "libiceberg_rust_ffi." * Libdl.dlext); set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => lib_path; force=true); println("Set local library preference to: ", lib_path)'
 	@echo "Julia will use this path after restarting/recompiling."
 
 # Helper target: Clear local library preference (use JLL default)

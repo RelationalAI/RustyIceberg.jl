@@ -44,19 +44,18 @@ or use a local build of [iceberg_rust_ffi](https://github.com/RelationalAI/icebe
 
 ### Using Local Builds
 
-To use a local Rust library build, set a preference using `Preferences.jl`:
+To use a local Rust library build, set a preference using `Preferences.jl` with the **full path to the library file**:
 
 ```julia
-using Preferences
-set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => "/path/to/target/release/"; force=true)
+using Libdl, Preferences
+lib_path = joinpath(expanduser("~/repos/iceberg_rust_ffi/target/release"), "libiceberg_rust_ffi." * Libdl.dlext)
+set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => lib_path; force=true)
 ```
 
-For example, if you have the `iceberg_rust_ffi` repository at `~/repos/iceberg_rust_ffi`
-and build the library by running `cargo build --release`, you would set:
-
-```julia
-set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => expanduser("~/repos/iceberg_rust_ffi/target/release/"); force=true)
-```
+The `Libdl.dlext` ensures the correct extension for your platform:
+- macOS: `.dylib`
+- Linux: `.so`
+- Windows: `.dll`
 
 **Note**: After setting preferences, you need to restart Julia or trigger package recompilation for changes to take effect.
 
