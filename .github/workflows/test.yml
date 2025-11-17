@@ -47,9 +47,13 @@ jobs:
           cd iceberg_rust_ffi
           cargo build --release
 
-      - name: Set ICEBERG_RUST_LIB environment variable
+      - name: Set JLL override preference for local Rust library
         if: inputs.build_rust
-        run: echo "ICEBERG_RUST_LIB=${{ github.workspace }}/iceberg_rust_ffi/target/release" >> $GITHUB_ENV
+        run: julia --project=. -e 'using Preferences; set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => "${{ github.workspace }}/iceberg_rust_ffi/target/release/"; force=true)'
+
+      - name: Clear JLL override preference (use JLL package)
+        if: ${{ !inputs.build_rust }}
+        run: julia --project=. -e 'using Preferences; delete_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path")'
 
       - name: Initialize containers
         uses: gacts/run-and-post-run@v1
@@ -99,9 +103,6 @@ jobs:
             ${{ runner.os }}-
 
       - uses: julia-actions/julia-buildpkg@v1
-      - name: Force recompile with custom library
-        if: inputs.build_rust
-        run: julia --project=. -e 'Base.compilecache(Base.identify_package("RustyIceberg"))'
       - uses: julia-actions/julia-runtest@v1
       - uses: julia-actions/julia-processcoverage@v1
       - uses: codecov/codecov-action@v3

@@ -38,14 +38,58 @@ Pkg.instantiate()
 
 ## Development
 
-When working on RustyIceberg.jl, you can either use
-[iceberg_rust_ffi_jll.jl](https://github.com/RelationalAI/iceberg_rust_ffi_jll.jl) or use
-a local build of [iceberg_rust_ffi](https://github.com/RelationalAI/iceberg_rust_ffi).
-When using a local build, set the environment variable `ICEBERG_RUST_LIB` to the directory
-containing the build. For example, if you have the `iceberg_rust_ffi` repository at
-`~/repos/iceberg_rust_ffi` and build the library by running `cargo build --release` from
-the base of that repository, then you could use that local build by setting
-ICEBERG_RUST_LIB="~/repos/iceberg_rust_ffi/target/release".
+When working on RustyIceberg.jl, you can either use the precompiled
+[iceberg_rust_ffi_jll.jl](https://github.com/RelationalAI/iceberg_rust_ffi_jll.jl) package
+or use a local build of [iceberg_rust_ffi](https://github.com/RelationalAI/iceberg_rust_ffi).
+
+### Using Local Builds
+
+To use a local Rust library build, set a preference using `Preferences.jl`:
+
+```julia
+using Preferences
+set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => "/path/to/target/release/"; force=true)
+```
+
+For example, if you have the `iceberg_rust_ffi` repository at `~/repos/iceberg_rust_ffi`
+and build the library by running `cargo build --release`, you would set:
+
+```julia
+set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => expanduser("~/repos/iceberg_rust_ffi/target/release/"); force=true)
+```
+
+**Note**: After setting preferences, you need to restart Julia or trigger package recompilation for changes to take effect.
+
+### Makefile Targets
+
+The project includes convenient Makefile targets for development:
+
+**Development mode (uses local Rust build):**
+- `make test-dev` - Build Rust library and run tests with local build
+- `make repl-dev` - Build Rust library and start REPL with local build
+- `make set-local-lib` - Set preference to use local Rust library
+
+**Production mode (uses JLL package):**
+- `make test` - Run tests with JLL package
+- `make repl` - Start REPL with JLL package
+- `make clear-local-lib` - Clear local library preference
+
+**Examples:**
+```bash
+# Development workflow
+make test-dev                        # Test with local debug build
+make BUILD_TYPE=release test-dev     # Test with local release build
+
+# Switch back to JLL package
+make test                            # Clears local preference and tests with JLL
+```
+
+To switch back to the JLL package, either run `make clear-local-lib` or manually delete the preference:
+
+```julia
+using Preferences
+delete_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path")
+```
 
 ## Prerequisites
 
@@ -76,6 +120,7 @@ The tests replicate the functionality of the C integration test (`integration_te
 
 ## Dependencies
 
-- **Libdl**: For dynamic library loading
 - **Arrow**: For Arrow format support
+- **Preferences**: For local library path configuration
+- **iceberg_rust_ffi_jll**: Precompiled Rust FFI library (JLL package)
 - **Test**: For testing (development dependency)

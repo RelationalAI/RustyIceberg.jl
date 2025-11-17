@@ -1,9 +1,7 @@
 module RustyIceberg
 
-using Base.Libc.Libdl: dlext
 using Base: @kwdef, @lock
 using Base.Threads: Atomic
-using Libdl
 using Arrow
 using iceberg_rust_ffi_jll
 
@@ -17,20 +15,10 @@ export scan!, next_batch, free_batch, free_stream
 
 const Option{T} = Union{T, Nothing}
 
-const rust_lib = if haskey(ENV, "ICEBERG_RUST_LIB")
-    # For development, e.g. run `cargo build --release` and point to `target/release/` dir.
-    # Note this is set a precompilation time, as `ccall` needs this to be a `const`,
-    # so you need to restart Julia / recompile the package if you change it.
-    lib_path = realpath(joinpath(ENV["ICEBERG_RUST_LIB"], "libiceberg_rust_ffi.$(dlext)"))
-    @warn """
-        Using unreleased iceberg_rust_ffi library:
-            $(repr(replace(lib_path, homedir() => "~")))
-        This is only intended for local development and should not be used in production.
-        """
-    lib_path
-else
-    iceberg_rust_ffi_jll.libiceberg_rust_ffi
-end
+# Always use the JLL library - override via Preferences if needed for local development
+# To use a local build, set the preference:
+#   using Preferences; set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => "/path/to/target/release/")
+const rust_lib = iceberg_rust_ffi_jll.libiceberg_rust_ffi
 
 """
 Runtime configuration for the Iceberg library.
