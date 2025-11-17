@@ -2,36 +2,20 @@
 
 [![CI](https://github.com/RelationalAI/RustyIceberg.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/RelationalAI/RustyIceberg.jl/actions/workflows/CI.yml)
 
-A Julia package that provides bindings to the Iceberg C API, allowing you to read Apache Iceberg tables directly from Julia.
+A Julia package that provides bindings on top of Iceberg Rust crate, allowing you to read Apache Iceberg tables directly from Julia.
 
 ## Overview
 
-This package wraps the iceberg_rust_ffi interface with Julia bindings, providing both low-level C API access and high-level Julia interfaces for working with Iceberg tables. It supports reading data from Iceberg tables and provides an iterator interface over Arrow format data.
-
-## Features
-
-- **Low-level Rust FFI bindings**: Direct access to all Iceberg Rust FFI API functions
-- **High-level Julia interface**: Easy-to-use `read_iceberg_table()` function that returns an iterator
-- **Arrow integration**: Seamless iteration over Arrow.Table objects
-- **Dynamic library loading**: Automatic loading and unloading of the C library
-- **Memory management**: Proper cleanup of C resources
-- **Error handling**: Comprehensive error reporting and handling
-- **Iterator-based API**: Streaming of data
+This package wraps the iceberg_rust_ffi interface with Julia bindings, providing Julia interfaces for working with Iceberg tables. It supports reading data from Iceberg tables in full-scan and incremental-scan modes.
 
 ## Installation
-
-1. Clone this repository:
-```bash
-git clone <repository-url>
-```
-
-2. Install the package in Julia:
+1. Install the package in Julia:
 ```julia
 using Pkg
-Pkg.add(path=".")
+Pkg.add("RustyIceberg")
 ```
 
-3. Install dependencies:
+2. Install dependencies:
 ```julia
 Pkg.instantiate()
 ```
@@ -39,8 +23,12 @@ Pkg.instantiate()
 ## Development
 
 When working on RustyIceberg.jl, you can either use the precompiled
-[iceberg_rust_ffi_jll.jl](https://github.com/RelationalAI/iceberg_rust_ffi_jll.jl) package
-or use a local build of [iceberg_rust_ffi](https://github.com/RelationalAI/iceberg_rust_ffi).
+[iceberg_rust_ffi_jll.jl](https://github.com/JuliaBinaryWrappers/iceberg_rust_ffi_jll.jl) package
+or use a local build of [iceberg_rust_ffi](./iceberg_rust_ffi/).
+
+### Custom JLL
+If you want to test a custom code, you can refer directly to this repo's branch (or a fork). However, if the change involves the FFI change, you might want to build a custom JLL so that the downstream projects don't have to have Rust toolchain in their repository. The way we do it here is by mimicking the JuliaBinaryWrappers/iceberg_rust_ffi_jll.jl structure in https://github.com/RelationalAI/iceberg_rust_ffi_jll.jl/. All one has to do is invoke this [GitHub Action there](https://github.com/RelationalAI/iceberg_rust_ffi_jll.jl/actions/workflows/build-and-deploy.yml), follow the README in that repo for details.
+This workflow will produce a new branch in that repo. Then in your Julia simply refer to that repo with a repo-rev equal to the commit of the newly produced branch in that repo.
 
 ### Using Local Builds
 
@@ -107,19 +95,13 @@ using Pkg
 Pkg.test("RustyIceberg")
 ```
 
-The tests replicate the functionality of the C integration test (`integration_test.c`) but using Julia bindings. Note that some tests may fail if S3 credentials are not configured or if the test data is not available.
+## CI
+CI runs with the custom iceberg_rust_ffi, built from the source. Releases run with official JLL, which is the default. CI overrides default using Preferences.jl.
 
-## Troubleshooting
+## Release
 
-### Common Issues
+### JLL Release
+To make a JLL release, create a new PR in JuliaPackaging/Yggdrasil repo, e.g. like [this one](https://github.com/JuliaPackaging/Yggdrasil/pull/12532/files).
 
-1. **Library not found**: Ensure `libiceberg_rust_ffi.dylib` is in your library path
-2. **S3 access denied**: Check your AWS credentials and permissions
-3. **Memory errors**: Ensure you're not holding references to freed C objects
-
-## Dependencies
-
-- **Arrow**: For Arrow format support
-- **Preferences**: For local library path configuration
-- **iceberg_rust_ffi_jll**: Precompiled Rust FFI library (JLL package)
-- **Test**: For testing (development dependency)
+### RustyIceberg release
+To create a new RustyIceberg release, simply bump the version in Project.toml, merge that in `main`, and then open that commit and comment like [here](https://github.com/RelationalAI/RustyIceberg.jl/commit/cbebb0e9611f70867e6ad2fbca0060a44345ae31#commitcomment-170551595). This will trigger an update in JuliaRegistries (should take ~20m), which will then invoke a TagBot in this repository, which will also run CI tests with the official JLL.
