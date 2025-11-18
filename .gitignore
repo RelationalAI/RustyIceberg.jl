@@ -6,3 +6,4 @@ iceberg_rust_ffi/integration_test
 **/.claude
 **/.DS_Store
 Manifest.toml
+LocalPreferences.toml

@@ -1,4 +1,4 @@
-.PHONY: run-containers stop-containers build build-debug build-release test repl clean clean-all help
+.PHONY: run-containers stop-containers build build-debug build-release test test-dev repl repl-dev set-local-lib clear-local-lib clean clean-all help
 
 # Rust library configuration
 RUST_FFI_DIR = iceberg_rust_ffi
@@ -41,24 +41,50 @@ build-debug:
 build-release:
 	$(MAKE) BUILD_TYPE=release build
 
-# Run tests (requires .env file)
-test: build
-	@if [ ! -f .env ]; then \
-		echo "Error: .env file not found. Please create a .env file with required environment variables."; \
-		exit 1; \
-	fi
-	@set -a && . ./.env && set +a && \
-		export ICEBERG_RUST_LIB=$$(pwd)/$(TARGET_DIR) && \
-		$(JULIA_THREADS_ENV) julia --project=. -e 'Base.compilecache(Base.identify_package("RustyIceberg")); using Pkg; Pkg.test()'
+# Helper target: Set local library preference for development
+set-local-lib:
+	@julia --project=. -e 'using Libdl; using Preferences; lib_path = joinpath("$(shell pwd)/$(TARGET_DIR)", "libiceberg_rust_ffi." * Libdl.dlext); set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => lib_path; force=true); println("Set local library preference to: ", lib_path)'
+	@echo "Julia will use this path after restarting/recompiling."
 
-# Start Julia REPL with environment configured (requires .env file)
-repl: build
+# Helper target: Clear local library preference (use JLL default)
+clear-local-lib:
+	@julia --project=. -e 'using Preferences; delete_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path")'
+	@echo "Cleared local library preference. Julia will use JLL artifact after restarting/recompiling."
+
+# Run tests with local build (for development)
+test-dev: build set-local-lib
 	@if [ ! -f .env ]; then \
 		echo "Error: .env file not found. Please create a .env file with required environment variables."; \
 		exit 1; \
 	fi
 	@set -a && . ./.env && set +a && \
-		export ICEBERG_RUST_LIB=$$(pwd)/$(TARGET_DIR) && \
+		$(JULIA_THREADS_ENV) julia --project=. -e 'using Pkg; Pkg.test()'
+
+# Run tests with JLL package (production mode)
+test: clear-local-lib
+	@if [ ! -f .env ]; then \
+		echo "Error: .env file not found. Please create a .env file with required environment variables."; \
+		exit 1; \
+	fi
+	@set -a && . ./.env && set +a && \
+		$(JULIA_THREADS_ENV) julia --project=. -e 'using Pkg; Pkg.test()'
+
+# Start Julia REPL with local build (for development)
+repl-dev: build set-local-lib
+	@if [ ! -f .env ]; then \
+		echo "Error: .env file not found. Please create a .env file with required environment variables."; \
+		exit 1; \
+	fi
+	@set -a && . ./.env && set +a && \
+		$(JULIA_THREADS_ENV) julia --project=.
+
+# Start Julia REPL with JLL package (production mode)
+repl: clear-local-lib
+	@if [ ! -f .env ]; then \
+		echo "Error: .env file not found. Please create a .env file with required environment variables."; \
+		exit 1; \
+	fi
+	@set -a && . ./.env && set +a && \
 		$(JULIA_THREADS_ENV) julia --project=.
 
 # Clean build artifacts
@@ -76,17 +102,28 @@ help:
 	@echo "  build            - Build the Rust FFI library (use BUILD_TYPE=debug for debug build)"
 	@echo "  build-debug      - Build the Rust FFI library in debug mode"
 	@echo "  build-release    - Build the Rust FFI library in release mode"
-	@echo "  test             - Run Julia tests (requires .env file and runs build first)"
-	@echo "  repl             - Start Julia REPL with environment configured (requires .env file)"
+	@echo ""
+	@echo "Development targets (use local Rust build):"
+	@echo "  test-dev         - Run Julia tests with local Rust library"
+	@echo "  repl-dev         - Start Julia REPL with local Rust library"
+	@echo "  set-local-lib    - Set preference to use local Rust library"
+	@echo ""
+	@echo "Production targets (use JLL package):"
+	@echo "  test             - Run Julia tests with JLL package"
+	@echo "  repl             - Start Julia REPL with JLL package"
+	@echo "  clear-local-lib  - Clear local library preference (use JLL)"
+	@echo ""
+	@echo "Docker targets:"
 	@echo "  run-containers   - Start docker containers"
 	@echo "  stop-containers  - Stop docker containers"
+	@echo ""
+	@echo "Cleanup targets:"
 	@echo "  clean            - Clean build artifacts"
 	@echo "  clean-all        - Clean everything including target directory"
 	@echo "  help             - Show this help message"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make test                           - Build in debug mode and run tests"
-	@echo "  make BUILD_TYPE=release test        - Build in release mode and run tests"
-	@echo "  make build-release repl             - Build in release mode and start REPL"
-	@echo "  JULIA_NUM_THREADS=8 make test       - Run tests with 8 Julia threads"
-	@echo "  JULIA_NUM_THREADS=4 make repl       - Start REPL with 4 Julia threads"
+	@echo "  make test-dev                       - Build and test with local Rust library"
+	@echo "  make BUILD_TYPE=release test-dev    - Build release and test with local library"
+	@echo "  make test                           - Test with JLL package (production mode)"
+	@echo "  JULIA_NUM_THREADS=8 make test-dev   - Run dev tests with 8 Julia threads"
