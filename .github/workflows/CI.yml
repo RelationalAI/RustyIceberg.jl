@@ -23,3 +23,14 @@ jobs:
       julia_version: '1.11'
       os: ubuntu-latest
       arch: x64
+
+  rust-format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+        working-directory: iceberg_rust_ffi

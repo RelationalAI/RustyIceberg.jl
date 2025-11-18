@@ -18,9 +18,9 @@ use object_store_ffi::{
 };
 
 // Modules for scan functionality
-mod scan_common;
 mod full;
 mod incremental;
+mod scan_common;
 
 // Re-export scan types and functions
 pub use full::IcebergScan;
@@ -96,7 +96,6 @@ unsafe impl Send for PropertyEntry {}
 pub struct IcebergTable {
     pub table: Table,
 }
-
 
 // Stream wrapper for FFI - using async mutex to avoid blocking calls
 #[repr(C)]
@@ -362,7 +361,6 @@ export_runtime_op!(
     properties: *const PropertyEntry,
     properties_len: usize
 );
-
 
 // Async function to get next batch from existing stream
 export_runtime_op!(

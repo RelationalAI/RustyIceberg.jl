@@ -96,7 +96,10 @@ impl_scan_builder_method!(
     with_concurrency_limit_manifest_entries
 );
 
-impl_with_batch_size!(iceberg_incremental_scan_with_batch_size, IcebergIncrementalScan);
+impl_with_batch_size!(
+    iceberg_incremental_scan_with_batch_size,
+    IcebergIncrementalScan
+);
 
 impl_scan_build!(iceberg_incremental_scan_build, IcebergIncrementalScan);
 
