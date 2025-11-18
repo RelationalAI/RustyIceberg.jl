@@ -138,8 +138,8 @@ macro_rules! impl_scan_free {
 }
 
 // Re-export macros for use in other modules
-pub(crate) use impl_scan_builder_method;
 pub(crate) use impl_scan_build;
+pub(crate) use impl_scan_builder_method;
 pub(crate) use impl_scan_free;
 pub(crate) use impl_select_columns;
 pub(crate) use impl_with_batch_size;
