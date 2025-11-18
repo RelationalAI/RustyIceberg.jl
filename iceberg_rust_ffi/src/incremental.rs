@@ -62,6 +62,11 @@ impl RawResponse for IcebergUnzippedStreamsResponse {
 }
 
 /// Create a new incremental scan builder
+///
+/// # Arguments
+/// * `table` - The table to scan
+/// * `from_snapshot_id` - Starting snapshot ID, or -1 to scan from the root (oldest) snapshot
+/// * `to_snapshot_id` - Ending snapshot ID, or -1 to scan to the current (latest) snapshot
 #[no_mangle]
 pub extern "C" fn iceberg_new_incremental_scan(
     table: *mut IcebergTable,
@@ -72,9 +77,21 @@ pub extern "C" fn iceberg_new_incremental_scan(
         return ptr::null_mut();
     }
     let table_ref = unsafe { &*table };
-    let scan_builder = table_ref
-        .table
-        .incremental_scan(from_snapshot_id, to_snapshot_id);
+
+    // Convert -1 to None for optional snapshot IDs
+    let from_id = if from_snapshot_id == -1 {
+        None
+    } else {
+        Some(from_snapshot_id)
+    };
+
+    let to_id = if to_snapshot_id == -1 {
+        None
+    } else {
+        Some(to_snapshot_id)
+    };
+
+    let scan_builder = table_ref.table.incremental_scan(from_id, to_id);
     Box::into_raw(Box::new(IcebergIncrementalScan {
         builder: Some(scan_builder),
         scan: None,
@@ -96,7 +113,10 @@ impl_scan_builder_method!(
     with_concurrency_limit_manifest_entries
 );
 
-impl_with_batch_size!(iceberg_incremental_scan_with_batch_size, IcebergIncrementalScan);
+impl_with_batch_size!(
+    iceberg_incremental_scan_with_batch_size,
+    IcebergIncrementalScan
+);
 
 impl_scan_build!(iceberg_incremental_scan_build, IcebergIncrementalScan);
 
