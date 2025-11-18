@@ -33,4 +33,4 @@ jobs:
           components: rustfmt
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
-        working-directory: iceberg-rust
+        working-directory: iceberg_rust_ffi
