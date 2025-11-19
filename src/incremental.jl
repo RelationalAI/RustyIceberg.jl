@@ -1,5 +1,8 @@
 # Incremental table scan implementation
 
+# Sentinel value for optional snapshot IDs (matches Rust FFI SNAPSHOT_ID_NONE constant)
+const SNAPSHOT_ID_NONE = Int64(-1)
+
 """
     IncrementalScan
 
@@ -74,9 +77,9 @@ scan = new_incremental_scan(table, from_id, to_id)
 ```
 """
 function new_incremental_scan(table::Table, from_snapshot_id::Union{Int64,Nothing}, to_snapshot_id::Union{Int64,Nothing})
-    # Convert nothing to -1 for C API
-    from_id = from_snapshot_id === nothing ? Int64(-1) : from_snapshot_id
-    to_id = to_snapshot_id === nothing ? Int64(-1) : to_snapshot_id
+    # Convert nothing to SNAPSHOT_ID_NONE for C API
+    from_id = from_snapshot_id === nothing ? SNAPSHOT_ID_NONE : from_snapshot_id
+    to_id = to_snapshot_id === nothing ? SNAPSHOT_ID_NONE : to_snapshot_id
 
     scan_ptr = @ccall rust_lib.iceberg_new_incremental_scan(
         table::Table,
