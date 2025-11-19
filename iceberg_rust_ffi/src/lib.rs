@@ -7,7 +7,6 @@ use anyhow::Result;
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
 use iceberg::io::FileIOBuilder;
-use iceberg::metadata_columns::RESERVED_COL_NAME_FILE;
 use iceberg::table::{StaticTable, Table};
 use iceberg::TableIdent;
 
@@ -448,8 +447,3 @@ pub extern "C" fn iceberg_destroy_context(ctx_ptr: *const Context) -> CResult {
     destroy_context(ctx_ptr)
 }
 
-// Export the FILE column name constant
-#[no_mangle]
-pub extern "C" fn iceberg_file_column_name() -> *const c_char {
-    RESERVED_COL_NAME_FILE.as_ptr() as *const c_char
-}

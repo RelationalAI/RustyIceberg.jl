@@ -25,7 +25,7 @@ select_columns!(scan, ["id", "name", FILE_COLUMN])
 stream = scan!(scan)
 ```
 """
-const FILE_COLUMN = unsafe_string(@ccall rust_lib.iceberg_file_column_name()::Ptr{Cchar})
+const FILE_COLUMN = "_file"
 
 """
     BatchResponse
