@@ -64,7 +64,7 @@ pub extern "C" fn iceberg_scan_with_file_column(scan_ptr: *mut *mut IcebergScan)
 
     let scan_ref = unsafe { &mut **scan };
     if let Some(builder) = scan_ref.builder.take() {
-        scan_ref.builder = Some(builder.with_file_path_column());
+        scan_ref.builder = Some(builder.with_file_column());
         CResult::Ok
     } else {
         CResult::Error
