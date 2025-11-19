@@ -15,8 +15,6 @@ export with_file_column!
 export scan!, next_batch, free_batch, free_stream
 export FILE_COLUMN
 
-const Option{T} = Union{T, Nothing}
-
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:
 #   using Preferences; set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => "/path/to/target/release/")
