@@ -1,5 +1,8 @@
 # Incremental table scan implementation
 
+# Sentinel value for optional snapshot IDs (matches Rust FFI SNAPSHOT_ID_NONE constant)
+const SNAPSHOT_ID_NONE = Int64(-1)
+
 """
     IncrementalScan
 
@@ -49,15 +52,39 @@ mutable struct UnzippedStreamsResponse
 end
 
 """
-    new_incremental_scan(table::Table, from_snapshot_id::Int64, to_snapshot_id::Int64) -> IncrementalScan
+    new_incremental_scan(table::Table, from_snapshot_id::Union{Int64,Nothing}, to_snapshot_id::Union{Int64,Nothing}) -> IncrementalScan
 
 Create an incremental scan for the given table between two snapshots.
+
+# Arguments
+- `table::Table`: The Iceberg table to scan
+- `from_snapshot_id`: Starting snapshot ID, or `nothing` to scan from the root (oldest) snapshot
+- `to_snapshot_id`: Ending snapshot ID, or `nothing` to scan to the current (latest) snapshot
+
+# Examples
+```julia
+# Scan full history (root to current)
+scan = new_incremental_scan(table, nothing, nothing)
+
+# Scan from root to specific snapshot
+scan = new_incremental_scan(table, nothing, snapshot_id)
+
+# Scan from specific snapshot to current
+scan = new_incremental_scan(table, snapshot_id, nothing)
+
+# Scan between specific snapshots
+scan = new_incremental_scan(table, from_id, to_id)
+```
 """
-function new_incremental_scan(table::Table, from_snapshot_id::Int64, to_snapshot_id::Int64)
+function new_incremental_scan(table::Table, from_snapshot_id::Union{Int64,Nothing}, to_snapshot_id::Union{Int64,Nothing})
+    # Convert nothing to SNAPSHOT_ID_NONE for C API
+    from_id = from_snapshot_id === nothing ? SNAPSHOT_ID_NONE : from_snapshot_id
+    to_id = to_snapshot_id === nothing ? SNAPSHOT_ID_NONE : to_snapshot_id
+
     scan_ptr = @ccall rust_lib.iceberg_new_incremental_scan(
         table::Table,
-        from_snapshot_id::Int64,
-        to_snapshot_id::Int64
+        from_id::Int64,
+        to_id::Int64
     )::Ptr{Cvoid}
     return IncrementalScan(scan_ptr)
 end

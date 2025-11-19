@@ -11,6 +11,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::scan_common::*;
 use crate::{IcebergArrowStream, IcebergTable};
 
+/// Sentinel value for optional snapshot IDs in the C API.
+/// When -1 is passed as from_snapshot_id or to_snapshot_id, it means None (use default).
+const SNAPSHOT_ID_NONE: i64 = -1;
+
 /// Struct for incremental scan builder and scan
 #[repr(C)]
 pub struct IcebergIncrementalScan {
@@ -62,6 +66,11 @@ impl RawResponse for IcebergUnzippedStreamsResponse {
 }
 
 /// Create a new incremental scan builder
+///
+/// # Arguments
+/// * `table` - The table to scan
+/// * `from_snapshot_id` - Starting snapshot ID, or `SNAPSHOT_ID_NONE` (-1) to scan from the root (oldest) snapshot
+/// * `to_snapshot_id` - Ending snapshot ID, or `SNAPSHOT_ID_NONE` (-1) to scan to the current (latest) snapshot
 #[no_mangle]
 pub extern "C" fn iceberg_new_incremental_scan(
     table: *mut IcebergTable,
@@ -72,9 +81,21 @@ pub extern "C" fn iceberg_new_incremental_scan(
         return ptr::null_mut();
     }
     let table_ref = unsafe { &*table };
-    let scan_builder = table_ref
-        .table
-        .incremental_scan(from_snapshot_id, to_snapshot_id);
+
+    // Convert SNAPSHOT_ID_NONE to None for optional snapshot IDs
+    let from_id = if from_snapshot_id == SNAPSHOT_ID_NONE {
+        None
+    } else {
+        Some(from_snapshot_id)
+    };
+
+    let to_id = if to_snapshot_id == SNAPSHOT_ID_NONE {
+        None
+    } else {
+        Some(to_snapshot_id)
+    };
+
+    let scan_builder = table_ref.table.incremental_scan(from_id, to_id);
     Box::into_raw(Box::new(IcebergIncrementalScan {
         builder: Some(scan_builder),
         scan: None,
