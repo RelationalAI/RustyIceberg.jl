@@ -446,4 +446,3 @@ pub extern "C" fn iceberg_cancel_context(ctx_ptr: *const Context) -> CResult {
 pub extern "C" fn iceberg_destroy_context(ctx_ptr: *const Context) -> CResult {
     destroy_context(ctx_ptr)
 }
-
