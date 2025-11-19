@@ -108,6 +108,32 @@ function with_batch_size!(scan::Scan, n::UInt)
 end
 
 """
+    with_file_column!(scan::Scan)
+
+Add the _file metadata column to the scan.
+
+The _file column contains the file path for each row, which can be useful for
+tracking which data files contain specific rows.
+
+# Example
+```julia
+scan = new_scan(table)
+with_file_column!(scan)
+stream = scan!(scan)
+```
+"""
+function with_file_column!(scan::Scan)
+    result = @ccall rust_lib.iceberg_scan_with_file_column(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
+    )::Cint
+
+    if result != 0
+        error("Failed to add file column to scan")
+    end
+    return nothing
+end
+
+"""
     build!(scan::Scan)
 
 Build the provided table scan object.

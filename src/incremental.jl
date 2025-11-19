@@ -161,6 +161,32 @@ function with_batch_size!(scan::IncrementalScan, n::UInt)
 end
 
 """
+    with_file_column!(scan::IncrementalScan)
+
+Add the _file metadata column to the incremental scan.
+
+The _file column contains the file path for each row, which can be useful for
+tracking which data files contain specific rows during incremental scans.
+
+# Example
+```julia
+scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+with_file_column!(scan)
+inserts_stream, deletes_stream = scan!(scan)
+```
+"""
+function with_file_column!(scan::IncrementalScan)
+    result = @ccall rust_lib.iceberg_incremental_scan_with_file_column(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
+    )::Cint
+
+    if result != 0
+        error("Failed to add file column to incremental scan")
+    end
+    return nothing
+end
+
+"""
     build!(scan::IncrementalScan)
 
 Build the provided incremental table scan object.

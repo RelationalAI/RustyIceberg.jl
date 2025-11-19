@@ -9,6 +9,25 @@ This stream can be used to fetch batches of Arrow data asynchronously.
 const ArrowStream = Ptr{Cvoid}
 
 """
+    FILE_COLUMN
+
+The name of the metadata column containing file paths (_file).
+
+This constant can be used with the `select_columns!` function to include
+file path information in query results. It corresponds to the _file metadata
+column in Iceberg tables.
+
+# Example
+```julia
+# Select specific columns including the file path
+scan = new_scan(table)
+select_columns!(scan, ["id", "name", FILE_COLUMN])
+stream = scan!(scan)
+```
+"""
+const FILE_COLUMN = unsafe_string(@ccall rust_lib.iceberg_file_column_name()::Ptr{Cchar})
+
+"""
     BatchResponse
 
 Response structure for asynchronous batch operations.
