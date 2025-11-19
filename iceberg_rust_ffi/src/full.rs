@@ -50,26 +50,7 @@ impl_scan_builder_method!(
 
 impl_with_batch_size!(iceberg_scan_with_batch_size, IcebergScan);
 
-/// Add the _file metadata column to the scan
-#[no_mangle]
-pub extern "C" fn iceberg_scan_with_file_column(scan_ptr: *mut *mut IcebergScan) -> CResult {
-    if scan_ptr.is_null() {
-        return CResult::Error;
-    }
-
-    let scan = unsafe { &mut *scan_ptr };
-    if scan.is_null() {
-        return CResult::Error;
-    }
-
-    let scan_ref = unsafe { &mut **scan };
-    if let Some(builder) = scan_ref.builder.take() {
-        scan_ref.builder = Some(builder.with_file_column());
-        CResult::Ok
-    } else {
-        CResult::Error
-    }
-}
+impl_scan_builder_method_no_params!(iceberg_scan_with_file_column, IcebergScan, with_file_column);
 
 impl_scan_build!(iceberg_scan_build, IcebergScan);
 

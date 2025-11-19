@@ -122,28 +122,11 @@ impl_with_batch_size!(
     IcebergIncrementalScan
 );
 
-/// Add the _file metadata column to the incremental scan
-#[no_mangle]
-pub extern "C" fn iceberg_incremental_scan_with_file_column(
-    scan_ptr: *mut *mut IcebergIncrementalScan,
-) -> CResult {
-    if scan_ptr.is_null() {
-        return CResult::Error;
-    }
-
-    let scan = unsafe { &mut *scan_ptr };
-    if scan.is_null() {
-        return CResult::Error;
-    }
-
-    let scan_ref = unsafe { &mut **scan };
-    if let Some(builder) = scan_ref.builder.take() {
-        scan_ref.builder = Some(builder.with_file_column());
-        CResult::Ok
-    } else {
-        CResult::Error
-    }
-}
+impl_scan_builder_method_no_params!(
+    iceberg_incremental_scan_with_file_column,
+    IcebergIncrementalScan,
+    with_file_column
+);
 
 impl_scan_build!(iceberg_incremental_scan_build, IcebergIncrementalScan);
 
