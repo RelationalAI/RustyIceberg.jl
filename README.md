@@ -102,6 +102,7 @@ CI runs with the custom iceberg_rust_ffi, built from the source. Releases run wi
 
 ### JLL Release
 To make a JLL release, create a new PR in JuliaPackaging/Yggdrasil repo, e.g. like [this one](https://github.com/JuliaPackaging/Yggdrasil/pull/12532/files).
+It's not necessary, but it's a good practice to upgrade version in Cargo.toml in iceberg_rust_ffi, so that we can correlate JLL version with iceberg_rust_ffi Rust version.
 
 ### RustyIceberg release
 To create a new RustyIceberg release, simply bump the version in Project.toml, merge that in `main`, and then open that commit and comment like [here](https://github.com/RelationalAI/RustyIceberg.jl/commit/cbebb0e9611f70867e6ad2fbca0060a44345ae31#commitcomment-170551595). This will trigger an update in JuliaRegistries (should take ~20m), which will then invoke a TagBot in this repository, which will also run CI tests with the official JLL.
