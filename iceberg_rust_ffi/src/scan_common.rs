@@ -44,24 +44,32 @@ macro_rules! impl_select_columns {
     };
 }
 
-/// Macro to generate scan builder methods with or without parameters
+/// Macro to generate scan builder methods with zero or more parameters
 ///
 /// # Examples
 ///
-/// With parameter (e.g., concurrency limit):
+/// With single parameter:
 /// ```ignore
-/// impl_scan_builder_method!(iceberg_scan_with_data_file_concurrency_limit, IcebergScan, with_data_file_concurrency_limit, n: usize);
+/// impl_scan_builder_method!(
+///     iceberg_scan_with_data_file_concurrency_limit,
+///     IcebergScan,
+///     with_data_file_concurrency_limit,
+///     n: usize
+/// );
 /// ```
 ///
-/// Without parameter (e.g., with_file_column):
+/// Without parameters:
 /// ```ignore
-/// impl_scan_builder_method!(iceberg_scan_with_file_column, IcebergScan, with_file_column);
+/// impl_scan_builder_method!(
+///     iceberg_scan_with_file_column,
+///     IcebergScan,
+///     with_file_column
+/// );
 /// ```
 macro_rules! impl_scan_builder_method {
-    // Variant with usize parameter
-    ($fn_name:ident, $scan_type:ident, $builder_method:ident, n: usize) => {
+    ($fn_name:ident, $scan_type:ident, $builder_method:ident $(, $param:ident: $param_type:ty)*) => {
         #[no_mangle]
-        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type, n: usize) -> CResult {
+        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type $(, $param: $param_type)*) -> CResult {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
@@ -72,28 +80,7 @@ macro_rules! impl_scan_builder_method {
             }
 
             *scan = Box::into_raw(Box::new($scan_type {
-                builder: scan_ref.builder.map(|b| b.$builder_method(n)),
-                scan: scan_ref.scan,
-            }));
-
-            CResult::Ok
-        }
-    };
-    // Variant without parameters
-    ($fn_name:ident, $scan_type:ident, $builder_method:ident) => {
-        #[no_mangle]
-        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type) -> CResult {
-            if scan.is_null() || (*scan).is_null() {
-                return CResult::Error;
-            }
-            let scan_ref = unsafe { Box::from_raw(*scan) };
-
-            if scan_ref.builder.is_none() {
-                return CResult::Error;
-            }
-
-            *scan = Box::into_raw(Box::new($scan_type {
-                builder: scan_ref.builder.map(|b| b.$builder_method()),
+                builder: scan_ref.builder.map(|b| b.$builder_method($($param),*)),
                 scan: scan_ref.scan,
             }));
 
