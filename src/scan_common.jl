@@ -28,6 +28,25 @@ stream = scan!(scan)
 const FILE_COLUMN = "_file"
 
 """
+    POS_COLUMN
+
+The name of the metadata column containing row positions within files (_pos).
+
+This constant can be used with the `select_columns!` function to include
+position information in query results. It corresponds to the _pos metadata
+column in Iceberg tables, which represents the row's position within its data file.
+
+# Example
+```julia
+# Select specific columns including the position
+scan = new_scan(table)
+select_columns!(scan, ["id", "name", POS_COLUMN])
+stream = scan!(scan)
+```
+"""
+const POS_COLUMN = "_pos"
+
+"""
     BatchResponse
 
 Response structure for asynchronous batch operations.

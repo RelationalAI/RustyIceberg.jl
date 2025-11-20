@@ -130,6 +130,12 @@ impl_scan_builder_method!(
     with_file_column
 );
 
+impl_scan_builder_method!(
+    iceberg_incremental_scan_with_pos_column,
+    IcebergIncrementalScan,
+    with_pos_column
+);
+
 impl_scan_build!(iceberg_incremental_scan_build, IcebergIncrementalScan);
 
 // Get unzipped Arrow streams from incremental scan (async)

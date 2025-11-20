@@ -54,6 +54,8 @@ impl_with_batch_size!(iceberg_scan_with_batch_size, IcebergScan);
 
 impl_scan_builder_method!(iceberg_scan_with_file_column, IcebergScan, with_file_column);
 
+impl_scan_builder_method!(iceberg_scan_with_pos_column, IcebergScan, with_pos_column);
+
 impl_scan_build!(iceberg_scan_build, IcebergScan);
 
 // Async function to initialize stream from a table scan
