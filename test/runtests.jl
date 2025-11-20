@@ -688,6 +688,11 @@ end
             # Verify file column contains file paths (strings ending in .parquet)
             file_paths = df._file
             @test all(endswith.(file_paths, ".parquet"))
+            # Verify file paths are non-empty strings with proper structure
+            @test all(length.(file_paths) .> 0)
+            # Should be full S3 paths like "s3://warehouse/tpch.sf01/customer/data/data_customer-00000.parquet"
+            @test all(startswith.(file_paths, "s3://warehouse/tpch.sf01/customer/data/data_customer-"))
+            @test eltype(file_paths) <: AbstractString
 
             RustyIceberg.free_batch(batch_ptr)
             println("✅ select_columns! with with_file_column! test passed for full scan")
@@ -722,6 +727,9 @@ end
                 # Verify file column contains file paths
                 file_paths = df._file
                 @test all(endswith.(file_paths, ".parquet"))
+                @test all(length.(file_paths) .> 0)
+                @test all(startswith.(file_paths, "s3://warehouse/incremental/"))
+                @test eltype(file_paths) <: AbstractString
 
                 RustyIceberg.free_batch(batch_ptr)
                 println("✅ select_columns! with with_file_column! test passed for incremental scan")
@@ -760,9 +768,187 @@ end
             # Verify file column contains file paths
             file_paths = df._file
             @test all(endswith.(file_paths, ".parquet"))
+            @test all(length.(file_paths) .> 0)
+            @test all(startswith.(file_paths, "s3://warehouse/tpch.sf01/customer/data/data_customer-"))
+            @test eltype(file_paths) <: AbstractString
 
             RustyIceberg.free_batch(batch_ptr)
             println("✅ select_columns! with FILE_COLUMN constant test passed")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "select_columns! with with_pos_column! - Full Scan" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Select specific columns AND include pos metadata
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
+        RustyIceberg.with_pos_column!(scan)
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            df = DataFrame(arrow_table)
+
+            # Should have selected columns plus pos column
+            @test "c_custkey" in names(df)
+            @test "c_name" in names(df)
+            @test "_pos" in names(df)
+            @test !isempty(df)
+
+            # Verify pos column contains non-negative integers
+            positions = df._pos
+            @test all(positions .>= 0)
+            @test eltype(positions) <: Integer
+
+            # Verify positions are sequential within the batch (starting from 0)
+            # Positions should start from 0 for the first row in each file
+            @test minimum(positions) == 0
+            # Check that positions are unique and sequential (no gaps or duplicates in same file)
+            @test length(unique(positions)) == length(positions)
+            @test maximum(positions) == length(positions) - 1
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ select_columns! with with_pos_column! test passed for full scan")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "select_columns! with with_pos_column! - Incremental Scan" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+
+        # Select specific column AND include pos metadata for incremental scan
+        RustyIceberg.select_columns!(scan, ["n"])
+        RustyIceberg.with_pos_column!(scan)
+        inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(inserts_stream)
+            if batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+
+                # Should have the selected column "n" plus pos column
+                @test "n" in names(df)
+                @test "_pos" in names(df)
+                @test !isempty(df)
+
+                # Verify pos column contains non-negative integers
+                positions = df._pos
+                @test all(positions .>= 0)
+                @test eltype(positions) <: Integer
+
+                # Verify positions are sequential within the batch
+                @test minimum(positions) == 0
+                @test length(unique(positions)) == length(positions)
+                @test maximum(positions) == length(positions) - 1
+
+                RustyIceberg.free_batch(batch_ptr)
+                println("✅ select_columns! with with_pos_column! test passed for incremental scan")
+            end
+        finally
+            RustyIceberg.free_stream(inserts_stream)
+            RustyIceberg.free_stream(deletes_stream)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "select_columns! with POS_COLUMN constant" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Select columns including POS_COLUMN constant
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", RustyIceberg.POS_COLUMN])
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            df = DataFrame(arrow_table)
+
+            # Should have selected columns
+            @test "c_custkey" in names(df)
+            @test "c_name" in names(df)
+            # POS_COLUMN should be "_pos"
+            @test "_pos" in names(df)
+            @test !isempty(df)
+
+            # Verify pos column contains non-negative integers
+            positions = df._pos
+            @test all(positions .>= 0)
+            @test eltype(positions) <: Integer
+
+            # Verify positions are sequential within the batch
+            @test minimum(positions) == 0
+            @test length(unique(positions)) == length(positions)
+            @test maximum(positions) == length(positions) - 1
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ select_columns! with POS_COLUMN constant test passed")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "with_file_column! and with_pos_column! combined" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Select columns and include both file and pos metadata
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
+        RustyIceberg.with_file_column!(scan)
+        RustyIceberg.with_pos_column!(scan)
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            df = DataFrame(arrow_table)
+
+            # Should have selected columns plus both metadata columns
+            @test "c_custkey" in names(df)
+            @test "c_name" in names(df)
+            @test "_file" in names(df)
+            @test "_pos" in names(df)
+            @test !isempty(df)
+
+            # Verify both metadata columns
+            file_paths = df._file
+            @test all(endswith.(file_paths, ".parquet"))
+            @test all(startswith.(file_paths, "s3://warehouse/tpch.sf01/customer/data/data_customer-"))
+            @test all(df._pos .>= 0)
+            @test eltype(df._pos) <: Integer
+
+            # Verify positions are sequential within the batch
+            positions = df._pos
+            @test minimum(positions) == 0
+            @test length(unique(positions)) == length(positions)
+            @test maximum(positions) == length(positions) - 1
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ with_file_column! and with_pos_column! combined test passed")
         finally
             RustyIceberg.free_stream(stream)
             RustyIceberg.free_scan!(scan)

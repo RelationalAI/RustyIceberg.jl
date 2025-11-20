@@ -134,6 +134,32 @@ function with_file_column!(scan::Scan)
 end
 
 """
+    with_pos_column!(scan::Scan)
+
+Add the _pos metadata column to the scan.
+
+The _pos column contains the position of each row within its data file, which can
+be useful for tracking row locations and debugging.
+
+# Example
+```julia
+scan = new_scan(table)
+with_pos_column!(scan)
+stream = scan!(scan)
+```
+"""
+function with_pos_column!(scan::Scan)
+    result = @ccall rust_lib.iceberg_scan_with_pos_column(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
+    )::Cint
+
+    if result != 0
+        error("Failed to add pos column to scan")
+    end
+    return nothing
+end
+
+"""
     build!(scan::Scan)
 
 Build the provided table scan object.
