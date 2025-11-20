@@ -870,6 +870,7 @@ end
                 # Verify positions are sequential within the batch
                 @test minimum(positions) == 0
                 @test length(unique(positions)) == length(positions)
+                @test maximum(positions) <= length(df.n)
 
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
