@@ -11,9 +11,9 @@ export IcebergException
 export new_incremental_scan, free_incremental_scan!
 export table_open, free_table, new_scan, free_scan!
 export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
+export with_file_column!
 export scan!, next_batch, free_batch, free_stream
-
-const Option{T} = Union{T, Nothing}
+export FILE_COLUMN
 
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:

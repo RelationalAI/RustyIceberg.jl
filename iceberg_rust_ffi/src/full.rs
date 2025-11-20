@@ -39,16 +39,20 @@ impl_select_columns!(iceberg_select_columns, IcebergScan);
 impl_scan_builder_method!(
     iceberg_scan_with_data_file_concurrency_limit,
     IcebergScan,
-    with_data_file_concurrency_limit
+    with_data_file_concurrency_limit,
+    n: usize
 );
 
 impl_scan_builder_method!(
     iceberg_scan_with_manifest_entry_concurrency_limit,
     IcebergScan,
-    with_manifest_entry_concurrency_limit
+    with_manifest_entry_concurrency_limit,
+    n: usize
 );
 
 impl_with_batch_size!(iceberg_scan_with_batch_size, IcebergScan);
+
+impl_scan_builder_method!(iceberg_scan_with_file_column, IcebergScan, with_file_column);
 
 impl_scan_build!(iceberg_scan_build, IcebergScan);
 

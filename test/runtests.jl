@@ -661,6 +661,114 @@ end
             RustyIceberg.free_table(table)
         end
     end
+
+    @testset "select_columns! with with_file_column! - Full Scan" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Select specific columns AND include file metadata
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
+        RustyIceberg.with_file_column!(scan)
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            df = DataFrame(arrow_table)
+
+            # Should have selected columns plus file column
+            @test "c_custkey" in names(df)
+            @test "c_name" in names(df)
+            @test "_file" in names(df)
+            @test !isempty(df)
+
+            # Verify file column contains file paths (strings ending in .parquet)
+            file_paths = df._file
+            @test all(endswith.(file_paths, ".parquet"))
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ select_columns! with with_file_column! test passed for full scan")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "select_columns! with with_file_column! - Incremental Scan" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+
+        # Select specific column AND include file metadata for incremental scan
+        RustyIceberg.select_columns!(scan, ["n"])
+        RustyIceberg.with_file_column!(scan)
+        inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(inserts_stream)
+            if batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+
+                # Should have the selected column "n" plus file column
+                @test "n" in names(df)
+                @test "_file" in names(df)
+                @test !isempty(df)
+
+                # Verify file column contains file paths
+                file_paths = df._file
+                @test all(endswith.(file_paths, ".parquet"))
+
+                RustyIceberg.free_batch(batch_ptr)
+                println("✅ select_columns! with with_file_column! test passed for incremental scan")
+            end
+        finally
+            RustyIceberg.free_stream(inserts_stream)
+            RustyIceberg.free_stream(deletes_stream)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "select_columns! with FILE_COLUMN constant" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Select columns including FILE_COLUMN constant
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", RustyIceberg.FILE_COLUMN])
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            @test batch_ptr != C_NULL
+
+            batch = unsafe_load(batch_ptr)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            df = DataFrame(arrow_table)
+
+            # Should have selected columns
+            @test "c_custkey" in names(df)
+            @test "c_name" in names(df)
+            # FILE_COLUMN should be "_file"
+            @test "_file" in names(df)
+            @test !isempty(df)
+
+            # Verify file column contains file paths
+            file_paths = df._file
+            @test all(endswith.(file_paths, ".parquet"))
+
+            RustyIceberg.free_batch(batch_ptr)
+            println("✅ select_columns! with FILE_COLUMN constant test passed")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
 end
 
 end # End of testset
