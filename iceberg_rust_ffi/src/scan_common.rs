@@ -44,9 +44,22 @@ macro_rules! impl_select_columns {
     };
 }
 
-/// Macro to generate scan builder methods that take a usize parameter
+/// Macro to generate scan builder methods with or without parameters
+///
+/// # Examples
+///
+/// With parameter (e.g., concurrency limit):
+/// ```ignore
+/// impl_scan_builder_method!(iceberg_scan_with_data_file_concurrency_limit, IcebergScan, with_data_file_concurrency_limit, n: usize);
+/// ```
+///
+/// Without parameter (e.g., with_file_column):
+/// ```ignore
+/// impl_scan_builder_method!(iceberg_scan_with_file_column, IcebergScan, with_file_column);
+/// ```
 macro_rules! impl_scan_builder_method {
-    ($fn_name:ident, $scan_type:ident, $builder_method:ident) => {
+    // Variant with usize parameter
+    ($fn_name:ident, $scan_type:ident, $builder_method:ident, n: usize) => {
         #[no_mangle]
         pub extern "C" fn $fn_name(scan: &mut *mut $scan_type, n: usize) -> CResult {
             if scan.is_null() || (*scan).is_null() {
@@ -66,10 +79,7 @@ macro_rules! impl_scan_builder_method {
             CResult::Ok
         }
     };
-}
-
-/// Macro to generate parameterless scan builder methods (e.g., with_file_column)
-macro_rules! impl_scan_builder_method_no_params {
+    // Variant without parameters
     ($fn_name:ident, $scan_type:ident, $builder_method:ident) => {
         #[no_mangle]
         pub extern "C" fn $fn_name(scan: &mut *mut $scan_type) -> CResult {
@@ -164,7 +174,6 @@ macro_rules! impl_scan_free {
 // Re-export macros for use in other modules
 pub(crate) use impl_scan_build;
 pub(crate) use impl_scan_builder_method;
-pub(crate) use impl_scan_builder_method_no_params;
 pub(crate) use impl_scan_free;
 pub(crate) use impl_select_columns;
 pub(crate) use impl_with_batch_size;
