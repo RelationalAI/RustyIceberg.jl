@@ -851,6 +851,9 @@ end
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
 
         try
+            all_positions = Int64[]
+            all_n_values = Int64[]
+
             batch_ptr = RustyIceberg.next_batch(inserts_stream)
             while batch_ptr != C_NULL
                 batch = unsafe_load(batch_ptr)
@@ -862,19 +865,62 @@ end
                 @test "_pos" in names(df)
                 @test !isempty(df)
 
-                # Verify pos column contains non-negative integers
+                # Gather positions and values
                 positions = df._pos
                 @test all(positions .>= 0)
                 @test eltype(positions) <: Integer
+                @test length(unique(positions)) == length(positions)  # No duplicates within batch
 
-                # Verify positions are sequential within the batch
-                @test minimum(positions) == 0
-                @test length(unique(positions)) == length(positions)
-                @test maximum(positions) <= length(df.n)
+                append!(all_positions, positions)
+                append!(all_n_values, df.n)
 
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
+
+            # Verify positions across all batches
+            # Positions represent row numbers within individual Parquet files (0-indexed)
+            # The incremental scan reads from multiple Parquet files, each with ~20 rows
+
+            @test length(all_positions) == 98  # 98 total records (n=201-299 excluding deleted n=250)
+            @test all(all_positions .>= 0)
+            @test eltype(all_positions) <: Integer
+
+            # Count occurrences of each position across all files
+            position_counts = Dict{Int64, Int}()
+            for pos in all_positions
+                position_counts[pos] = get(position_counts, pos, 0) + 1
+            end
+
+            # Baseline expectations:
+            # - Positions 0-19 represent rows within each Parquet file
+            # - Most positions appear multiple times (once per file)
+            # - The deleted record (n=250) creates one missing occurrence
+
+            # Verify all positions are in expected range (0-19 per file)
+            @test minimum(all_positions) == 0
+            @test maximum(all_positions) == 19
+            @test length(unique(all_positions)) == 20  # All positions 0-19 are present
+
+            # Expected baseline: positions appear with these frequencies
+            # (derived from actual data structure where n=250 is deleted)
+            expected_counts = Dict{Int64, Int}()
+            for pos in 0:19
+                if pos == 10
+                    expected_counts[pos] = 4  # Missing one occurrence (deleted record n=250 at position 10)
+                elseif pos == 19
+                    expected_counts[pos] = 4  # Some files have only 19 rows
+                else
+                    expected_counts[pos] = 5  # Most positions appear 5 times (once per file)
+                end
+            end
+
+            @test position_counts == expected_counts
+
+            # Verify no gaps in the position range
+            full_range = 0:19
+            @test Set(keys(position_counts)) == Set(full_range)
+
             println("✅ select_columns! with with_pos_column! test passed for incremental scan")
         finally
             RustyIceberg.free_stream(inserts_stream)
