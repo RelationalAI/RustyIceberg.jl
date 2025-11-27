@@ -6,10 +6,10 @@ using Arrow
 @testset "RustyIceberg.jl" begin
 @testset "Runtime Initialization" begin
     # Test runtime initialization - this should work
-    @test_nowarn init_runtime()
+    @test_nowarn init_runtime(StaticConfig(Threads.nthreads()))
 
     # Test that we can initialize multiple times safely
-    @test_nowarn init_runtime()
+    @test_nowarn init_runtime(StaticConfig(Threads.nthreads()))
 
     println("✅ Runtime initialization successful")
 end
@@ -396,6 +396,11 @@ end
         @test scan3 isa RustyIceberg.IncrementalScan
         @test scan3.ptr != C_NULL
         println("✅ Incremental scan created with nothing for both snapshot IDs")
+
+        RustyIceberg.with_concurrency_limit_manifest_files(scan3, UInt(2))
+        RustyIceberg.with_manifest_entry_concurrency_limit!(scan3, UInt(256))
+        RustyIceberg.with_data_file_concurrency_limit!(scan3, UInt(1024))
+        RustyIceberg.with_batch_size!(scan3, UInt(50))
 
         inserts_stream3, deletes_stream3 = RustyIceberg.scan!(scan3)
         @test inserts_stream3 != C_NULL

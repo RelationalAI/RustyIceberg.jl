@@ -1523,7 +1523,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.7.0"
-source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=6f6e6f998464fbfb637ba561e9a1e6deb907edac#6f6e6f998464fbfb637ba561e9a1e6deb907edac"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=d16f03f569ede1c2e613b3aa3682abcbaf30922b#d16f03f569ede1c2e613b3aa3682abcbaf30922b"
 dependencies = [
  "anyhow",
  "apache-avro",
