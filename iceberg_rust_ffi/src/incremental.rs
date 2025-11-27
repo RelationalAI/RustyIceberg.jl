@@ -106,6 +106,13 @@ pub extern "C" fn iceberg_new_incremental_scan(
 impl_select_columns!(iceberg_incremental_select_columns, IcebergIncrementalScan);
 
 impl_scan_builder_method!(
+    iceberg_incremental_scan_with_concurrency_limit_manifest_files,
+    IcebergIncrementalScan,
+    with_concurrency_limit_manifest_files,
+    n: usize
+);
+
+impl_scan_builder_method!(
     iceberg_incremental_scan_with_data_file_concurrency_limit,
     IcebergIncrementalScan,
     with_concurrency_limit_data_files,
