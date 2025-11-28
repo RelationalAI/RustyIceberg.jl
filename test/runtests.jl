@@ -398,7 +398,7 @@ end
         @test scan3.ptr != C_NULL
         println("✅ Incremental scan created with nothing for both snapshot IDs")
 
-        RustyIceberg.with_manifest_file_concurrency_limit(scan3, UInt(2))
+        RustyIceberg.with_manifest_file_concurrency_limit!(scan3, UInt(2))
         RustyIceberg.with_manifest_entry_concurrency_limit!(scan3, UInt(256))
         RustyIceberg.with_data_file_concurrency_limit!(scan3, UInt(1024))
         RustyIceberg.with_batch_size!(scan3, UInt(50))
@@ -677,6 +677,28 @@ end
         end
     end
 
+    @testset "with_manifest_file_concurrency_limit! - Full Scan" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Set concurrency limit (should not error)
+        @test_nowarn RustyIceberg.with_manifest_file_concurrency_limit!(scan, UInt(4))
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            while batch_ptr != C_NULL
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream)
+            end
+            println("✅ with_manifest_file_concurrency_limit! test passed for full scan")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
     @testset "with_manifest_entry_concurrency_limit! - Incremental Scan" begin
         table = RustyIceberg.table_open(incremental_path)
         scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
@@ -742,6 +764,7 @@ end
         RustyIceberg.select_columns!(scan, ["n"])
         RustyIceberg.with_batch_size!(scan, UInt(5))
         RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(2))
+        RustyIceberg.with_manifest_file_concurrency_limit!(scan, UInt(2))
         RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(2))
 
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)

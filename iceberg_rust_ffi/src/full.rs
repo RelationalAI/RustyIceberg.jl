@@ -44,6 +44,13 @@ impl_scan_builder_method!(
 );
 
 impl_scan_builder_method!(
+    iceberg_scan_with_manifest_file_concurrency_limit,
+    IcebergScan,
+    with_manifest_file_concurrency_limit,
+    n: usize
+);
+
+impl_scan_builder_method!(
     iceberg_scan_with_manifest_entry_concurrency_limit,
     IcebergScan,
     with_manifest_entry_concurrency_limit,
