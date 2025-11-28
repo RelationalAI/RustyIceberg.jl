@@ -110,6 +110,23 @@ function select_columns!(scan::IncrementalScan, column_names::Vector{String})
 end
 
 """
+    with_manifest_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
+
+Sets the manifest file concurrency level for the incremental scan.
+"""
+function with_manifest_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
+    result = @ccall rust_lib.iceberg_incremental_scan_with_manifest_file_concurrency_limit(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        error("Failed to set data file concurrency limit for incremental scan")
+    end
+    return nothing
+end
+
+"""
     with_data_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
 
 Sets the data file concurrency level for the incremental scan.

@@ -74,6 +74,23 @@ function with_data_file_concurrency_limit!(scan::Scan, n::UInt)
 end
 
 """
+    with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
+
+Sets the manifest file concurrency level for the full scan.
+"""
+function with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
+    result = @ccall rust_lib.iceberg_scan_with_manifest_file_concurrency_limit(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        error("Failed to set data file concurrency limit for incremental scan")
+    end
+    return nothing
+end
+
+"""
     with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
 
 Sets the manifest entry concurrency level for the scan.
