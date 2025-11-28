@@ -397,7 +397,7 @@ end
         @test scan3.ptr != C_NULL
         println("✅ Incremental scan created with nothing for both snapshot IDs")
 
-        RustyIceberg.with_concurrency_limit_manifest_files(scan3, UInt(2))
+        RustyIceberg.with_manifest_file_concurrency_limit(scan3, UInt(2))
         RustyIceberg.with_manifest_entry_concurrency_limit!(scan3, UInt(256))
         RustyIceberg.with_data_file_concurrency_limit!(scan3, UInt(1024))
         RustyIceberg.with_batch_size!(scan3, UInt(50))
