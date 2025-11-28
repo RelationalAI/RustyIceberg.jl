@@ -6,10 +6,11 @@ using Arrow
 @testset "RustyIceberg.jl" begin
 @testset "Runtime Initialization" begin
     # Test runtime initialization - this should work
-    @test_nowarn init_runtime(StaticConfig(Threads.nthreads()))
+    @test_nowarn init_runtime()
 
-    # Test that we can initialize multiple times safely
-    @test_nowarn init_runtime(StaticConfig(Threads.nthreads()))
+    # Test that we can initialize multiple times safely. But a new static config
+    # wouldn't take effect, would silently ignore the config.
+    @test_nowarn init_runtime(StaticConfig(1))
 
     println("✅ Runtime initialization successful")
 end
