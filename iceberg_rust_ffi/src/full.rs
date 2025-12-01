@@ -15,6 +15,8 @@ use crate::{IcebergArrowStream, IcebergArrowStreamResponse, IcebergTable};
 pub struct IcebergScan {
     pub builder: Option<TableScanBuilder<'static>>,
     pub scan: Option<TableScan>,
+    /// 0 = auto-detect (num_cpus)
+    pub serialization_concurrency: usize,
 }
 
 unsafe impl Send for IcebergScan {}
@@ -30,6 +32,7 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
     Box::into_raw(Box::new(IcebergScan {
         builder: Some(scan_builder),
         scan: None,
+        serialization_concurrency: 0,
     }))
 }
 
@@ -65,6 +68,11 @@ impl_scan_builder_method!(iceberg_scan_with_pos_column, IcebergScan, with_pos_co
 
 impl_scan_build!(iceberg_scan_build, IcebergScan);
 
+impl_with_serialization_concurrency_limit!(
+    iceberg_scan_with_serialization_concurrency_limit,
+    IcebergScan
+);
+
 // Async function to initialize stream from a table scan
 export_runtime_op!(
     iceberg_arrow_stream,
@@ -73,18 +81,38 @@ export_runtime_op!(
         if scan.is_null() {
             return Err(anyhow::anyhow!("Null scan pointer provided"));
         }
-        let scan_ref = unsafe { &(*scan).scan };
+        let scan_ptr = unsafe { &*scan };
+        let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Scan not initialized"));
         }
 
-        Ok(scan_ref.as_ref().unwrap())
+        // Determine concurrency (0 = auto-detect)
+        let serialization_concurrency = scan_ptr.serialization_concurrency;
+        let serialization_concurrency = if serialization_concurrency == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            serialization_concurrency
+        };
+
+        Ok((scan_ref.as_ref().unwrap(), serialization_concurrency))
     },
-    scan_ref,
+    result_tuple,
     async {
+        let (scan_ref, serialization_concurrency) = result_tuple;
+
         let stream = scan_ref.to_arrow().await?;
+
+        // Transform stream: RecordBatch -> ArrowBatch with parallel serialization
+        let serialized_stream = crate::transform_stream_with_parallel_serialization(
+            stream,
+            serialization_concurrency
+        );
+
         Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
-            stream: AsyncMutex::new(stream),
+            stream: AsyncMutex::new(serialized_stream),
         })
     },
     scan: *mut IcebergScan

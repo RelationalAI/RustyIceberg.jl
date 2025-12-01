@@ -182,6 +182,8 @@ end
             batch_ptr = C_NULL
         end
 
+        sort!(rows, by = x -> x[1])
+
         @test rows == Tuple[
             (0, "ALGERIA", 0, "furiously regular requests. platelets affix furious"),
             (1, "ARGENTINA", 1, "instructions wake quickly. final deposits haggle. final, silent theodolites "),
@@ -730,6 +732,7 @@ end
         RustyIceberg.with_batch_size!(scan, UInt(5))
         RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(2))
         RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(2))
+        RustyIceberg.with_serialization_concurrency_limit!(scan, UInt(2))
 
         stream = RustyIceberg.scan!(scan)
 
@@ -766,6 +769,7 @@ end
         RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(2))
         RustyIceberg.with_manifest_file_concurrency_limit!(scan, UInt(2))
         RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(2))
+        RustyIceberg.with_serialization_concurrency_limit!(scan, UInt(2))
 
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
 

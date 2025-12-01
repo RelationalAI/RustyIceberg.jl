@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use futures::TryStreamExt;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
@@ -101,8 +102,7 @@ pub struct IcebergTable {
 #[repr(C)]
 pub struct IcebergArrowStream {
     // TODO: Maybe remove this mutex and let this be handled in Julia?
-    pub stream:
-        AsyncMutex<futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>>,
+    pub stream: AsyncMutex<futures::stream::BoxStream<'static, Result<ArrowBatch, iceberg::Error>>>,
 }
 
 unsafe impl Send for IcebergArrowStream {}
@@ -113,6 +113,11 @@ pub struct ArrowBatch {
     pub length: usize,
     pub rust_ptr: *mut c_void,
 }
+
+// SAFETY: ArrowBatch contains raw pointers that are owned by the FFI layer.
+// The pointers are allocated in Rust and deallocated via iceberg_arrow_batch_free,
+// making it safe to send between threads.
+unsafe impl Send for ArrowBatch {}
 
 // Response types for async operations
 #[repr(C)]
@@ -193,7 +198,7 @@ pub struct IcebergBatchResponse {
 unsafe impl Send for IcebergBatchResponse {}
 
 impl RawResponse for IcebergBatchResponse {
-    type Payload = Option<RecordBatch>;
+    type Payload = Option<ArrowBatch>;
     fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
@@ -205,21 +210,47 @@ impl RawResponse for IcebergBatchResponse {
     }
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload.flatten() {
-            Some(batch) => {
-                // TODO: This is currently a bottleneck, and should be done in parallel.
-                let arrow_batch = serialize_record_batch(batch);
-                match arrow_batch {
-                    Ok(arrow_batch) => {
-                        self.batch = Box::into_raw(Box::new(arrow_batch));
-                    }
-                    Err(_) => {
-                        self.batch = ptr::null_mut();
-                    }
-                }
+            Some(arrow_batch) => {
+                // Serialization already done - just transfer ownership
+                self.batch = Box::into_raw(Box::new(arrow_batch));
             }
             None => self.batch = ptr::null_mut(),
         }
     }
+}
+
+// Helper function to transform a RecordBatch stream into an ArrowBatch stream with parallel serialization
+pub(crate) fn transform_stream_with_parallel_serialization(
+    stream: futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>,
+    concurrency: usize,
+) -> futures::stream::BoxStream<'static, Result<ArrowBatch, iceberg::Error>> {
+    stream
+        .map(|batch_result| async move {
+            match batch_result {
+                Ok(record_batch) => {
+                    // Spawn blocking task and await immediately
+                    match tokio::task::spawn_blocking(move || serialize_record_batch(record_batch))
+                        .await
+                    {
+                        Ok(Ok(arrow_batch)) => Ok(arrow_batch),
+                        Ok(Err(e)) => Err(iceberg::Error::new(
+                            iceberg::ErrorKind::Unexpected,
+                            e.to_string(),
+                        )),
+                        Err(e) => Err(iceberg::Error::new(
+                            iceberg::ErrorKind::Unexpected,
+                            format!("Serialization task panicked: {}", e),
+                        )),
+                    }
+                }
+                Err(e) => Err(iceberg::Error::new(
+                    iceberg::ErrorKind::Unexpected,
+                    format!("Stream error: {}", e),
+                )),
+            }
+        })
+        .buffer_unordered(concurrency)
+        .boxed()
 }
 
 // Helper function to create ArrowBatch from RecordBatch
