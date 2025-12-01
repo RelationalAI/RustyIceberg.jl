@@ -220,7 +220,7 @@ impl RawResponse for IcebergBatchResponse {
 }
 
 // Helper function to transform a RecordBatch stream into an ArrowBatch stream with parallel serialization
-pub fn transform_stream_with_parallel_serialization(
+pub(crate) fn transform_stream_with_parallel_serialization(
     stream: futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>,
     concurrency: usize,
 ) -> futures::stream::BoxStream<'static, Result<ArrowBatch, iceberg::Error>> {
