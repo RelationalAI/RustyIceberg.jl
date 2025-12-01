@@ -15,7 +15,7 @@ use crate::{IcebergArrowStream, IcebergArrowStreamResponse, IcebergTable};
 pub struct IcebergScan {
     pub builder: Option<TableScanBuilder<'static>>,
     pub scan: Option<TableScan>,
-    pub serialization_concurrency: usize,  // 0 = auto-detect (num_cpus)
+    pub serialization_concurrency: usize, // 0 = auto-detect (num_cpus)
 }
 
 unsafe impl Send for IcebergScan {}
@@ -31,7 +31,7 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
     Box::into_raw(Box::new(IcebergScan {
         builder: Some(scan_builder),
         scan: None,
-        serialization_concurrency: 0,  // 0 means auto-detect
+        serialization_concurrency: 0, // 0 means auto-detect
     }))
 }
 

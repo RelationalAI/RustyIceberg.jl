@@ -102,8 +102,7 @@ pub struct IcebergTable {
 #[repr(C)]
 pub struct IcebergArrowStream {
     // TODO: Maybe remove this mutex and let this be handled in Julia?
-    pub stream:
-        AsyncMutex<futures::stream::BoxStream<'static, Result<ArrowBatch, iceberg::Error>>>,
+    pub stream: AsyncMutex<futures::stream::BoxStream<'static, Result<ArrowBatch, iceberg::Error>>>,
 }
 
 unsafe impl Send for IcebergArrowStream {}
@@ -230,23 +229,23 @@ pub fn transform_stream_with_parallel_serialization(
             match batch_result {
                 Ok(record_batch) => {
                     // Spawn blocking task and await immediately
-                    match tokio::task::spawn_blocking(move || {
-                        serialize_record_batch(record_batch)
-                    }).await {
+                    match tokio::task::spawn_blocking(move || serialize_record_batch(record_batch))
+                        .await
+                    {
                         Ok(Ok(arrow_batch)) => Ok(arrow_batch),
                         Ok(Err(e)) => Err(iceberg::Error::new(
                             iceberg::ErrorKind::Unexpected,
-                            e.to_string()
+                            e.to_string(),
                         )),
                         Err(e) => Err(iceberg::Error::new(
                             iceberg::ErrorKind::Unexpected,
-                            format!("Serialization task panicked: {}", e)
+                            format!("Serialization task panicked: {}", e),
                         )),
                     }
                 }
                 Err(e) => Err(iceberg::Error::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Stream error: {}", e)
+                    format!("Stream error: {}", e),
                 )),
             }
         })

@@ -20,7 +20,7 @@ const SNAPSHOT_ID_NONE: i64 = -1;
 pub struct IcebergIncrementalScan {
     pub builder: Option<IncrementalTableScanBuilder<'static>>,
     pub scan: Option<IncrementalTableScan>,
-    pub serialization_concurrency: usize,  // 0 = auto-detect (num_cpus)
+    pub serialization_concurrency: usize, // 0 = auto-detect (num_cpus)
 }
 
 unsafe impl Send for IcebergIncrementalScan {}
@@ -100,7 +100,7 @@ pub extern "C" fn iceberg_new_incremental_scan(
     Box::into_raw(Box::new(IcebergIncrementalScan {
         builder: Some(scan_builder),
         scan: None,
-        serialization_concurrency: 0,  // 0 means auto-detect
+        serialization_concurrency: 0, // 0 means auto-detect
     }))
 }
 
