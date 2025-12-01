@@ -20,6 +20,7 @@ const SNAPSHOT_ID_NONE: i64 = -1;
 pub struct IcebergIncrementalScan {
     pub builder: Option<IncrementalTableScanBuilder<'static>>,
     pub scan: Option<IncrementalTableScan>,
+    pub serialization_concurrency: usize,  // 0 = auto-detect (num_cpus)
 }
 
 unsafe impl Send for IcebergIncrementalScan {}
@@ -99,6 +100,7 @@ pub extern "C" fn iceberg_new_incremental_scan(
     Box::into_raw(Box::new(IcebergIncrementalScan {
         builder: Some(scan_builder),
         scan: None,
+        serialization_concurrency: 0,  // 0 means auto-detect
     }))
 }
 
@@ -145,6 +147,11 @@ impl_scan_builder_method!(
 
 impl_scan_build!(iceberg_incremental_scan_build, IcebergIncrementalScan);
 
+impl_with_serialization_concurrency_limit!(
+    iceberg_incremental_scan_with_serialization_concurrency_limit,
+    IcebergIncrementalScan
+);
+
 // Get unzipped Arrow streams from incremental scan (async)
 // Returns two separate streams: one for inserts, one for deletes
 export_runtime_op!(
@@ -154,24 +161,44 @@ export_runtime_op!(
         if scan.is_null() {
             return Err(anyhow::anyhow!("Null scan pointer provided"));
         }
-        let scan_ref = unsafe { &(*scan).scan };
+        let scan_ptr = unsafe { &*scan };
+        let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Incremental scan not initialized"));
         }
 
-        Ok(scan_ref.as_ref().unwrap())
+        // Determine concurrency (0 = auto-detect)
+        let serialization_concurrency = scan_ptr.serialization_concurrency;
+        let serialization_concurrency = if serialization_concurrency == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            serialization_concurrency
+        };
+
+        Ok((scan_ref.as_ref().unwrap(), serialization_concurrency))
     },
-    scan_ref,
+    result_tuple,
     async {
+        let (scan_ref, serialization_concurrency) = result_tuple;
+
         // Get unzipped streams (separate append and delete streams)
         let (inserts_stream, deletes_stream) = scan_ref.to_unzipped_arrow().await?;
 
+        // Transform both streams with parallel serialization
         let inserts = IcebergArrowStream {
-            stream: AsyncMutex::new(inserts_stream),
+            stream: AsyncMutex::new(crate::transform_stream_with_parallel_serialization(
+                inserts_stream,
+                serialization_concurrency
+            )),
         };
 
         let deletes = IcebergArrowStream {
-            stream: AsyncMutex::new(deletes_stream),
+            stream: AsyncMutex::new(crate::transform_stream_with_parallel_serialization(
+                deletes_stream,
+                serialization_concurrency
+            )),
         };
 
         Ok::<(IcebergArrowStream, IcebergArrowStream), anyhow::Error>((inserts, deletes))
