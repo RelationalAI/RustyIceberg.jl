@@ -48,24 +48,25 @@ jobs:
       #     cargo build --release
 
       - name: Start Iceberg catalog and S3 storage with Docker Compose
-        uses: gacts/run-and-post-run@v1
-        with:
-          run: |
-            docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup
-            echo "Waiting for Polaris catalog to be ready..."
-            bash << 'EOF'
-            i=0
-            while [ $i -lt 60 ]; do
-              if curl -f http://localhost:8181/api/catalog/v1/oauth/tokens --user root:s3cr3t -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" -H "Polaris-Realm: POLARIS" > /dev/null 2>&1; then
-                echo "Polaris is ready!"
-                break
-              fi
-              i=$((i+1))
-              echo "Attempt $i: Waiting for Polaris..."
-              sleep 2
-            done
-            EOF
-          post: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml down
+        run: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup
+
+      - name: Wait for Polaris to be ready
+        run: |
+          echo "Waiting for Polaris catalog to be ready..."
+          for i in $(seq 1 60); do
+            if curl -f http://localhost:8181/api/catalog/v1/oauth/tokens --user root:s3cr3t -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" -H "Polaris-Realm: POLARIS" > /dev/null 2>&1; then
+              echo "Polaris is ready!"
+              exit 0
+            fi
+            echo "Attempt $i: Waiting for Polaris..."
+            sleep 2
+          done
+          echo "Polaris did not become ready in time"
+          exit 1
+
+      - name: Cleanup Docker Compose services
+        if: always()
+        run: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml down
 
       - uses: julia-actions/setup-julia@v1
         with:
