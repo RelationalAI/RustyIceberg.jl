@@ -47,36 +47,25 @@ jobs:
           cd iceberg_rust_ffi
           cargo build --release
 
-      - name: Initialize containers
+      - name: Start Iceberg catalog and S3 storage with Docker Compose
         uses: gacts/run-and-post-run@v1
         with:
           run: |
-            docker network create iceberg_net
-            docker run -d --name minio \
-              --network=iceberg_net -p 9000:9000 \
-              -e MINIO_ROOT_USER=root \
-              -e MINIO_ROOT_PASSWORD=password \
-              -e MINIO_DOMAIN=minio \
-              -v ${{ github.workspace }}/assets/tpch:/input \
-              -v ${{ github.workspace }}/assets/incremental:/input_incremental \
-              minio/minio:latest server /data/
-            until (docker exec minio mc alias set minio http://localhost:9000 root password) do echo '... waiting ...' && sleep 1; done;
-            docker exec minio mc mb minio/warehouse
-            docker exec minio mc cp -r /input/tpch.sf01/ minio/warehouse/tpch.sf01/
-            docker exec minio mc cp -r /input_incremental/ minio/warehouse/incremental/;
-            docker run -d --name rest \
-              --network=iceberg_net \
-              -p 8181:8181 \
-              -v ${{ github.workspace }}/assets/rest:/tmp \
-              -e AWS_ACCESS_KEY_ID=root \
-              -e AWS_SECRET_ACCESS_KEY=password \
-              -e AWS_ENDPOINT_URL=http://minio:9000 \
-              -e AWS_REGION=us-east-1 \
-              -e CATALOG_S3_ENDPOINT=http://minio:9000 \
-              -e CATALOG_WAREHOUSE=s3://warehouse \
-              -e CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO apache/iceberg-rest-fixture
+            cd ${{ github.workspace }}/docker
+            docker compose up -d minio setup_bucket polaris polaris-setup
+
+            # Wait for Polaris catalog to be ready
+            echo "Waiting for Polaris catalog to be ready..."
+            until curl -f http://localhost:8181/api/catalog/v1/oauth/tokens \
+              --user root:s3cr3t \
+              -d 'grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL' \
+              -H 'Polaris-Realm: POLARIS' > /dev/null 2>&1; do
+              echo "... waiting ..."
+              sleep 2
+            done
+            echo "Polaris is ready!"
           post:
-            docker stop rest minio && docker rm rest minio && docker network rm iceberg_net
+            cd ${{ github.workspace }}/docker && docker compose down
 
       - uses: julia-actions/setup-julia@v1
         with:
