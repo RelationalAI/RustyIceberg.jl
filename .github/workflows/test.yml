@@ -58,7 +58,7 @@ jobs:
         if: inputs.build_rust
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: iceberg_rust_ffi
+          workspaces: ./iceberg_rust_ffi
 
       - name: Build Rust FFI library
         if: inputs.build_rust
