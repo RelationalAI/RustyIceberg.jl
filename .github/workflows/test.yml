@@ -51,8 +51,7 @@ jobs:
         uses: gacts/run-and-post-run@v1
         with:
           run: |
-            cd ${{ github.workspace }}/docker
-            docker compose up -d minio setup_bucket polaris polaris-setup
+            docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup
 
             # Wait for Polaris catalog to be ready
             echo "Waiting for Polaris catalog to be ready..."
@@ -65,7 +64,7 @@ jobs:
             done
             echo "Polaris is ready!"
           post:
-            cd ${{ github.workspace }}/docker && docker compose down
+            docker compose -f ${{ github.workspace }}/docker/docker-compose.yml down
 
       - uses: julia-actions/setup-julia@v1
         with:
