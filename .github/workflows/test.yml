@@ -52,17 +52,15 @@ jobs:
         with:
           run: |
             docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup
-
             # Wait for Polaris catalog to be ready
             echo "Waiting for Polaris catalog to be ready..."
-            for i in {1..60}; do
-              if curl -f http://localhost:8181/api/catalog/v1/oauth/tokens \
-                --user root:s3cr3t \
-                -d 'grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL' \
-                -H 'Polaris-Realm: POLARIS' > /dev/null 2>&1; then
+            i=0
+            while [ $i -lt 60 ]; do
+              if curl -f http://localhost:8181/api/catalog/v1/oauth/tokens --user root:s3cr3t -d 'grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL' -H 'Polaris-Realm: POLARIS' > /dev/null 2>&1; then
                 echo "Polaris is ready!"
                 break
               fi
+              i=$((i+1))
               echo "Attempt $i: Waiting for Polaris..."
               sleep 2
             done
