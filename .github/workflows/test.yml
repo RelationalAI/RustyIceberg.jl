@@ -35,30 +35,36 @@ jobs:
     steps:
       - uses: actions/checkout@v3.5.0
 
-      - name: Setup Rust
-        if: inputs.build_rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
+      # - name: Setup Rust
+      #   if: inputs.build_rust
+      #   uses: actions-rust-lang/setup-rust-toolchain@v1
+      #   with:
+      #     toolchain: stable
 
-      - name: Build Rust FFI library
-        if: inputs.build_rust
-        run: |
-          cd iceberg_rust_ffi
-          cargo build --release
+      # - name: Build Rust FFI library
+      #   if: inputs.build_rust
+      #   run: |
+      #     cd iceberg_rust_ffi
+      #     cargo build --release
 
       - name: Start Iceberg catalog and S3 storage with Docker Compose
         uses: gacts/run-and-post-run@v1
         with:
-          run: >-
-            docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup &&
-            echo "Waiting for Polaris catalog to be ready..." &&
-            sh -c 'i=0; while [ $i -lt 60 ]; do
-              curl -f http://localhost:8181/api/catalog/v1/oauth/tokens --user root:s3cr3t -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" -H "Polaris-Realm: POLARIS" > /dev/null 2>&1 && echo "Polaris is ready!" && break;
-              i=$((i+1));
-              echo "Attempt $i: Waiting for Polaris...";
-              sleep 2;
-            done'
+          run: |
+            docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup
+            echo "Waiting for Polaris catalog to be ready..."
+            bash << 'EOF'
+            i=0
+            while [ $i -lt 60 ]; do
+              if curl -f http://localhost:8181/api/catalog/v1/oauth/tokens --user root:s3cr3t -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" -H "Polaris-Realm: POLARIS" > /dev/null 2>&1; then
+                echo "Polaris is ready!"
+                break
+              fi
+              i=$((i+1))
+              echo "Attempt $i: Waiting for Polaris..."
+              sleep 2
+            done
+            EOF
           post: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml down
 
       - uses: julia-actions/setup-julia@v1
