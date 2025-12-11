@@ -79,7 +79,7 @@ services:
     volumes:
       - ../assets/tpch:/input
       - ../assets/incremental:/input_incremental
-      - ./spark/init-datasets.py:/app/init-datasets.py
+      - ./scripts/init-datasets.py:/app/init-datasets.py
     environment:
       - AWS_ACCESS_KEY_ID=root
       - AWS_SECRET_ACCESS_KEY=password
@@ -123,7 +123,7 @@ services:
       polaris-setup:
         condition: service_completed_successfully
     volumes:
-      - ./spark/create-tables.py:/app/create-tables.py
+      - ./scripts/create-tables.py:/app/create-tables.py
     environment:
       - CLIENT_ID=root
       - CLIENT_SECRET=s3cr3t
