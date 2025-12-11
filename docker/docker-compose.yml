@@ -4,7 +4,7 @@ networks:
 services:
   minio:
     container_name: minio
-    image: quay.io/minio/minio:latest
+    image: minio/minio:latest
     ports:
       - "9000:9000" # MinIO API port
       - "9001:9001" # MinIO Console port
