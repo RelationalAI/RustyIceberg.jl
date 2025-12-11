@@ -59,26 +59,31 @@ jobs:
       - name: Wait for Polaris and catalog to be ready
         run: |
           echo "Waiting for Polaris catalog to be ready..."
-          TOKEN=""
           for i in $(seq 1 60); do
-            TOKEN=$(curl -s -X POST http://localhost:8181/api/catalog/v1/oauth/tokens \
-              --user root:s3cr3t \
-              -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" \
-              -H "Polaris-Realm: POLARIS" 2>/dev/null | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
-
-            if [ -n "$TOKEN" ]; then
-              # Token obtained, now check if the warehouse catalog exists
-              if curl -s -X GET http://localhost:8181/api/catalog/v1/warehouse/namespaces \
-                -H "Authorization: Bearer $TOKEN" 2>/dev/null | grep -q "namespace"; then
-                echo "Catalog is ready!"
-                exit 0
-              fi
+            if curl -f http://localhost:8181/api/catalog/v1/oauth/tokens --user root:s3cr3t -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" -H "Polaris-Realm: POLARIS" > /dev/null 2>&1; then
+              echo "Polaris is ready!"
+              exit 0
             fi
-
-            echo "Attempt $i: Waiting for Polaris catalog..."
+            echo "Attempt $i: Waiting for Polaris..."
             sleep 2
           done
-          echo "Polaris catalog did not become ready in time"
+          echo "Polaris did not become ready in time"
+          exit 1
+
+      - name: Wait for table creation to complete
+        run: |
+          echo "Waiting for table-creation service to complete..."
+          for i in $(seq 1 60); do
+            if docker compose -f ${{ github.workspace }}/docker/docker-compose.yml ps table-creation | grep -q "Exited"; then
+              echo "Table creation completed!"
+              docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | tail -20
+              exit 0
+            fi
+            echo "Attempt $i: Waiting for table creation..."
+            sleep 1
+          done
+          echo "Table creation did not complete in time"
+          docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | tail -50
           exit 1
 
       - uses: julia-actions/setup-julia@v1
