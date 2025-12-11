@@ -66,7 +66,7 @@ services:
 
   init:
     image: python:3.11-slim
-    container_name: spark-init
+    container_name: init
     networks:
       iceberg_net:
     depends_on:
@@ -92,7 +92,7 @@ services:
     depends_on:
       polaris:
         condition: service_healthy
-      spark-init:
+      init:
         condition: service_completed_successfully
     networks:
       iceberg_net:
