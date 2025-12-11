@@ -95,6 +95,22 @@ using Pkg
 Pkg.test("RustyIceberg")
 ```
 
+### Testing with Docker
+
+For end-to-end testing with Apache Polaris and MinIO, use Docker Compose:
+
+```bash
+cd docker
+docker compose up -d
+```
+
+This starts:
+- **MinIO** (port 9000): S3-compatible storage with credentials `root` / `password`
+- **Polaris** (port 8181): Iceberg REST catalog with credentials `root` / `s3cr3t`
+- **Test datasets**: TPC-H scale factor 0.01 and incremental test data
+
+See [docker/README.md](./docker/README.md) for detailed configuration and troubleshooting.
+
 ## CI
 CI runs with the custom iceberg_rust_ffi, built from the source. Releases run with official JLL, which is the default. CI overrides default using Preferences.jl.
 
