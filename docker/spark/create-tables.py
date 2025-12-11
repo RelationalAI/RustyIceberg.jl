@@ -8,6 +8,7 @@ Run this after datasets have been uploaded to S3.
 import os
 import sys
 import time
+import traceback
 import requests
 
 # Configuration
@@ -107,7 +108,6 @@ def get_access_token():
         return token
     except Exception as e:
         print(f"ERROR: Failed to obtain token: {e}")
-        import traceback
         traceback.print_exc()
         return None
 
@@ -254,7 +254,6 @@ def create_table(token, namespace, table_name, location):
 
     except Exception as e:
         print(f"  ERROR: Failed to register table: {e}")
-        import traceback
         traceback.print_exc()
         return False
 
