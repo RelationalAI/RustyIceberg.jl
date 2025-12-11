@@ -64,7 +64,7 @@ services:
       timeout: 5s
       retries: 5
 
-  spark-init:
+  init:
     image: python:3.11-slim
     container_name: spark-init
     networks:
