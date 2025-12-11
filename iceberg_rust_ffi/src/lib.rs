@@ -123,7 +123,7 @@ impl<T> SendPtr<T> {
 
 /// Helper function to serialize RecordBatch to Arrow IPC format
 // TODO: Switch to zero-copy once Arrow.jl supports C API.
-fn serialize_record_batch(batch: RecordBatch) -> Result<table::ArrowBatch> {
+fn serialize_record_batch(batch: RecordBatch) -> Result<ArrowBatch> {
     let buffer = Vec::new();
     let mut stream_writer = StreamWriter::try_new(buffer, &batch.schema())?;
     stream_writer.write(&batch)?;
@@ -135,7 +135,7 @@ fn serialize_record_batch(batch: RecordBatch) -> Result<table::ArrowBatch> {
     let length = boxed_data.len();
     let rust_ptr = Box::into_raw(boxed_data) as *mut c_void;
 
-    Ok(table::ArrowBatch {
+    Ok(ArrowBatch {
         data: data_ptr,
         length,
         rust_ptr,
@@ -147,7 +147,7 @@ fn serialize_record_batch(batch: RecordBatch) -> Result<table::ArrowBatch> {
 pub(crate) fn transform_stream_with_parallel_serialization(
     stream: futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>,
     concurrency: usize,
-) -> futures::stream::BoxStream<'static, Result<table::ArrowBatch, iceberg::Error>> {
+) -> futures::stream::BoxStream<'static, Result<ArrowBatch, iceberg::Error>> {
     stream
         .map(|batch_result| async move {
             match batch_result {
@@ -304,7 +304,7 @@ export_runtime_op!(
 
 // Synchronous operations
 #[no_mangle]
-pub extern "C" fn iceberg_table_free(table: *mut table::IcebergTable) {
+pub extern "C" fn iceberg_table_free(table: *mut IcebergTable) {
     if !table.is_null() {
         unsafe {
             let _ = Box::from_raw(table);
@@ -313,7 +313,7 @@ pub extern "C" fn iceberg_table_free(table: *mut table::IcebergTable) {
 }
 
 #[no_mangle]
-pub extern "C" fn iceberg_arrow_stream_free(stream: *mut table::IcebergArrowStream) {
+pub extern "C" fn iceberg_arrow_stream_free(stream: *mut IcebergArrowStream) {
     if !stream.is_null() {
         unsafe {
             let _ = Box::from_raw(stream);
@@ -322,7 +322,7 @@ pub extern "C" fn iceberg_arrow_stream_free(stream: *mut table::IcebergArrowStre
 }
 
 #[no_mangle]
-pub extern "C" fn iceberg_arrow_batch_free(batch: *mut table::ArrowBatch) {
+pub extern "C" fn iceberg_arrow_batch_free(batch: *mut ArrowBatch) {
     if batch.is_null() {
         return;
     }
