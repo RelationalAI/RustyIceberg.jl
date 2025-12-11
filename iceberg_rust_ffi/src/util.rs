@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 
 /// Parse FFI property entries into a HashMap
-pub fn parse_properties(
+pub(crate) fn parse_properties(
     properties: *const PropertyEntry,
     properties_len: usize,
 ) -> Result<HashMap<String, String>> {
@@ -31,7 +31,7 @@ pub fn parse_properties(
 }
 
 /// Parse FFI string array (pointer to array of c_char pointers)
-pub fn parse_string_array(ptr: *const *const c_char, len: usize) -> Result<Vec<String>> {
+pub(crate) fn parse_string_array(ptr: *const *const c_char, len: usize) -> Result<Vec<String>> {
     let mut strings = Vec::new();
     if !ptr.is_null() && len > 0 {
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
@@ -48,7 +48,7 @@ pub fn parse_string_array(ptr: *const *const c_char, len: usize) -> Result<Vec<S
 }
 
 /// Parse a single c_char pointer to String
-pub fn parse_c_string(ptr: *const c_char, field_name: &str) -> Result<String> {
+pub(crate) fn parse_c_string(ptr: *const c_char, field_name: &str) -> Result<String> {
     unsafe {
         CStr::from_ptr(ptr)
             .to_str()

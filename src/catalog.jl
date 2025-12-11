@@ -100,78 +100,6 @@ mutable struct NestedStringListResponse
 end
 
 """
-    _parse_nested_c_string_list(outer_items::Ptr{Ptr{Ptr{Cchar}}}, outer_count::Csize_t, inner_counts::Ptr{Csize_t})::Vector{Vector{String}}
-
-Helper function to parse a nested C string array returned by FFI functions.
-
-This converts a Rust-allocated nested string list (outer array of inner string arrays)
-into a Julia Vector{Vector{String}}.
-
-# Arguments
-- `outer_items`: Pointer to array of pointers to string arrays
-- `outer_count`: Number of outer items
-- `inner_counts`: Pointer to array of inner counts for each outer item
-
-# Returns
-A Vector{Vector{String}} representing the parsed nested list
-"""
-function _parse_nested_c_string_list(
-    outer_items::Ptr{Ptr{Ptr{Cchar}}},
-    outer_count::Csize_t,
-    inner_counts::Ptr{Csize_t}
-)
-    result = Vector{String}[]
-
-    if outer_items == C_NULL || outer_count == 0
-        return result
-    end
-
-    if inner_counts == C_NULL
-        return result
-    end
-
-    for i in 1:outer_count
-        # Load inner_count for this item
-        # inner_counts is a *mut Vec<usize>
-        # Vec layout: [len: usize, data: *mut usize, capacity: usize]
-        # The data pointer is at offset 8 (after the len field)
-        # Read as UInt64 array to get the data pointer at index 2 (1-based)
-        inner_counts_data_ptr_as_u64 = unsafe_load(Ptr{UInt64}(inner_counts), 2)
-        inner_counts_data = reinterpret(Ptr{Csize_t}, inner_counts_data_ptr_as_u64)
-        inner_counts_array_ptr = unsafe_load(inner_counts_data, i)
-
-        # Load pointer to inner items array
-        # outer_items is a *mut Vec<*mut *mut c_char>
-        # Vec layout: [len: usize, data: *mut *mut c_char, capacity: usize]
-        # The data pointer is at offset 8 (after the len field)
-        outer_items_data_ptr_as_u64 = unsafe_load(Ptr{UInt64}(outer_items), 2)
-        outer_items_data = reinterpret(Ptr{Ptr{Cchar}}, outer_items_data_ptr_as_u64)
-        vec_data_ptr = unsafe_load(outer_items_data, i)
-        inner_items_ptr = vec_data_ptr
-
-        namespace = String[]
-        if inner_items_ptr != C_NULL && inner_counts_array_ptr > 0
-            # inner_items_ptr is a *mut Vec<*mut c_char>
-            # Extract the data pointer from the Vec
-            # Vec layout: [len: usize, data: *mut *mut c_char, capacity: usize]
-            strings_data_ptr_as_u64 = unsafe_load(Ptr{UInt64}(inner_items_ptr), 2)
-            strings_data = reinterpret(Ptr{Ptr{Cchar}}, strings_data_ptr_as_u64)
-
-            # Load each string pointer individually
-            for j in 1:inner_counts_array_ptr
-                str_ptr = unsafe_load(strings_data, j)
-                if str_ptr != C_NULL
-                    push!(namespace, unsafe_string(str_ptr))
-                end
-            end
-        end
-        push!(result, namespace)
-    end
-
-    return result
-end
-
-"""
     catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{String,String}())::Catalog
 
 Create a REST catalog connection.
@@ -397,4 +325,80 @@ function catalog_table_exists(catalog::Catalog, namespace::Vector{String}, table
     @throw_on_error(response, "catalog_table_exists", IcebergException)
 
     return response.value
+end
+
+"""
+    _parse_nested_c_string_list(
+        outer_items::Ptr{Ptr{Ptr{Cchar}}},
+        outer_count::Csize_t,
+        inner_counts::Ptr{Csize_t}
+    )::Vector{Vector{String}}
+
+Helper function to parse a nested C string array returned by FFI functions.
+
+This converts a Rust-allocated nested string list (outer array of inner string arrays)
+into a Julia Vector{Vector{String}}.
+
+# Arguments
+- `outer_items`: Pointer to array of pointers to string arrays
+- `outer_count`: Number of outer items
+- `inner_counts`: Pointer to array of inner counts for each outer item
+
+# Returns
+A Vector{Vector{String}} representing the parsed nested list
+"""
+function _parse_nested_c_string_list(
+    outer_items::Ptr{Ptr{Ptr{Cchar}}},
+    outer_count::Csize_t,
+    inner_counts::Ptr{Csize_t}
+)
+    result = Vector{String}[]
+
+    if outer_items == C_NULL || outer_count == 0
+        return result
+    end
+
+    if inner_counts == C_NULL
+        return result
+    end
+
+    for i in 1:outer_count
+        # Load inner_count for this item
+        # inner_counts is a *mut Vec<usize>
+        # Vec layout: [len: usize, data: *mut usize, capacity: usize]
+        # The data pointer is at offset 8 (after the len field)
+        # Read as UInt64 array to get the data pointer at index 2 (1-based)
+        inner_counts_data_ptr_as_u64 = unsafe_load(Ptr{UInt64}(inner_counts), 2)
+        inner_counts_data = reinterpret(Ptr{Csize_t}, inner_counts_data_ptr_as_u64)
+        inner_counts_array_ptr = unsafe_load(inner_counts_data, i)
+
+        # Load pointer to inner items array
+        # outer_items is a *mut Vec<*mut *mut c_char>
+        # Vec layout: [len: usize, data: *mut *mut c_char, capacity: usize]
+        # The data pointer is at offset 8 (after the len field)
+        outer_items_data_ptr_as_u64 = unsafe_load(Ptr{UInt64}(outer_items), 2)
+        outer_items_data = reinterpret(Ptr{Ptr{Cchar}}, outer_items_data_ptr_as_u64)
+        vec_data_ptr = unsafe_load(outer_items_data, i)
+        inner_items_ptr = vec_data_ptr
+
+        namespace = String[]
+        if inner_items_ptr != C_NULL && inner_counts_array_ptr > 0
+            # inner_items_ptr is a *mut Vec<*mut c_char>
+            # Extract the data pointer from the Vec
+            # Vec layout: [len: usize, data: *mut *mut c_char, capacity: usize]
+            strings_data_ptr_as_u64 = unsafe_load(Ptr{UInt64}(inner_items_ptr), 2)
+            strings_data = reinterpret(Ptr{Ptr{Cchar}}, strings_data_ptr_as_u64)
+
+            # Load each string pointer individually
+            for j in 1:inner_counts_array_ptr
+                str_ptr = unsafe_load(strings_data, j)
+                if str_ptr != C_NULL
+                    push!(namespace, unsafe_string(str_ptr))
+                end
+            end
+        end
+        push!(result, namespace)
+    end
+
+    return result
 end
