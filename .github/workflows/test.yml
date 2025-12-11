@@ -67,9 +67,9 @@ jobs:
           cargo build --release
 
       - name: Start Iceberg catalog and S3 storage with Docker Compose
-        run: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup
+        run: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup spark-init table-creation
 
-      - name: Wait for Polaris to be ready
+      - name: Wait for Polaris and catalog to be ready
         run: |
           echo "Waiting for Polaris catalog to be ready..."
           for i in $(seq 1 60); do
@@ -83,22 +83,20 @@ jobs:
           echo "Polaris did not become ready in time"
           exit 1
 
-      - name: Start table-creation and wait for catalog to be ready
+      - name: Wait for table creation to complete
         run: |
-          echo "Starting table-creation service..."
-          docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up table-creation
-
-          echo "Waiting for catalog and tables to be created..."
-          for i in $(seq 1 30); do
-            if docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | grep -q "All tables created successfully\|Some tables failed"; then
+          echo "Waiting for table-creation service to complete..."
+          for i in $(seq 1 60); do
+            if docker compose -f ${{ github.workspace }}/docker/docker-compose.yml ps table-creation | grep -q "Exited"; then
               echo "Table creation completed!"
+              docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | tail -20
               exit 0
             fi
             echo "Attempt $i: Waiting for table creation..."
-            sleep 2
+            sleep 1
           done
           echo "Table creation did not complete in time"
-          docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation
+          docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | tail -50
           exit 1
 
       - uses: julia-actions/setup-julia@v1
