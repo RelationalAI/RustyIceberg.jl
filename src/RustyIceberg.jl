@@ -160,7 +160,7 @@ function wait_or_cancel(event::Base.Event, response)
 end
 
 """
-    async_ccall(f::Function, response, preserve_objs...) -> result
+    async_ccall(f::F, response, preserve_objs...) -> result where F<:Function
 
 Helper function to execute an async FFI call with proper task preservation and error handling.
 
@@ -173,7 +173,7 @@ This function handles the common pattern of:
 6. Checking for errors
 
 # Arguments
-- `f::Function`: A callable that takes (handle) and performs the FFI call
+- `f::F`: A callable that takes (handle) and performs the FFI call
 - `response`: Response object to pass to the FFI call
 - `preserve_objs...`: Additional objects to preserve with GC.@preserve (e.g., arrays, strings)
 
@@ -193,7 +193,7 @@ async_ccall(response, obj1, obj2) do handle
 end
 ```
 """
-function async_ccall(f::Function, response, preserve_objs...)
+function async_ccall(f::F, response, preserve_objs...) where F<:Function
     ct = current_task()
     event = Base.Event()
     handle = pointer_from_objref(event)
