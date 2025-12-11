@@ -494,18 +494,18 @@ end
     catalog = C_NULL
     try
         # Test catalog creation with REST API and Polaris credentials
-        credentials = Dict(
+        props = Dict(
             "credential" => "root:s3cr3t",
             "scope" => "PRINCIPAL_ROLE:ALL",
             "warehouse" => "warehouse"
         )
-        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=credentials)
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         @test catalog != C_NULL
         println("✅ Catalog created successfully at $catalog_uri with authentication")
 
         # Test listing namespaces
         println("Attempting to list namespaces...")
-        root_namespaces = RustyIceberg.catalog_list_namespaces(catalog)
+        root_namespaces = RustyIceberg.list_namespaces(catalog)
         @test isa(root_namespaces, Vector{Vector{String}})
         @test length(root_namespaces) >= 2
         println("✅ Root namespaces listed: $root_namespaces")
@@ -522,7 +522,7 @@ end
 
         # Test listing tables in tpch.sf01 namespace
         println("Attempting to list tables in tpch.sf01...")
-        tpch_tables = RustyIceberg.catalog_list_tables(catalog, ["tpch.sf01"])
+        tpch_tables = RustyIceberg.list_tables(catalog, ["tpch.sf01"])
         @test isa(tpch_tables, Vector{String})
         @test length(tpch_tables) > 0
         println("✅ Tables in tpch.sf01: $tpch_tables")
@@ -537,26 +537,26 @@ end
         # Test table existence check for TPCH tables
         println("Verifying table existence for TPCH tables...")
         for table in expected_tables
-            exists = RustyIceberg.catalog_table_exists(catalog, ["tpch.sf01"], table)
+            exists = RustyIceberg.table_exists(catalog, ["tpch.sf01"], table)
             @test exists == true
         end
         println("✅ All TPCH tables verified to exist: $expected_tables")
 
         # Test that a non-existent table returns false
-        nonexistent_exists = RustyIceberg.catalog_table_exists(catalog, ["tpch.sf01"], "nonexistent_table")
+        nonexistent_exists = RustyIceberg.table_exists(catalog, ["tpch.sf01"], "nonexistent_table")
         @test nonexistent_exists == false
         println("✅ Non-existent table correctly returns false")
 
         # Test listing tables in incremental namespace
         println("Attempting to list tables in incremental...")
-        incremental_tables = RustyIceberg.catalog_list_tables(catalog, ["incremental"])
+        incremental_tables = RustyIceberg.list_tables(catalog, ["incremental"])
         @test isa(incremental_tables, Vector{String})
         println("✅ Tables in incremental: $incremental_tables")
 
         # Test table existence check for incremental tables
         println("Verifying table existence for incremental tables...")
         for table in incremental_tables
-            exists = RustyIceberg.catalog_table_exists(catalog, ["incremental"], table)
+            exists = RustyIceberg.table_exists(catalog, ["incremental"], table)
             @test exists == true
         end
         println("✅ All incremental tables verified to exist: $incremental_tables")
@@ -588,7 +588,7 @@ end
     try
         # Create catalog connection with MinIO S3 configuration
         # Note: Use localhost since we're running from the host, not from within the Docker network
-        credentials = Dict(
+        props = Dict(
             "credential" => "root:s3cr3t",
             "scope" => "PRINCIPAL_ROLE:ALL",
             "warehouse" => "warehouse",
@@ -597,13 +597,13 @@ end
             "s3.secret-access-key" => "password",
             "s3.region" => "us-east-1"
         )
-        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=credentials)
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         @test catalog != C_NULL
         println("✅ Catalog created successfully")
 
         # Load the customer table from tpch.sf01 namespace
         println("Attempting to load customer table from tpch.sf01...")
-        table = RustyIceberg.catalog_load_table(catalog, ["tpch.sf01"], "customer")
+        table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer")
         @test table != C_NULL
         println("✅ Customer table loaded successfully from catalog")
 

@@ -149,7 +149,7 @@ function free_catalog(catalog::Catalog)
 end
 
 """
-    catalog_load_table(catalog::Catalog, namespace::Vector{String}, table_name::String)::Table
+    load_table(catalog::Catalog, namespace::Vector{String}, table_name::String)::Table
 
 Load a table from a catalog by namespace and name.
 
@@ -163,10 +163,10 @@ Load a table from a catalog by namespace and name.
 
 # Example
 ```julia
-table = catalog_load_table(catalog, ["warehouse", "orders"], "customers")
+table = load_table(catalog, ["warehouse", "orders"], "customers")
 ```
 """
-function catalog_load_table(catalog::Catalog, namespace::Vector{String}, table_name::String)
+function load_table(catalog::Catalog, namespace::Vector{String}, table_name::String)
     response = TableResponse()
 
     # Convert namespace to array of C strings
@@ -190,7 +190,7 @@ function catalog_load_table(catalog::Catalog, namespace::Vector{String}, table_n
 end
 
 """
-    catalog_list_tables(catalog::Catalog, namespace::Vector{String})::Vector{String}
+    list_tables(catalog::Catalog, namespace::Vector{String})::Vector{String}
 
 List tables in a namespace.
 
@@ -203,10 +203,10 @@ List tables in a namespace.
 
 # Example
 ```julia
-tables = catalog_list_tables(catalog, ["warehouse", "orders"])
+tables = list_tables(catalog, ["warehouse", "orders"])
 ```
 """
-function catalog_list_tables(catalog::Catalog, namespace::Vector{String})
+function list_tables(catalog::Catalog, namespace::Vector{String})
     response = StringListResponse()
 
     # Convert namespace to array of C strings
@@ -223,7 +223,7 @@ function catalog_list_tables(catalog::Catalog, namespace::Vector{String})
         )::Cint
     end
 
-    @throw_on_error(response, "catalog_list_tables", IcebergException)
+    @throw_on_error(response, "list_tables", IcebergException)
 
     # Convert C string array to Julia strings
     tables = String[]
@@ -246,7 +246,7 @@ function catalog_list_tables(catalog::Catalog, namespace::Vector{String})
 end
 
 """
-    catalog_list_namespaces(catalog::Catalog, parent::Vector{String}=String[])::Vector{Vector{String}}
+    list_namespaces(catalog::Catalog, parent::Vector{String}=String[])::Vector{Vector{String}}
 
 List namespaces.
 
@@ -259,11 +259,11 @@ List namespaces.
 
 # Example
 ```julia
-namespaces = catalog_list_namespaces(catalog)
-all_namespaces = catalog_list_namespaces(catalog, ["warehouse"])
+namespaces = list_namespaces(catalog)
+all_namespaces = list_namespaces(catalog, ["warehouse"])
 ```
 """
-function catalog_list_namespaces(catalog::Catalog, parent::Vector{String}=String[])
+function list_namespaces(catalog::Catalog, parent::Vector{String}=String[])
     response = NestedStringListResponse()
 
     # Convert parent to array of C strings
@@ -280,14 +280,14 @@ function catalog_list_namespaces(catalog::Catalog, parent::Vector{String}=String
         )::Cint
     end
 
-    @throw_on_error(response, "catalog_list_namespaces", IcebergException)
+    @throw_on_error(response, "list_namespaces", IcebergException)
 
     # Parse nested C string array using helper function
     return _parse_nested_c_string_list(response.outer_items, response.outer_count, response.inner_counts)
 end
 
 """
-    catalog_table_exists(catalog::Catalog, namespace::Vector{String}, table_name::String)::Bool
+    table_exists(catalog::Catalog, namespace::Vector{String}, table_name::String)::Bool
 
 Check if a table exists in a catalog.
 
@@ -301,10 +301,10 @@ Check if a table exists in a catalog.
 
 # Example
 ```julia
-exists = catalog_table_exists(catalog, ["warehouse", "orders"], "customers")
+exists = table_exists(catalog, ["warehouse", "orders"], "customers")
 ```
 """
-function catalog_table_exists(catalog::Catalog, namespace::Vector{String}, table_name::String)
+function table_exists(catalog::Catalog, namespace::Vector{String}, table_name::String)
     response = BoolResponse()
 
     # Convert namespace to array of C strings
@@ -322,7 +322,7 @@ function catalog_table_exists(catalog::Catalog, namespace::Vector{String}, table
         )::Cint
     end
 
-    @throw_on_error(response, "catalog_table_exists", IcebergException)
+    @throw_on_error(response, "table_exists", IcebergException)
 
     return response.value
 end
