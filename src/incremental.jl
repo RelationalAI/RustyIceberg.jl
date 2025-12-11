@@ -104,7 +104,24 @@ function select_columns!(scan::IncrementalScan, column_names::Vector{String})
     )::Cint
 
     if result != 0
-        error("Failed to select columns for incremental scan")
+        throw(IcebergException("Failed to select columns for incremental scan", result))
+    end
+    return nothing
+end
+
+"""
+    with_manifest_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
+
+Sets the manifest file concurrency level for the incremental scan.
+"""
+function with_manifest_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
+    result = @ccall rust_lib.iceberg_incremental_scan_with_manifest_file_concurrency_limit(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set manifest file concurrency limit for incremental scan", result))
     end
     return nothing
 end
@@ -121,7 +138,7 @@ function with_data_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        error("Failed to set data file concurrency limit for incremental scan")
+        throw(IcebergException("Failed to set data file concurrency limit for incremental scan", result))
     end
     return nothing
 end
@@ -138,7 +155,7 @@ function with_manifest_entry_concurrency_limit!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        error("Failed to set manifest entry concurrency limit for incremental scan")
+        throw(IcebergException("Failed to set manifest entry concurrency limit for incremental scan", result))
     end
     return nothing
 end
@@ -155,7 +172,7 @@ function with_batch_size!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        error("Failed to set batch size for incremental scan")
+        throw(IcebergException("Failed to set batch size for incremental scan", result))
     end
     return nothing
 end
@@ -181,7 +198,38 @@ function with_file_column!(scan::IncrementalScan)
     )::Cint
 
     if result != 0
-        error("Failed to add file column to incremental scan")
+        throw(IcebergException("Failed to add file column to incremental scan", result))
+    end
+    return nothing
+end
+
+"""
+    with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
+
+Set the serialization concurrency limit for the incremental scan.
+
+This controls how many RecordBatch serializations can happen in parallel for each stream.
+- `n = 0`: Auto-detect based on CPU cores (default)
+- `n > 0`: Use exactly n concurrent serializations per stream
+
+Note: Incremental scans have two separate streams (inserts and deletes), so total
+concurrency can be up to 2×n.
+
+# Example
+```julia
+scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+with_serialization_concurrency_limit!(scan, UInt(8))  # Each stream serializes up to 8 batches in parallel
+inserts_stream, deletes_stream = scan!(scan)
+```
+"""
+function with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
+    result = @ccall rust_lib.iceberg_incremental_scan_with_serialization_concurrency_limit(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set serialization concurrency limit for incremental scan", result))
     end
     return nothing
 end
@@ -207,7 +255,7 @@ function with_pos_column!(scan::IncrementalScan)
     )::Cint
 
     if result != 0
-        error("Failed to add pos column to incremental scan")
+        throw(IcebergException("Failed to add pos column to incremental scan", result))
     end
     return nothing
 end

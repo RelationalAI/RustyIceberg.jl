@@ -51,7 +51,7 @@ function select_columns!(scan::Scan, column_names::Vector{String})
     )::Cint
 
     if result != 0
-        error("Failed to select columns")
+        throw(IcebergException("Failed to select columns", result))
     end
     return nothing
 end
@@ -68,7 +68,24 @@ function with_data_file_concurrency_limit!(scan::Scan, n::UInt)
     )::Cint
 
     if result != 0
-        error("Failed to set data file concurrency limit")
+        throw(IcebergException("Failed to set data file concurrency limit", result))
+    end
+    return nothing
+end
+
+"""
+    with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
+
+Sets the manifest file concurrency level for the full scan.
+"""
+function with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
+    result = @ccall rust_lib.iceberg_scan_with_manifest_file_concurrency_limit(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set manifest file concurrency limit", result))
     end
     return nothing
 end
@@ -85,7 +102,7 @@ function with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
     )::Cint
 
     if result != 0
-        error("Failed to set manifest entry concurrency limit")
+        throw(IcebergException("Failed to set manifest entry concurrency limit", result))
     end
     return nothing
 end
@@ -102,7 +119,7 @@ function with_batch_size!(scan::Scan, n::UInt)
     )::Cint
 
     if result != 0
-        error("Failed to set batch size")
+        throw(IcebergException("Failed to set batch size", result))
     end
     return nothing
 end
@@ -128,7 +145,7 @@ function with_file_column!(scan::Scan)
     )::Cint
 
     if result != 0
-        error("Failed to add file column to scan")
+        throw(IcebergException("Failed to add file column to scan", result))
     end
     return nothing
 end
@@ -154,7 +171,37 @@ function with_pos_column!(scan::Scan)
     )::Cint
 
     if result != 0
-        error("Failed to add pos column to scan")
+        throw(IcebergException("Failed to add pos column to scan", result))
+    end
+    return nothing
+end
+
+"""
+    with_serialization_concurrency_limit!(scan::Scan, n::UInt)
+
+Set the serialization concurrency limit for the scan.
+
+This controls how many RecordBatch serializations can happen in parallel.
+- `n = 0`: Auto-detect based on CPU cores (default)
+- `n > 0`: Use exactly n concurrent serializations
+
+Higher values improve throughput for scans with many batches, but use more memory.
+
+# Example
+```julia
+scan = new_scan(table)
+with_serialization_concurrency_limit!(scan, UInt(8))  # Serialize up to 8 batches in parallel
+stream = scan!(scan)
+```
+"""
+function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
+    result = @ccall rust_lib.iceberg_scan_with_serialization_concurrency_limit(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set serialization concurrency limit", result))
     end
     return nothing
 end

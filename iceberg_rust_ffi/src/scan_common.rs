@@ -37,6 +37,7 @@ macro_rules! impl_select_columns {
             *scan = Box::into_raw(Box::new($scan_type {
                 builder: scan_ref.builder.map(|b| b.select(columns)),
                 scan: scan_ref.scan,
+                serialization_concurrency: scan_ref.serialization_concurrency,
             }));
 
             CResult::Ok
@@ -82,6 +83,7 @@ macro_rules! impl_scan_builder_method {
             *scan = Box::into_raw(Box::new($scan_type {
                 builder: scan_ref.builder.map(|b| b.$builder_method($($param),*)),
                 scan: scan_ref.scan,
+                serialization_concurrency: scan_ref.serialization_concurrency,
             }));
 
             CResult::Ok
@@ -108,6 +110,7 @@ macro_rules! impl_with_batch_size {
             *scan = Box::into_raw(Box::new($scan_type {
                 builder: scan_ref.builder.map(|b| b.with_batch_size(Some(n))),
                 scan: None,
+                serialization_concurrency: scan_ref.serialization_concurrency,
             }));
 
             CResult::Ok
@@ -134,6 +137,7 @@ macro_rules! impl_scan_build {
                     *scan = Box::into_raw(Box::new($scan_type {
                         builder: None,
                         scan: Some(built_scan),
+                        serialization_concurrency: scan_ref.serialization_concurrency,
                     }));
                     CResult::Ok
                 }
@@ -158,9 +162,26 @@ macro_rules! impl_scan_free {
     };
 }
 
+/// Macro to generate with_serialization_concurrency_limit function for any scan type
+macro_rules! impl_with_serialization_concurrency_limit {
+    ($fn_name:ident, $scan_type:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type, n: usize) -> CResult {
+            if scan.is_null() || (*scan).is_null() {
+                return CResult::Error;
+            }
+            let mut scan_ref = unsafe { Box::from_raw(*scan) };
+            scan_ref.serialization_concurrency = n;
+            *scan = Box::into_raw(scan_ref);
+            CResult::Ok
+        }
+    };
+}
+
 // Re-export macros for use in other modules
 pub(crate) use impl_scan_build;
 pub(crate) use impl_scan_builder_method;
 pub(crate) use impl_scan_free;
 pub(crate) use impl_select_columns;
 pub(crate) use impl_with_batch_size;
+pub(crate) use impl_with_serialization_concurrency_limit;

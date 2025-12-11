@@ -23,7 +23,10 @@ export load_table, list_tables, list_namespaces, table_exists
 const rust_lib = iceberg_rust_ffi_jll.libiceberg_rust_ffi
 
 """
+    struct StaticConfig
+
 Runtime configuration for the Iceberg library.
+Value of 0 means use all CPU cores, regardless of the number of threads in the Julia runtime.
 """
 struct StaticConfig
     n_threads::Culonglong
@@ -91,7 +94,7 @@ This starts a `tokio` runtime for handling Iceberg requests.
 It must be called before sending a request.
 """
 function init_runtime(
-    config::StaticConfig=StaticConfig(0);
+    config::StaticConfig=StaticConfig(Threads.nthreads());
     on_rust_panic::Function=default_panic_hook
 )
     global _PANIC_HOOK
