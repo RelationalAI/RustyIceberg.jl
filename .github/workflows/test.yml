@@ -56,33 +56,30 @@ jobs:
       - name: Start Iceberg catalog and S3 storage with Docker Compose
         run: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup spark-init table-creation
 
-      - name: Wait for Polaris and catalog to be ready
+      - name: Wait for Polaris and tables to be ready
         run: |
-          echo "Waiting for Polaris catalog to be ready..."
-          for i in $(seq 1 60); do
-            if curl -f http://localhost:8181/api/catalog/v1/oauth/tokens --user root:s3cr3t -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" -H "Polaris-Realm: POLARIS" > /dev/null 2>&1; then
-              echo "Polaris is ready!"
-              exit 0
-            fi
-            echo "Attempt $i: Waiting for Polaris..."
-            sleep 2
-          done
-          echo "Polaris did not become ready in time"
-          exit 1
+          echo "Waiting for Polaris and table creation to complete..."
+          for i in $(seq 1 120); do
+            TOKEN=$(curl -s -X POST http://localhost:8181/api/catalog/v1/oauth/tokens \
+              --user root:s3cr3t \
+              -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" \
+              -H "Polaris-Realm: POLARIS" 2>/dev/null | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
 
-      - name: Wait for table creation to complete
-        run: |
-          echo "Waiting for table-creation service to complete..."
-          for i in $(seq 1 60); do
-            if docker compose -f ${{ github.workspace }}/docker/docker-compose.yml ps table-creation | grep -q "Exited"; then
-              echo "Table creation completed!"
-              docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | tail -20
-              exit 0
+            if [ -n "$TOKEN" ]; then
+              # Check if tpch.sf01 namespace exists (created by create-tables.py)
+              RESPONSE=$(curl -s -X GET http://localhost:8181/api/catalog/v1/warehouse/namespaces/tpch.sf01 \
+                -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+
+              if echo "$RESPONSE" | grep -q "tpch.sf01"; then
+                echo "Tables are ready!"
+                exit 0
+              fi
             fi
-            echo "Attempt $i: Waiting for table creation..."
+
+            echo "Attempt $i: Waiting for tables to be created..."
             sleep 1
           done
-          echo "Table creation did not complete in time"
+          echo "Tables did not become ready in time"
           docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | tail -50
           exit 1
 
