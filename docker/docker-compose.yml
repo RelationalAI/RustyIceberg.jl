@@ -129,8 +129,9 @@ services:
     command: sh -c "pip install --no-cache-dir boto3 requests && python3 /app/create-tables.py"
 
   spark-iceberg:
-    image: apache/spark:3.5.1-java17
+    image: tabulario/spark-iceberg
     container_name: spark-iceberg
+    build: spark/
     networks:
       iceberg_net:
     depends_on:
@@ -138,16 +139,14 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./warehouse:/home/iceberg/warehouse
+      - ./notebooks:/home/iceberg/notebooks/notebooks
     environment:
       - AWS_ACCESS_KEY_ID=root
       - AWS_SECRET_ACCESS_KEY=password
       - AWS_REGION=us-east-1
       - AWS_ENDPOINT_URL=http://minio:9000
-      - ICEBERG_CATALOG__WAREHOUSE=s3://warehouse
-      - ICEBERG_CATALOG__URI=http://polaris:8181
-      - ICEBERG_CATALOG__CREDENTIAL=root:s3cr3t
     ports:
-      - 8080:8080  # Spark Web UI
-      - 10000:10000  # Spark Driver
-      - 10001:10001  # Spark Executor
-    command: tail -f /dev/null  # Keep container running for interactive use
+      - 8888:8888
+      - 8080:8080
+      - 10000:10000
+      - 10001:10001
