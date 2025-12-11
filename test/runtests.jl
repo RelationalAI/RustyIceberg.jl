@@ -484,6 +484,186 @@ end
     println("✅ Incremental scan test completed successfully!")
 end
 
+@testset "Catalog API" begin
+    println("Testing catalog API...")
+
+    # Test connecting to Polaris REST catalog running at localhost:8181
+    # This requires the catalog to be running via docker-compose
+    catalog_uri = "http://localhost:8181/api/catalog"
+
+    catalog = C_NULL
+    try
+        # Test catalog creation with REST API and Polaris credentials
+        credentials = Dict(
+            "credential" => "root:s3cr3t",
+            "scope" => "PRINCIPAL_ROLE:ALL",
+            "warehouse" => "warehouse"
+        )
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=credentials)
+        @test catalog != C_NULL
+        println("✅ Catalog created successfully at $catalog_uri with authentication")
+
+        # Test listing namespaces
+        println("Attempting to list namespaces...")
+        root_namespaces = RustyIceberg.catalog_list_namespaces(catalog)
+        @test isa(root_namespaces, Vector{Vector{String}})
+        @test length(root_namespaces) >= 2
+        println("✅ Root namespaces listed: $root_namespaces")
+
+        # Verify expected namespaces exist in the Polaris test catalog
+        @test ["incremental"] in root_namespaces
+        @test ["tpch.sf01"] in root_namespaces
+        println("✅ Expected namespaces verified: 'incremental' and 'tpch.sf01'")
+
+        # Verify the exact namespaces match what we expect
+        expected_namespaces = [["incremental"], ["tpch.sf01"]]
+        @test sort(root_namespaces) == sort(expected_namespaces)
+        println("✅ Namespace list matches exactly: $expected_namespaces")
+
+        # Test listing tables in tpch.sf01 namespace
+        println("Attempting to list tables in tpch.sf01...")
+        tpch_tables = RustyIceberg.catalog_list_tables(catalog, ["tpch.sf01"])
+        @test isa(tpch_tables, Vector{String})
+        @test length(tpch_tables) > 0
+        println("✅ Tables in tpch.sf01: $tpch_tables")
+
+        # Verify expected TPCH tables exist
+        expected_tables = ["customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier"]
+        for table in expected_tables
+            @test table in tpch_tables
+        end
+        println("✅ All expected TPCH tables found: $expected_tables")
+
+        # Test table existence check for TPCH tables
+        println("Verifying table existence for TPCH tables...")
+        for table in expected_tables
+            exists = RustyIceberg.catalog_table_exists(catalog, ["tpch.sf01"], table)
+            @test exists == true
+        end
+        println("✅ All TPCH tables verified to exist: $expected_tables")
+
+        # Test that a non-existent table returns false
+        nonexistent_exists = RustyIceberg.catalog_table_exists(catalog, ["tpch.sf01"], "nonexistent_table")
+        @test nonexistent_exists == false
+        println("✅ Non-existent table correctly returns false")
+
+        # Test listing tables in incremental namespace
+        println("Attempting to list tables in incremental...")
+        incremental_tables = RustyIceberg.catalog_list_tables(catalog, ["incremental"])
+        @test isa(incremental_tables, Vector{String})
+        println("✅ Tables in incremental: $incremental_tables")
+
+        # Test table existence check for incremental tables
+        println("Verifying table existence for incremental tables...")
+        for table in incremental_tables
+            exists = RustyIceberg.catalog_table_exists(catalog, ["incremental"], table)
+            @test exists == true
+        end
+        println("✅ All incremental tables verified to exist: $incremental_tables")
+
+    catch e
+        rethrow(e)
+    finally
+        # Clean up
+        if catalog != C_NULL
+            RustyIceberg.free_catalog(catalog)
+            println("✅ Catalog cleaned up successfully")
+        end
+    end
+
+    println("✅ Catalog API tests completed!")
+end
+
+@testset "Catalog Table Loading" begin
+    println("Testing catalog table loading...")
+
+    catalog_uri = "http://localhost:8181/api/catalog"
+
+    catalog = C_NULL
+    table = C_NULL
+    scan = C_NULL
+    stream = C_NULL
+    batch = nothing
+
+    try
+        # Create catalog connection with MinIO S3 configuration
+        # Note: Use localhost since we're running from the host, not from within the Docker network
+        credentials = Dict(
+            "credential" => "root:s3cr3t",
+            "scope" => "PRINCIPAL_ROLE:ALL",
+            "warehouse" => "warehouse",
+            "s3.endpoint" => "http://localhost:9000",
+            "s3.access-key-id" => "root",
+            "s3.secret-access-key" => "password",
+            "s3.region" => "us-east-1"
+        )
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=credentials)
+        @test catalog != C_NULL
+        println("✅ Catalog created successfully")
+
+        # Load the customer table from tpch.sf01 namespace
+        println("Attempting to load customer table from tpch.sf01...")
+        table = RustyIceberg.catalog_load_table(catalog, ["tpch.sf01"], "customer")
+        @test table != C_NULL
+        println("✅ Customer table loaded successfully from catalog")
+
+        # Create a scan on the loaded table
+        println("Creating scan on loaded customer table...")
+        scan = RustyIceberg.new_scan(table)
+        @test scan != C_NULL
+        println("✅ Scan created successfully on loaded table")
+
+        # Select specific columns to verify table structure
+        println("Selecting specific columns from customer table...")
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
+        println("✅ Column selection completed")
+
+        # Execute the scan
+        println("Executing scan on loaded customer table...")
+        stream = RustyIceberg.scan!(scan)
+        @test stream != C_NULL
+        println("✅ Scan executed successfully")
+
+        # Read the first batch to verify data
+        println("Reading first batch from loaded customer table...")
+        batch_ptr = RustyIceberg.next_batch(stream)
+
+        if batch_ptr != C_NULL
+            batch = unsafe_load(batch_ptr)
+            if batch.data != C_NULL && batch.length > 0
+                println("✅ Successfully read first batch with $(batch.length) bytes of Arrow IPC data")
+
+                # Verify we got actual data from the customer table
+                @test batch.length > 0
+                println("✅ Batch contains valid Arrow data from catalog-loaded customer table")
+
+                # Clean up the batch
+                RustyIceberg.free_batch(batch_ptr)
+            end
+        end
+
+    catch e
+        rethrow(e)
+    finally
+        # Clean up all resources in reverse order
+        if stream != C_NULL
+            RustyIceberg.free_stream(stream)
+        end
+        if scan != C_NULL
+            RustyIceberg.free_scan!(scan)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+        end
+        if catalog != C_NULL
+            RustyIceberg.free_catalog(catalog)
+        end
+        println("✅ All resources cleaned up successfully")
+    end
+
+    println("✅ Catalog table loading tests completed!")
+end
+
 @testset "Builder API Tests" begin
     println("Testing builder API methods...")
 

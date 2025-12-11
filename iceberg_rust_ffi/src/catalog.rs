@@ -234,8 +234,8 @@ impl crate::RawResponse for IcebergNestedStringListResponse {
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload {
             Some(namespace_lists) => {
-                let mut outer = Vec::new();
-                let mut inner_counts = Vec::new();
+                let mut outer_items_vec: Vec<*mut *mut c_char> = Vec::new();
+                let mut inner_counts: Vec<usize> = Vec::new();
 
                 for namespace in namespace_lists {
                     let strings: Vec<*mut c_char> = namespace
@@ -246,13 +246,19 @@ impl crate::RawResponse for IcebergNestedStringListResponse {
                         })
                         .collect();
 
-                    inner_counts.push(strings.len());
-                    let boxed_strings = Box::into_raw(Box::new(strings));
-                    outer.push(boxed_strings as *mut *mut c_char);
+                    let count = strings.len();
+                    inner_counts.push(count);
+
+                    // Box the string vector and cast the box pointer
+                    // This creates a *mut *mut c_char that Julia can use
+                    let boxed_strings = Box::new(strings);
+                    let strings_ptr = Box::into_raw(boxed_strings) as *mut *mut c_char;
+                    outer_items_vec.push(strings_ptr);
                 }
 
-                self.outer_count = outer.len();
-                let boxed_outer = Box::new(outer);
+                self.outer_count = outer_items_vec.len();
+                let boxed_outer = Box::new(outer_items_vec);
+                // Same pattern as StringListResponse
                 self.outer_items = Box::into_raw(boxed_outer) as *mut *mut *mut c_char;
 
                 let boxed_counts = Box::new(inner_counts);

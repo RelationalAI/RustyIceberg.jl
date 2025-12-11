@@ -14,6 +14,8 @@ export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, wit
 export with_file_column!, with_pos_column!
 export scan!, next_batch, free_batch, free_stream
 export FILE_COLUMN, POS_COLUMN
+export Catalog, catalog_create_rest, free_catalog
+export catalog_load_table, catalog_list_tables, catalog_list_namespaces, catalog_table_exists
 
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:
@@ -184,10 +186,20 @@ struct ArrowBatch
     rust_ptr::Ptr{Cvoid}
 end
 
-# Include scan modules
-include("scan_common.jl")
-include("full.jl")
-include("incremental.jl")
+# Define PropertyEntry before including modules that use it
+"""
+    PropertyEntry
+
+FFI structure for passing key-value properties to Rust.
+
+# Fields
+- `key::Ptr{Cchar}`: Pointer to the key string
+- `value::Ptr{Cchar}`: Pointer to the value string
+"""
+struct PropertyEntry
+    key::Ptr{Cchar}
+    value::Ptr{Cchar}
+end
 
 """
     TableResponse
@@ -227,6 +239,14 @@ mutable struct Response
     Response() = new(-1, C_NULL, C_NULL)
 end
 
+# Include scan modules
+include("scan_common.jl")
+include("full.jl")
+include("incremental.jl")
+
+# Include catalog module
+include("catalog.jl")
+
 """
     IcebergException <: Exception
 
@@ -246,20 +266,6 @@ function IcebergException(msg::String)
 end
 
 # High-level functions using the async API pattern from RustyObjectStore.jl
-
-"""
-    PropertyEntry
-
-FFI structure for passing key-value properties to Rust.
-
-# Fields
-- `key::Ptr{Cchar}`: Pointer to the key string
-- `value::Ptr{Cchar}`: Pointer to the value string
-"""
-struct PropertyEntry
-    key::Ptr{Cchar}
-    value::Ptr{Cchar}
-end
 
 """
     table_open(snapshot_path::String; scheme::String="s3", properties::Dict{String,String}=Dict{String,String}())::Table
