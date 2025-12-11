@@ -115,7 +115,11 @@ into a Julia Vector{Vector{String}}.
 # Returns
 A Vector{Vector{String}} representing the parsed nested list
 """
-function _parse_nested_c_string_list(outer_items::Ptr{Ptr{Ptr{Cchar}}}, outer_count::Csize_t, inner_counts::Ptr{Csize_t})::Vector{Vector{String}}
+function _parse_nested_c_string_list(
+    outer_items::Ptr{Ptr{Ptr{Cchar}}},
+    outer_count::Csize_t,
+    inner_counts::Ptr{Csize_t}
+)
     result = Vector{String}[]
 
     if outer_items == C_NULL || outer_count == 0
@@ -187,29 +191,19 @@ catalog = catalog_create_rest("http://polaris:8181")
 """
 function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{String,String}())
     response = CatalogResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
 
     # Convert properties dict to array of PropertyEntry structs
     property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
     properties_len = length(property_entries)
 
-    preserve_task(ct)
-    result = GC.@preserve response event property_entries properties try
-        result = @ccall rust_lib.iceberg_rest_catalog_create(
+    async_ccall(response, property_entries, properties) do handle
+        @ccall rust_lib.iceberg_rest_catalog_create(
             uri::Cstring,
             (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
             properties_len::Csize_t,
             response::Ref{CatalogResponse},
             handle::Ptr{Cvoid}
         )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
     end
 
     @throw_on_error(response, "catalog_create_rest", IcebergException)
@@ -246,17 +240,13 @@ table = catalog_load_table(catalog, ["warehouse", "orders"], "customers")
 """
 function catalog_load_table(catalog::Catalog, namespace::Vector{String}, table_name::String)
     response = TableResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
 
     # Convert namespace to array of C strings
     namespace_ptrs = [pointer(part) for part in namespace]
     namespace_len = length(namespace)
 
-    preserve_task(ct)
-    result = GC.@preserve response event namespace namespace_ptrs try
-        result = @ccall rust_lib.iceberg_catalog_load_table(
+    async_ccall(response, namespace, namespace_ptrs) do handle
+        @ccall rust_lib.iceberg_catalog_load_table(
             catalog::Catalog,
             (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
             namespace_len::Csize_t,
@@ -264,12 +254,6 @@ function catalog_load_table(catalog::Catalog, namespace::Vector{String}, table_n
             response::Ref{TableResponse},
             handle::Ptr{Cvoid}
         )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
     end
 
     @throw_on_error(response, "catalog_load_table", IcebergException)
@@ -296,29 +280,19 @@ tables = catalog_list_tables(catalog, ["warehouse", "orders"])
 """
 function catalog_list_tables(catalog::Catalog, namespace::Vector{String})
     response = StringListResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
 
     # Convert namespace to array of C strings
     namespace_ptrs = [pointer(part) for part in namespace]
     namespace_len = length(namespace)
 
-    preserve_task(ct)
-    result = GC.@preserve response event namespace namespace_ptrs try
-        result = @ccall rust_lib.iceberg_catalog_list_tables(
+    async_ccall(response, namespace, namespace_ptrs) do handle
+        @ccall rust_lib.iceberg_catalog_list_tables(
             catalog::Catalog,
             (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
             namespace_len::Csize_t,
             response::Ref{StringListResponse},
             handle::Ptr{Cvoid}
         )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
     end
 
     @throw_on_error(response, "catalog_list_tables", IcebergException)
@@ -363,29 +337,19 @@ all_namespaces = catalog_list_namespaces(catalog, ["warehouse"])
 """
 function catalog_list_namespaces(catalog::Catalog, parent::Vector{String}=String[])
     response = NestedStringListResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
 
     # Convert parent to array of C strings
     parent_ptrs = [pointer(part) for part in parent]
     parent_len = length(parent)
 
-    preserve_task(ct)
-    result = GC.@preserve response event parent parent_ptrs try
-        result = @ccall rust_lib.iceberg_catalog_list_namespaces(
+    async_ccall(response, parent, parent_ptrs) do handle
+        @ccall rust_lib.iceberg_catalog_list_namespaces(
             catalog::Catalog,
             (parent_len > 0 ? pointer(parent_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
             parent_len::Csize_t,
             response::Ref{NestedStringListResponse},
             handle::Ptr{Cvoid}
         )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
     end
 
     @throw_on_error(response, "catalog_list_namespaces", IcebergException)
@@ -414,17 +378,13 @@ exists = catalog_table_exists(catalog, ["warehouse", "orders"], "customers")
 """
 function catalog_table_exists(catalog::Catalog, namespace::Vector{String}, table_name::String)
     response = BoolResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
 
     # Convert namespace to array of C strings
     namespace_ptrs = [pointer(part) for part in namespace]
     namespace_len = length(namespace)
 
-    preserve_task(ct)
-    result = GC.@preserve response event namespace namespace_ptrs try
-        result = @ccall rust_lib.iceberg_catalog_table_exists(
+    async_ccall(response, namespace, namespace_ptrs) do handle
+        @ccall rust_lib.iceberg_catalog_table_exists(
             catalog::Catalog,
             (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
             namespace_len::Csize_t,
@@ -432,12 +392,6 @@ function catalog_table_exists(catalog::Catalog, namespace::Vector{String}, table
             response::Ref{BoolResponse},
             handle::Ptr{Cvoid}
         )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
     end
 
     @throw_on_error(response, "catalog_table_exists", IcebergException)

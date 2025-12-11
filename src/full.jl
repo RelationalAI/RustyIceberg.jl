@@ -202,23 +202,13 @@ Initialize an Arrow stream for the scan asynchronously.
 """
 function arrow_stream(scan::Scan)
     response = ArrowStreamResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
 
-    preserve_task(ct)
-    result = GC.@preserve response event try
-        result = @ccall rust_lib.iceberg_arrow_stream(
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_arrow_stream(
             scan.ptr::Ptr{Cvoid},
             response::Ref{ArrowStreamResponse},
             handle::Ptr{Cvoid}
         )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
     end
 
     @throw_on_error(response, "iceberg_arrow_stream", IcebergException)
