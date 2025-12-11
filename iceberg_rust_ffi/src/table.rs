@@ -1,10 +1,7 @@
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
-use anyhow::Result;
-use arrow_array::RecordBatch;
-use arrow_ipc::writer::StreamWriter;
 use iceberg::table::Table;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_char;
 use std::ptr;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -18,8 +15,7 @@ pub struct IcebergTable {
 #[repr(C)]
 pub struct IcebergArrowStream {
     // TODO: Maybe remove this mutex and let this be handled in Julia?
-    pub stream:
-        AsyncMutex<futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>>,
+    pub stream: AsyncMutex<futures::stream::BoxStream<'static, Result<ArrowBatch, iceberg::Error>>>,
 }
 
 unsafe impl Send for IcebergArrowStream {}
@@ -31,6 +27,11 @@ pub struct ArrowBatch {
     pub length: usize,
     pub rust_ptr: *mut std::ffi::c_void,
 }
+
+// SAFETY: ArrowBatch contains raw pointers that are owned by the FFI layer.
+// The pointers are allocated in Rust and deallocated via iceberg_arrow_batch_free,
+// making it safe to send between threads.
+unsafe impl Send for ArrowBatch {}
 
 /// Response type for table operations
 #[repr(C)]
@@ -113,7 +114,7 @@ pub struct IcebergBatchResponse {
 unsafe impl Send for IcebergBatchResponse {}
 
 impl RawResponse for IcebergBatchResponse {
-    type Payload = Option<RecordBatch>;
+    type Payload = Option<ArrowBatch>;
     fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
@@ -125,39 +126,10 @@ impl RawResponse for IcebergBatchResponse {
     }
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload.flatten() {
-            Some(batch) => {
-                // TODO: This is currently a bottleneck, and should be done in parallel.
-                let arrow_batch = serialize_record_batch(batch);
-                match arrow_batch {
-                    Ok(arrow_batch) => {
-                        self.batch = Box::into_raw(Box::new(arrow_batch));
-                    }
-                    Err(_) => {
-                        self.batch = ptr::null_mut();
-                    }
-                }
+            Some(arrow_batch) => {
+                self.batch = Box::into_raw(Box::new(arrow_batch));
             }
             None => self.batch = ptr::null_mut(),
         }
     }
-}
-
-/// Helper function to serialize RecordBatch to Arrow IPC format
-pub(crate) fn serialize_record_batch(batch: RecordBatch) -> Result<ArrowBatch> {
-    let buffer = Vec::new();
-    let mut stream_writer = StreamWriter::try_new(buffer, &batch.schema())?;
-    stream_writer.write(&batch)?;
-    stream_writer.finish()?;
-    let serialized_data = stream_writer.into_inner()?;
-
-    let boxed_data = Box::new(serialized_data);
-    let data_ptr = boxed_data.as_ptr();
-    let length = boxed_data.len();
-    let rust_ptr = Box::into_raw(boxed_data) as *mut c_void;
-
-    Ok(ArrowBatch {
-        data: data_ptr,
-        length,
-        rust_ptr,
-    })
 }

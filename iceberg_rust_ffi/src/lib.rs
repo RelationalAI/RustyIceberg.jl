@@ -3,6 +3,8 @@ use futures::TryStreamExt;
 use std::ffi::{c_char, c_void};
 
 use anyhow::Result;
+use arrow_array::RecordBatch;
+use arrow_ipc::writer::StreamWriter;
 use iceberg::io::FileIOBuilder;
 use iceberg::table::StaticTable;
 use iceberg::TableIdent;
@@ -117,6 +119,61 @@ impl<T> SendPtr<T> {
     fn as_ptr(self) -> *mut T {
         self.0
     }
+}
+
+/// Helper function to serialize RecordBatch to Arrow IPC format
+fn serialize_record_batch(batch: RecordBatch) -> Result<table::ArrowBatch> {
+    let buffer = Vec::new();
+    let mut stream_writer = StreamWriter::try_new(buffer, &batch.schema())?;
+    stream_writer.write(&batch)?;
+    stream_writer.finish()?;
+    let serialized_data = stream_writer.into_inner()?;
+
+    let boxed_data = Box::new(serialized_data);
+    let data_ptr = boxed_data.as_ptr();
+    let length = boxed_data.len();
+    let rust_ptr = Box::into_raw(boxed_data) as *mut c_void;
+
+    Ok(table::ArrowBatch {
+        data: data_ptr,
+        length,
+        rust_ptr,
+    })
+}
+
+/// Transform a stream of RecordBatches into a stream of serialized ArrowBatches
+/// with configurable parallel serialization concurrency
+pub(crate) fn transform_stream_with_parallel_serialization(
+    stream: futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>,
+    concurrency: usize,
+) -> futures::stream::BoxStream<'static, Result<table::ArrowBatch, iceberg::Error>> {
+    stream
+        .map(|batch_result| async move {
+            match batch_result {
+                Ok(record_batch) => {
+                    // Spawn blocking task and await immediately
+                    match tokio::task::spawn_blocking(move || serialize_record_batch(record_batch))
+                        .await
+                    {
+                        Ok(Ok(arrow_batch)) => Ok(arrow_batch),
+                        Ok(Err(e)) => Err(iceberg::Error::new(
+                            iceberg::ErrorKind::Unexpected,
+                            e.to_string(),
+                        )),
+                        Err(e) => Err(iceberg::Error::new(
+                            iceberg::ErrorKind::Unexpected,
+                            format!("Serialization task panicked: {}", e),
+                        )),
+                    }
+                }
+                Err(e) => Err(iceberg::Error::new(
+                    iceberg::ErrorKind::Unexpected,
+                    format!("Stream error: {}", e),
+                )),
+            }
+        })
+        .buffer_unordered(concurrency)
+        .boxed()
 }
 
 // Initialize runtime - configure RT and RESULT_CB directly
