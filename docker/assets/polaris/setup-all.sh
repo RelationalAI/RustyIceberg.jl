@@ -60,7 +60,6 @@ STORAGE_CONFIG_INFO='{
   "storageType": "S3",
   "endpoint": "http://minio:9000",
   "endpointInternal": "http://minio:9000",
-  "pathStyleAccess": true
 }'
 
 CATALOG_PAYLOAD='{

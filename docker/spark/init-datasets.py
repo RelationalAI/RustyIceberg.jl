@@ -55,36 +55,6 @@ def wait_for_minio(max_retries=30):
     return False
 
 
-def wait_for_polaris(max_retries=30):
-    """Wait for Polaris catalog to be available and authenticated."""
-    print("Waiting for Polaris catalog...")
-    import requests
-
-    for attempt in range(max_retries):
-        try:
-            # Test authentication endpoint to ensure Polaris is fully ready
-            response = requests.post(
-                'http://polaris:8181/api/catalog/v1/oauth/tokens',
-                auth=('root', 's3cr3t'),
-                data={'grant_type': 'client_credentials', 'scope': 'PRINCIPAL_ROLE:ALL'},
-                headers={'Polaris-Realm': 'POLARIS'},
-                timeout=5
-            )
-            # If we get any response (200 or auth error), service is up
-            if response.status_code >= 100:
-                print("Polaris is ready!")
-                return True
-        except Exception as e:
-            if attempt % 5 == 0:
-                print(f"Attempt {attempt + 1}/{max_retries}: Polaris not ready yet... {type(e).__name__}")
-
-        if attempt < max_retries - 1:
-            import time
-            time.sleep(1)
-
-    return False
-
-
 def upload_datasets_with_mc():
     """Upload datasets using MinIO client (mc) command."""
     print("\nSetting up MinIO client alias...")
@@ -227,10 +197,6 @@ def main():
     if not wait_for_minio():
         print("ERROR: MinIO did not become available in time")
         sys.exit(1)
-
-    # Wait for Polaris to be available
-    if not wait_for_polaris():
-        print("WARNING: Polaris did not become available in time, continuing anyway...")
 
     # Try to upload with mc first (more efficient), fall back to boto3
     print("\nAttempting to upload datasets with mc...")
