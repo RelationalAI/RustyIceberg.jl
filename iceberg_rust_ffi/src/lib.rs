@@ -122,6 +122,7 @@ impl<T> SendPtr<T> {
 }
 
 /// Helper function to serialize RecordBatch to Arrow IPC format
+// TODO: Switch to zero-copy once Arrow.jl supports C API.
 fn serialize_record_batch(batch: RecordBatch) -> Result<table::ArrowBatch> {
     let buffer = Vec::new();
     let mut stream_writer = StreamWriter::try_new(buffer, &batch.schema())?;
