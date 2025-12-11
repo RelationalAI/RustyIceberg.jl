@@ -1576,6 +1576,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "iceberg-catalog-rest"
+version = "0.7.0"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=97ce7c91e4f2f3edaaf6d21c3ac7f59a7534aa1f#97ce7c91e4f2f3edaaf6d21c3ac7f59a7534aa1f"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "http",
+ "iceberg",
+ "itertools",
+ "reqwest",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "typed-builder",
+ "uuid",
+]
+
+[[package]]
 name = "iceberg_rust_ffi"
 version = "0.4.2"
 dependencies = [
@@ -1585,6 +1605,7 @@ dependencies = [
  "futures",
  "home",
  "iceberg",
+ "iceberg-catalog-rest",
  "libc",
  "object_store_ffi",
  "once_cell",

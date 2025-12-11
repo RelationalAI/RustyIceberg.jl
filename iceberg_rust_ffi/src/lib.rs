@@ -1,13 +1,9 @@
 use futures::TryStreamExt;
-use std::ffi::{c_char, c_void, CStr};
-use std::ptr;
-use tokio::sync::Mutex as AsyncMutex;
+use std::ffi::{c_char, c_void};
 
 use anyhow::Result;
-use arrow_array::RecordBatch;
-use arrow_ipc::writer::StreamWriter;
 use iceberg::io::FileIOBuilder;
-use iceberg::table::{StaticTable, Table};
+use iceberg::table::StaticTable;
 use iceberg::TableIdent;
 
 // Import from object_store_ffi
@@ -22,9 +18,26 @@ mod full;
 mod incremental;
 mod scan_common;
 
-// Re-export scan types and functions
+// Catalog module
+mod catalog;
+
+// Table and streaming module
+mod table;
+
+// Utility module for FFI parsing
+mod util;
+
+// Re-export types and functions from submodules
+pub use catalog::{
+    IcebergBoolResponse, IcebergCatalog, IcebergCatalogResponse, IcebergNestedStringListResponse,
+    IcebergStringListResponse,
+};
 pub use full::IcebergScan;
 pub use incremental::{IcebergIncrementalScan, IcebergUnzippedStreamsResponse};
+pub use table::{
+    ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse, IcebergTable,
+    IcebergTableResponse,
+};
 
 // We use `jl_adopt_thread` to ensure Rust can call into Julia when notifying
 // the Base.Event that is waiting for the Rust result.
@@ -91,156 +104,18 @@ pub struct PropertyEntry {
 
 unsafe impl Send for PropertyEntry {}
 
-// Direct structures - no opaque wrappers
-#[repr(C)]
-pub struct IcebergTable {
-    pub table: Table,
-}
+// Table structures are in the table module
 
-// Stream wrapper for FFI - using async mutex to avoid blocking calls
-#[repr(C)]
-pub struct IcebergArrowStream {
-    // TODO: Maybe remove this mutex and let this be handled in Julia?
-    pub stream:
-        AsyncMutex<futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>>,
-}
+// Use helper functions from other modules
+use util::{parse_c_string, parse_properties, parse_string_array};
 
-unsafe impl Send for IcebergArrowStream {}
-
-#[repr(C)]
-pub struct ArrowBatch {
-    pub data: *const u8,
-    pub length: usize,
-    pub rust_ptr: *mut c_void,
-}
-
-// Response types for async operations
-#[repr(C)]
-pub struct IcebergTableResponse {
-    result: CResult,
-    table: *mut IcebergTable,
-    error_message: *mut c_char,
-    context: *const Context,
-}
-
-unsafe impl Send for IcebergTableResponse {}
-
-impl RawResponse for IcebergTableResponse {
-    type Payload = IcebergTable;
-    fn result_mut(&mut self) -> &mut CResult {
-        &mut self.result
+// Wrapper type for Send-safe raw pointers
+struct SendPtr<T>(*mut T);
+unsafe impl<T: Send> Send for SendPtr<T> {}
+impl<T> SendPtr<T> {
+    fn as_ptr(self) -> *mut T {
+        self.0
     }
-    fn context_mut(&mut self) -> &mut *const Context {
-        &mut self.context
-    }
-    fn error_message_mut(&mut self) -> &mut *mut c_char {
-        &mut self.error_message
-    }
-    fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        match payload {
-            Some(table) => {
-                let table_ptr = Box::into_raw(Box::new(table));
-                self.table = table_ptr;
-            }
-            None => self.table = ptr::null_mut(),
-        }
-    }
-}
-
-#[repr(C)]
-pub struct IcebergArrowStreamResponse {
-    result: CResult,
-    stream: *mut IcebergArrowStream,
-    error_message: *mut c_char,
-    context: *const Context,
-}
-
-unsafe impl Send for IcebergArrowStreamResponse {}
-
-impl RawResponse for IcebergArrowStreamResponse {
-    type Payload = IcebergArrowStream;
-
-    fn result_mut(&mut self) -> &mut CResult {
-        &mut self.result
-    }
-
-    fn context_mut(&mut self) -> &mut *const Context {
-        &mut self.context
-    }
-
-    fn error_message_mut(&mut self) -> &mut *mut c_char {
-        &mut self.error_message
-    }
-
-    fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        match payload {
-            Some(stream) => {
-                self.stream = Box::into_raw(Box::new(stream));
-            }
-            None => self.stream = ptr::null_mut(),
-        }
-    }
-}
-
-#[repr(C)]
-pub struct IcebergBatchResponse {
-    result: CResult,
-    batch: *mut ArrowBatch,
-    error_message: *mut c_char,
-    context: *const Context,
-}
-
-unsafe impl Send for IcebergBatchResponse {}
-
-impl RawResponse for IcebergBatchResponse {
-    type Payload = Option<RecordBatch>;
-    fn result_mut(&mut self) -> &mut CResult {
-        &mut self.result
-    }
-    fn context_mut(&mut self) -> &mut *const Context {
-        &mut self.context
-    }
-    fn error_message_mut(&mut self) -> &mut *mut c_char {
-        &mut self.error_message
-    }
-    fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        match payload.flatten() {
-            Some(batch) => {
-                // TODO: This is currently a bottleneck, and should be done in parallel.
-                let arrow_batch = serialize_record_batch(batch);
-                match arrow_batch {
-                    Ok(arrow_batch) => {
-                        self.batch = Box::into_raw(Box::new(arrow_batch));
-                    }
-                    Err(_) => {
-                        self.batch = ptr::null_mut();
-                    }
-                }
-            }
-            None => self.batch = ptr::null_mut(),
-        }
-    }
-}
-
-// Helper function to create ArrowBatch from RecordBatch
-// TODO: Switch to zero-copy once Arrow.jl supports C API.
-fn serialize_record_batch(batch: RecordBatch) -> Result<ArrowBatch> {
-    let buffer = Vec::new();
-    let mut stream_writer = StreamWriter::try_new(buffer, &batch.schema())?;
-    stream_writer.write(&batch)?;
-    stream_writer.finish()?;
-    let serialized_data = stream_writer.into_inner()?;
-
-    let boxed_data = Box::new(serialized_data);
-    let data_ptr = boxed_data.as_ptr();
-    let length = boxed_data.len();
-    let rust_ptr = Box::into_raw(boxed_data) as *mut c_void;
-
-    Ok(ArrowBatch {
-        data: data_ptr,
-        length,
-        rust_ptr,
-    })
 }
 
 // Initialize runtime - configure RT and RESULT_CB directly
@@ -305,37 +180,13 @@ export_runtime_op!(
     iceberg_table_open,
     IcebergTableResponse,
     || {
-        let snapshot_path_str = unsafe {
-            CStr::from_ptr(snapshot_path).to_str()
-                .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in snapshot path: {}", e))?
-        };
+        let snapshot_path_str = parse_c_string(snapshot_path, "snapshot_path")?;
+        let scheme_str = parse_c_string(scheme, "scheme")?;
+        let props = parse_properties(properties, properties_len)?;
 
-        let scheme_str = unsafe {
-            CStr::from_ptr(scheme).to_str()
-                .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in scheme: {}", e))?
-        };
-
-        // Convert properties from FFI to Rust Vec
-        let mut props = Vec::new();
-        if !properties.is_null() && properties_len > 0 {
-            let properties_slice = unsafe {
-                std::slice::from_raw_parts(properties, properties_len)
-            };
-
-            for prop in properties_slice {
-                let key = unsafe {
-                    CStr::from_ptr(prop.key).to_str()
-                        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in property key: {}", e))?
-                };
-                let value = unsafe {
-                    CStr::from_ptr(prop.value).to_str()
-                        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in property value: {}", e))?
-                };
-                props.push((key.to_string(), value.to_string()));
-            }
-        }
-
-        Ok((snapshot_path_str.to_string(), scheme_str.to_string(), props))
+        // Convert HashMap to Vec of tuples for compatibility with FileIOBuilder::with_props
+        let props_vec: Vec<(String, String)> = props.into_iter().collect();
+        Ok((snapshot_path_str, scheme_str, props_vec))
     },
     result_tuple,
     async {
@@ -394,7 +245,7 @@ export_runtime_op!(
 
 // Synchronous operations
 #[no_mangle]
-pub extern "C" fn iceberg_table_free(table: *mut IcebergTable) {
+pub extern "C" fn iceberg_table_free(table: *mut table::IcebergTable) {
     if !table.is_null() {
         unsafe {
             let _ = Box::from_raw(table);
@@ -403,7 +254,7 @@ pub extern "C" fn iceberg_table_free(table: *mut IcebergTable) {
 }
 
 #[no_mangle]
-pub extern "C" fn iceberg_arrow_stream_free(stream: *mut IcebergArrowStream) {
+pub extern "C" fn iceberg_arrow_stream_free(stream: *mut table::IcebergArrowStream) {
     if !stream.is_null() {
         unsafe {
             let _ = Box::from_raw(stream);
@@ -412,7 +263,7 @@ pub extern "C" fn iceberg_arrow_stream_free(stream: *mut IcebergArrowStream) {
 }
 
 #[no_mangle]
-pub extern "C" fn iceberg_arrow_batch_free(batch: *mut ArrowBatch) {
+pub extern "C" fn iceberg_arrow_batch_free(batch: *mut table::ArrowBatch) {
     if batch.is_null() {
         return;
     }
@@ -446,3 +297,135 @@ pub extern "C" fn iceberg_cancel_context(ctx_ptr: *const Context) -> CResult {
 pub extern "C" fn iceberg_destroy_context(ctx_ptr: *const Context) -> CResult {
     destroy_context(ctx_ptr)
 }
+
+// Catalog operations
+#[no_mangle]
+pub extern "C" fn iceberg_catalog_free(catalog: *mut catalog::IcebergCatalog) {
+    if !catalog.is_null() {
+        unsafe {
+            let _ = Box::from_raw(catalog);
+        }
+    }
+}
+
+// Create a REST catalog
+export_runtime_op!(
+    iceberg_rest_catalog_create,
+    catalog::IcebergCatalogResponse,
+    || {
+        let uri_str = parse_c_string(uri, "uri")?;
+        let props = parse_properties(properties, properties_len)?;
+        Ok((uri_str, props))
+    },
+    result_tuple,
+    async {
+        let (uri, props) = result_tuple;
+        catalog::IcebergCatalog::create_rest(uri, props).await
+    },
+    uri: *const c_char,
+    properties: *const PropertyEntry,
+    properties_len: usize
+);
+
+// Load a table from the catalog
+export_runtime_op!(
+    iceberg_catalog_load_table,
+    IcebergTableResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        let table_name = parse_c_string(table_name, "table_name")?;
+
+        Ok((SendPtr(catalog), namespace_parts, table_name))
+    },
+    result_tuple,
+    async {
+        let (catalog_ptr, namespace_parts, table_name) = result_tuple;
+        let catalog_ref = unsafe { &*catalog_ptr.as_ptr() };
+        catalog_ref.load_table(namespace_parts, table_name).await
+    },
+    catalog: *mut catalog::IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize,
+    table_name: *const c_char
+);
+
+// List tables in a namespace
+export_runtime_op!(
+    iceberg_catalog_list_tables,
+    catalog::IcebergStringListResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        Ok((SendPtr(catalog), namespace_parts))
+    },
+    result_tuple,
+    async {
+        let (catalog_ptr, namespace_parts) = result_tuple;
+        let catalog_ref = unsafe { &*catalog_ptr.as_ptr() };
+        catalog_ref.list_tables(namespace_parts).await
+    },
+    catalog: *mut catalog::IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize
+);
+
+// List namespaces
+export_runtime_op!(
+    iceberg_catalog_list_namespaces,
+    catalog::IcebergNestedStringListResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        let parent_parts = if namespace_parts_len > 0 {
+            Some(parse_string_array(namespace_parts_ptr, namespace_parts_len)?)
+        } else {
+            None
+        };
+
+        Ok((SendPtr(catalog), parent_parts))
+    },
+    result_tuple,
+    async {
+        let (catalog_ptr, parent_parts) = result_tuple;
+        let catalog_ref = unsafe { &*catalog_ptr.as_ptr() };
+        catalog_ref.list_namespaces(parent_parts).await
+    },
+    catalog: *mut catalog::IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize
+);
+
+// Check if a table exists
+export_runtime_op!(
+    iceberg_catalog_table_exists,
+    catalog::IcebergBoolResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        let table_name = parse_c_string(table_name, "table_name")?;
+
+        Ok((SendPtr(catalog), namespace_parts, table_name))
+    },
+    result_tuple,
+    async {
+        let (catalog_ptr, namespace_parts, table_name) = result_tuple;
+        let catalog_ref = unsafe { &*catalog_ptr.as_ptr() };
+        catalog_ref.table_exists(namespace_parts, table_name).await
+    },
+    catalog: *mut catalog::IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize,
+    table_name: *const c_char
+);
