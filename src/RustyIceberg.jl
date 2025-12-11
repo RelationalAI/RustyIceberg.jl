@@ -15,7 +15,7 @@ export with_file_column!, with_pos_column!
 export scan!, next_batch, free_batch, free_stream
 export FILE_COLUMN, POS_COLUMN
 export Catalog, catalog_create_rest, free_catalog
-export catalog_load_table, catalog_list_tables, catalog_list_namespaces, catalog_table_exists
+export load_table, list_tables, list_namespaces, table_exists
 
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:
