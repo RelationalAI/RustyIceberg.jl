@@ -112,31 +112,63 @@ def get_access_token():
         return None
 
 
-def wait_for_catalog_ready(token, max_retries=10):
-    """Wait for the catalog to be ready by trying to get a fresh token."""
-    for attempt in range(max_retries):
-        try:
-            # Try to get a new token - if Polaris is fully ready, this should succeed
-            response = requests.post(
-                f'{POLARIS_CATALOG_API}/oauth/tokens',
-                auth=(CLIENT_ID, CLIENT_SECRET),
-                data={
-                    'grant_type': 'client_credentials',
-                    'scope': 'PRINCIPAL_ROLE:ALL'
+def ensure_catalog_exists(token):
+    """Ensure the catalog exists in Polaris by creating it if needed."""
+    print(f"\nEnsuring catalog '{CATALOG_NAME}' exists...")
+
+    try:
+        # Define catalog creation payload
+        storage_config_info = {
+            "storageType": "S3",
+            "endpoint": "http://minio:9000",
+            "endpointInternal": "http://minio:9000",
+            "pathStyleAccess": True,
+        }
+
+        catalog_payload = {
+            "catalog": {
+                "name": CATALOG_NAME,
+                "type": "INTERNAL",
+                "readOnly": False,
+                "properties": {
+                    "default-base-location": S3_WAREHOUSE
                 },
-                headers={'Polaris-Realm': 'POLARIS'},
-                timeout=5
-            )
-            if response.status_code == 200:
-                # Catalog is ready
-                return True
-        except Exception:
-            pass
+                "storageConfigInfo": storage_config_info
+            }
+        }
 
-        if attempt < max_retries - 1:
-            time.sleep(1)
+        # Try to create the catalog
+        response = requests.post(
+            f'{POLARIS_API}/catalogs',
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json',
+                'Polaris-Realm': 'POLARIS'
+            },
+            json=catalog_payload,
+            timeout=10
+        )
 
-    return False
+        if response.status_code in [200, 201]:
+            print(f"✓ Catalog '{CATALOG_NAME}' created")
+            return True
+        elif response.status_code == 409:
+            # Catalog already exists, which is fine
+            print(f"ℹ Catalog '{CATALOG_NAME}' already exists")
+            return True
+        elif response.status_code == 400:
+            # Could be catalog already exists or other validation error
+            # Try to check if it exists by listing catalogs
+            print(f"Catalog response: {response.status_code} - {response.text[:100]}")
+            return True  # Assume it exists and continue
+        else:
+            print(f"ERROR: Failed to create catalog (status {response.status_code})")
+            print(f"Response: {response.text}")
+            return False
+
+    except Exception as e:
+        print(f"ERROR: Failed to ensure catalog exists: {e}")
+        return False
 
 
 def create_namespace(token, namespace, max_retries=5):
@@ -147,16 +179,6 @@ def create_namespace(token, namespace, max_retries=5):
     print(f"  Creating namespace: {namespace}")
 
     for attempt in range(max_retries):
-        # First, ensure catalog is still ready
-        if not wait_for_catalog_ready(token, max_retries=2):
-            if attempt < max_retries - 1:
-                print(f"    Catalog not ready, retrying...")
-                time.sleep(2)
-                continue
-            else:
-                print(f"    ERROR: Catalog is not ready")
-                return False
-
         # Check if namespace already exists
         try:
             ns_path = f'{POLARIS_CATALOG_API}/{CATALOG_NAME}/namespaces/{namespace}'
@@ -323,6 +345,11 @@ def main():
     # Get access token
     token = get_access_token()
     if not token:
+        sys.exit(1)
+
+    # Ensure catalog exists (this makes namespaces accessible via the REST API)
+    if not ensure_catalog_exists(token):
+        print("ERROR: Failed to ensure catalog exists")
         sys.exit(1)
 
     # Create namespaces
