@@ -83,6 +83,24 @@ jobs:
           echo "Polaris did not become ready in time"
           exit 1
 
+      - name: Start table-creation and wait for catalog to be ready
+        run: |
+          echo "Starting table-creation service..."
+          docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up table-creation
+
+          echo "Waiting for catalog and tables to be created..."
+          for i in $(seq 1 30); do
+            if docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | grep -q "All tables created successfully\|Some tables failed"; then
+              echo "Table creation completed!"
+              exit 0
+            fi
+            echo "Attempt $i: Waiting for table creation..."
+            sleep 2
+          done
+          echo "Table creation did not complete in time"
+          docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation
+          exit 1
+
       - uses: julia-actions/setup-julia@v1
         with:
           version: ${{ inputs.julia_version }}
