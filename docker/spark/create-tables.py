@@ -70,6 +70,29 @@ def wait_for_polaris(max_retries=30):
     return False
 
 
+def wait_for_catalog(token, max_retries=30):
+    """Wait for the warehouse catalog to be accessible."""
+    print("Waiting for catalog to be ready...")
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(
+                f'{POLARIS_CATALOG_API}/{CATALOG_NAME}',
+                headers={'Authorization': f'Bearer {token}'},
+                timeout=5
+            )
+            if response.status_code == 200:
+                print("✓ Catalog is accessible")
+                return True
+        except Exception as e:
+            pass
+
+        if attempt < max_retries - 1:
+            time.sleep(1)
+
+    print("ERROR: Catalog did not become ready in time")
+    return False
+
+
 def get_access_token():
     """Obtain OAuth access token from Polaris."""
     print("\nObtaining access token from Polaris...")
@@ -275,6 +298,10 @@ def main():
     # Get access token
     token = get_access_token()
     if not token:
+        sys.exit(1)
+
+    # Wait for catalog to be ready
+    if not wait_for_catalog(token):
         sys.exit(1)
 
     # Create namespaces
