@@ -143,7 +143,7 @@ impl RawResponse for IcebergBatchResponse {
 }
 
 /// Helper function to serialize RecordBatch to Arrow IPC format
-pub fn serialize_record_batch(batch: RecordBatch) -> Result<ArrowBatch> {
+pub(crate) fn serialize_record_batch(batch: RecordBatch) -> Result<ArrowBatch> {
     let buffer = Vec::new();
     let mut stream_writer = StreamWriter::try_new(buffer, &batch.schema())?;
     stream_writer.write(&batch)?;
