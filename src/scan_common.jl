@@ -74,23 +74,13 @@ Returns C_NULL if end of stream is reached.
 """
 function next_batch(stream::ArrowStream)
     response = BatchResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
 
-    preserve_task(ct)
-    result = GC.@preserve response event try
-        result = @ccall rust_lib.iceberg_next_batch(
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_batch(
             stream::ArrowStream,
             response::Ref{BatchResponse},
             handle::Ptr{Cvoid}
         )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
     end
 
     @throw_on_error(response, "iceberg_next_batch", IcebergException)

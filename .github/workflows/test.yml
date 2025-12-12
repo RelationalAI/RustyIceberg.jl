@@ -54,20 +54,23 @@ jobs:
           cargo build --release
 
       - name: Start Iceberg catalog and S3 storage with Docker Compose
-        run: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup
+        run: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup init table-creation
 
-      - name: Wait for Polaris to be ready
+      - name: Wait for table-creation container to complete
         run: |
-          echo "Waiting for Polaris catalog to be ready..."
-          for i in $(seq 1 60); do
-            if curl -f http://localhost:8181/api/catalog/v1/oauth/tokens --user root:s3cr3t -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" -H "Polaris-Realm: POLARIS" > /dev/null 2>&1; then
-              echo "Polaris is ready!"
+          echo "Waiting for table-creation service to complete..."
+          for i in $(seq 1 120); do
+            STATE=$(docker compose -f ${{ github.workspace }}/docker/docker-compose.yml ps -a table-creation --format "{{.State}}")
+            if [ "$STATE" = "exited" ]; then
+              echo "Table creation completed!"
+              docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | tail -30
               exit 0
             fi
-            echo "Attempt $i: Waiting for Polaris..."
-            sleep 2
+            echo "Attempt $i: Waiting for table creation..."
+            sleep 1
           done
-          echo "Polaris did not become ready in time"
+          echo "Table creation did not complete in time"
+          docker compose -f ${{ github.workspace }}/docker/docker-compose.yml logs table-creation | tail -50
           exit 1
 
       - uses: julia-actions/setup-julia@v1
