@@ -701,7 +701,7 @@ end
 
         # Configure scan with batch size
         println("Configuring incremental scan...")
-        RustyIceberg.with_batch_size!(scan, UInt(50))
+        RustyIceberg.with_batch_size!(scan, UInt(10))
         println("✅ Batch size configured")
 
         # Execute the scan to get streams
