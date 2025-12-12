@@ -554,21 +554,6 @@ end
         nonexistent_exists = RustyIceberg.table_exists(catalog, ["tpch.sf01"], "nonexistent_table")
         @test nonexistent_exists == false
         println("✅ Non-existent table correctly returns false")
-
-        # Test listing tables in incremental namespace
-        println("Attempting to list tables in incremental...")
-        incremental_tables = RustyIceberg.list_tables(catalog, ["incremental"])
-        @test isa(incremental_tables, Vector{String})
-        println("✅ Tables in incremental: $incremental_tables")
-
-        # Test table existence check for incremental tables
-        println("Verifying table existence for incremental tables...")
-        for table in incremental_tables
-            exists = RustyIceberg.table_exists(catalog, ["incremental"], table)
-            @test exists == true
-        end
-        println("✅ All incremental tables verified to exist: $incremental_tables")
-
     catch e
         rethrow(e)
     finally
@@ -670,6 +655,140 @@ end
     end
 
     println("✅ Catalog table loading tests completed!")
+end
+
+@testset "Catalog Incremental Scan" begin
+    println("Testing catalog incremental scan...")
+
+    catalog_uri = "http://localhost:8181/api/catalog"
+
+    catalog = C_NULL
+    table = C_NULL
+    scan = C_NULL
+    inserts_stream = C_NULL
+    deletes_stream = C_NULL
+
+    try
+        # Create catalog connection with MinIO S3 configuration
+        props = Dict(
+            "credential" => "root:s3cr3t",
+            "scope" => "PRINCIPAL_ROLE:ALL",
+            "warehouse" => "warehouse",
+            "s3.endpoint" => "http://localhost:9000",
+            "s3.access-key-id" => "root",
+            "s3.secret-access-key" => "password",
+            "s3.region" => "us-east-1"
+        )
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog != C_NULL
+        println("✅ Catalog created successfully")
+
+        # Load the incremental test table from catalog
+        println("Attempting to load incremental test table from catalog...")
+        table = RustyIceberg.load_table(catalog, ["incremental"], "test1")
+        @test table != C_NULL
+        println("✅ Incremental test table loaded successfully from catalog")
+
+        # Create an incremental scan with specific snapshot IDs
+        from_snapshot_id = Int64(6540713100348352610)
+        to_snapshot_id = Int64(6832180054960511692)
+
+        println("Creating incremental scan on catalog-loaded table...")
+        scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        @test scan isa RustyIceberg.IncrementalScan
+        @test scan.ptr != C_NULL
+        println("✅ Incremental scan created successfully on catalog-loaded table")
+
+        # Configure scan with batch size
+        println("Configuring incremental scan...")
+        RustyIceberg.with_batch_size!(scan, UInt(50))
+        println("✅ Batch size configured")
+
+        # Execute the scan to get streams
+        println("Executing incremental scan on catalog-loaded table...")
+        inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
+        @test inserts_stream != C_NULL
+        @test deletes_stream != C_NULL
+        println("✅ Incremental scan streams obtained successfully")
+
+        # Read from inserts stream
+        println("Reading from inserts stream...")
+        inserts_count = 0
+        total_inserts = 0
+
+        batch_ptr = RustyIceberg.next_batch(inserts_stream)
+        while batch_ptr != C_NULL
+            inserts_count += 1
+            batch = unsafe_load(batch_ptr)
+            if batch.data != C_NULL && batch.length > 0
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+                @test "n" in names(df)
+                total_inserts += nrow(df)
+
+                if inserts_count <= 2
+                    println("  Batch $inserts_count: $(nrow(df)) rows")
+                end
+            end
+            RustyIceberg.free_batch(batch_ptr)
+            batch_ptr = RustyIceberg.next_batch(inserts_stream)
+        end
+
+        # Read from deletes stream
+        println("Reading from deletes stream...")
+        deletes_count = 0
+        total_deletes = 0
+
+        batch_ptr = RustyIceberg.next_batch(deletes_stream)
+        while batch_ptr != C_NULL
+            deletes_count += 1
+            batch = unsafe_load(batch_ptr)
+            if batch.data != C_NULL && batch.length > 0
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+                @test "file_path" in names(df) || "pos" in names(df)
+                total_deletes += nrow(df)
+
+                if deletes_count <= 2
+                    println("  Batch $deletes_count: $(nrow(df)) rows")
+                end
+            end
+            RustyIceberg.free_batch(batch_ptr)
+            batch_ptr = RustyIceberg.next_batch(deletes_stream)
+        end
+
+        @test inserts_count > 0
+        @test total_inserts == 98  # Expected rows from incremental range
+        @test deletes_count > 0
+        @test total_deletes > 0
+
+        println("✅ Successfully read from catalog-loaded incremental scan")
+        println("   - Inserts batches: $inserts_count, total rows: $total_inserts")
+        println("   - Deletes batches: $deletes_count, total rows: $total_deletes")
+
+    catch e
+        rethrow(e)
+    finally
+        # Clean up all resources in reverse order
+        if inserts_stream != C_NULL
+            RustyIceberg.free_stream(inserts_stream)
+        end
+        if deletes_stream != C_NULL
+            RustyIceberg.free_stream(deletes_stream)
+        end
+        if scan != C_NULL
+            RustyIceberg.free_incremental_scan!(scan)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+        end
+        if catalog != C_NULL
+            RustyIceberg.free_catalog(catalog)
+        end
+        println("✅ All resources cleaned up successfully")
+    end
+
+    println("✅ Catalog incremental scan tests completed!")
 end
 
 @testset "Builder API Tests" begin

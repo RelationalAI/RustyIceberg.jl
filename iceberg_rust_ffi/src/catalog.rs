@@ -4,7 +4,16 @@ use anyhow::Result;
 use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableIdent};
 use iceberg_catalog_rest::RestCatalogBuilder;
 use std::collections::HashMap;
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
+
+// FFI exports
+use object_store_ffi::{
+    export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
+};
+
+// Utility imports
+use crate::util::{parse_c_string, parse_properties, parse_string_array};
+use crate::PropertyEntry;
 
 /// Opaque catalog handle for FFI
 #[repr(C)]
@@ -272,3 +281,139 @@ impl crate::RawResponse for IcebergNestedStringListResponse {
         }
     }
 }
+
+/// Free a catalog
+#[no_mangle]
+pub extern "C" fn iceberg_catalog_free(catalog: *mut IcebergCatalog) {
+    if !catalog.is_null() {
+        unsafe {
+            let _ = Box::from_raw(catalog);
+        }
+    }
+}
+
+// FFI Export functions for catalog operations
+// These functions are exported to be called from Julia via the FFI
+
+// Create a REST catalog
+export_runtime_op!(
+    iceberg_rest_catalog_create,
+    IcebergCatalogResponse,
+    || {
+        let uri_str = parse_c_string(uri, "uri")?;
+        let props = parse_properties(properties, properties_len)?;
+        Ok((uri_str, props))
+    },
+    result_tuple,
+    async {
+        let (uri, props) = result_tuple;
+        IcebergCatalog::create_rest(uri, props).await
+    },
+    uri: *const c_char,
+    properties: *const PropertyEntry,
+    properties_len: usize
+);
+
+// Load a table from the catalog
+export_runtime_op!(
+    iceberg_catalog_load_table,
+    crate::IcebergTableResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        let table_name = parse_c_string(table_name, "table_name")?;
+        let catalog_ref = unsafe { &*catalog };
+
+        Ok((catalog_ref, namespace_parts, table_name))
+    },
+    result_tuple,
+    async {
+        let (catalog_ref, namespace_parts, table_name) = result_tuple;
+        catalog_ref.load_table(namespace_parts, table_name).await
+    },
+    catalog: *mut IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize,
+    table_name: *const c_char
+);
+
+// List tables in a namespace
+export_runtime_op!(
+    iceberg_catalog_list_tables,
+    IcebergStringListResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        let catalog_ref = unsafe { &*catalog };
+
+        Ok((catalog_ref, namespace_parts))
+    },
+    result_tuple,
+    async {
+        let (catalog_ref, namespace_parts) = result_tuple;
+        catalog_ref.list_tables(namespace_parts).await
+    },
+    catalog: *mut IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize
+);
+
+// List namespaces
+export_runtime_op!(
+    iceberg_catalog_list_namespaces,
+    IcebergNestedStringListResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        let parent_parts = if namespace_parts_len > 0 {
+            Some(parse_string_array(namespace_parts_ptr, namespace_parts_len)?)
+        } else {
+            None
+        };
+        let catalog_ref = unsafe { &*catalog };
+
+        Ok((catalog_ref, parent_parts))
+    },
+    result_tuple,
+    async {
+        let (catalog_ref, parent_parts) = result_tuple;
+        catalog_ref.list_namespaces(parent_parts).await
+    },
+    catalog: *mut IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize
+);
+
+// Check if a table exists
+export_runtime_op!(
+    iceberg_catalog_table_exists,
+    IcebergBoolResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        let table_name = parse_c_string(table_name, "table_name")?;
+        let catalog_ref = unsafe { &*catalog };
+
+        Ok((catalog_ref, namespace_parts, table_name))
+    },
+    result_tuple,
+    async {
+        let (catalog_ref, namespace_parts, table_name) = result_tuple;
+        catalog_ref.table_exists(namespace_parts, table_name).await
+    },
+    catalog: *mut IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize,
+    table_name: *const c_char
+);
