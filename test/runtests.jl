@@ -613,7 +613,6 @@ end
         println("Creating catalog with token authentication...")
         props = Dict(
             "token" => access_token,
-            "scope" => "PRINCIPAL_ROLE:ALL",
             "warehouse" => "warehouse"
         )
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
