@@ -14,6 +14,8 @@ export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, wit
 export with_file_column!, with_pos_column!
 export scan!, next_batch, free_batch, free_stream
 export FILE_COLUMN, POS_COLUMN
+export Catalog, catalog_create_rest, free_catalog
+export load_table, list_tables, list_namespaces, table_exists
 
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:
@@ -161,6 +163,60 @@ function wait_or_cancel(event::Base.Event, response)
 end
 
 """
+    async_ccall(f::F, response, preserve_objs...) -> result where F<:Function
+
+Helper function to execute an async FFI call with proper task preservation and error handling.
+
+This function handles the common pattern of:
+1. Preserving the current task
+2. Creating an event for synchronization
+3. Calling an FFI function with GC protection
+4. Waiting for the result or canceling on error
+5. Unpreserving the task
+6. Checking for errors
+
+# Arguments
+- `f::F`: A callable that takes (handle) and performs the FFI call
+- `response`: Response object to pass to the FFI call
+- `preserve_objs...`: Additional objects to preserve with GC.@preserve (e.g., arrays, strings)
+
+# Returns
+The result code from the FFI call (0 for success)
+
+# Example
+```julia
+response = MyResponse()
+async_ccall(response, obj1, obj2) do handle
+    @ccall rust_lib.my_ffi_function(
+        arg1::Type1,
+        arg2::Type2,
+        response::Ref{MyResponse},
+        handle::Ptr{Cvoid}
+    )::Cint
+end
+```
+"""
+function async_ccall(f::F, response, preserve_objs...) where F<:Function
+    ct = current_task()
+    event = Base.Event()
+    handle = pointer_from_objref(event)
+
+    preserve_task(ct)
+    # Collect all objects to preserve in a tuple and unpack them
+    objs_tuple = (response, event, preserve_objs...)
+    try
+        result = GC.@preserve objs_tuple begin
+            result = f(handle)
+            wait_or_cancel(event, response)
+            result
+        end
+        return result
+    finally
+        unpreserve_task(ct)
+    end
+end
+
+"""
     Table
 
 Opaque pointer type representing an Iceberg table handle from the Rust FFI layer.
@@ -187,10 +243,20 @@ struct ArrowBatch
     rust_ptr::Ptr{Cvoid}
 end
 
-# Include scan modules
-include("scan_common.jl")
-include("full.jl")
-include("incremental.jl")
+# Define PropertyEntry before including modules that use it
+"""
+    PropertyEntry
+
+FFI structure for passing key-value properties to Rust.
+
+# Fields
+- `key::Ptr{Cchar}`: Pointer to the key string
+- `value::Ptr{Cchar}`: Pointer to the value string
+"""
+struct PropertyEntry
+    key::Ptr{Cchar}
+    value::Ptr{Cchar}
+end
 
 """
     TableResponse
@@ -230,6 +296,14 @@ mutable struct Response
     Response() = new(-1, C_NULL, C_NULL)
 end
 
+# Include scan modules
+include("scan_common.jl")
+include("full.jl")
+include("incremental.jl")
+
+# Include catalog module
+include("catalog.jl")
+
 """
     IcebergException <: Exception
 
@@ -249,20 +323,6 @@ function IcebergException(msg::String)
 end
 
 # High-level functions using the async API pattern from RustyObjectStore.jl
-
-"""
-    PropertyEntry
-
-FFI structure for passing key-value properties to Rust.
-
-# Fields
-- `key::Ptr{Cchar}`: Pointer to the key string
-- `value::Ptr{Cchar}`: Pointer to the value string
-"""
-struct PropertyEntry
-    key::Ptr{Cchar}
-    value::Ptr{Cchar}
-end
 
 """
     table_open(snapshot_path::String; scheme::String="s3", properties::Dict{String,String}=Dict{String,String}())::Table
@@ -310,17 +370,13 @@ table = table_open(
 """
 function table_open(snapshot_path::String; scheme::String="s3", properties::Dict{String,String}=Dict{String,String}())
     response = TableResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
 
     # Convert properties dict to array of PropertyEntry structs
     property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
     properties_len = length(property_entries)
 
-    preserve_task(ct)
-    result = GC.@preserve response event property_entries properties try
-        result = @ccall rust_lib.iceberg_table_open(
+    async_ccall(response, property_entries, properties) do handle
+        @ccall rust_lib.iceberg_table_open(
             snapshot_path::Cstring,
             scheme::Cstring,
             (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
@@ -328,12 +384,6 @@ function table_open(snapshot_path::String; scheme::String="s3", properties::Dict
             response::Ref{TableResponse},
             handle::Ptr{Cvoid}
         )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
     end
 
     @throw_on_error(response, "table_open", IcebergException)

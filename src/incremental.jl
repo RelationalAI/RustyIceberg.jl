@@ -284,23 +284,13 @@ Returns a tuple of (inserts_stream, deletes_stream).
 """
 function incremental_arrow_stream_unzipped(scan::IncrementalScan)
     response = UnzippedStreamsResponse()
-    ct = current_task()
-    event = Base.Event()
-    handle = pointer_from_objref(event)
 
-    preserve_task(ct)
-    result = GC.@preserve response event try
-        result = @ccall rust_lib.iceberg_incremental_arrow_stream_unzipped(
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_incremental_arrow_stream_unzipped(
             scan.ptr::Ptr{Cvoid},
             response::Ref{UnzippedStreamsResponse},
             handle::Ptr{Cvoid}
         )::Cint
-
-        wait_or_cancel(event, response)
-
-        result
-    finally
-        unpreserve_task(ct)
     end
 
     @throw_on_error(response, "iceberg_incremental_arrow_stream_unzipped", IcebergException)
