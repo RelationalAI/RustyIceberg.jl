@@ -554,6 +554,97 @@ end
         nonexistent_exists = RustyIceberg.table_exists(catalog, ["tpch.sf01"], "nonexistent_table")
         @test nonexistent_exists == false
         println("✅ Non-existent table correctly returns false")
+    finally
+        # Clean up
+        if catalog != C_NULL
+            RustyIceberg.free_catalog(catalog)
+            println("✅ Catalog cleaned up successfully")
+        end
+    end
+
+    println("✅ Catalog API tests completed!")
+end
+
+@testset "Catalog API with Token Authentication" begin
+    println("Testing catalog API with token-based authentication...")
+
+    using HTTP
+    using JSON
+    using Base64
+
+    # Token endpoint
+    token_endpoint = "http://localhost:8181/api/catalog/v1/oauth/tokens"
+    catalog_uri = "http://localhost:8181/api/catalog"
+
+    catalog = C_NULL
+    try
+        # Step 1: Fetch access token using client credentials
+        println("Fetching access token...")
+
+        client_id = "root"
+        client_secret = "s3cr3t"
+        realm = "POLARIS"
+
+        # Make HTTP request to token endpoint with basic auth
+        # Construct basic auth header manually
+        credentials = base64encode("$client_id:$client_secret")
+        auth_header = "Basic $credentials"
+
+        # Send form-encoded body (application/x-www-form-urlencoded)
+        body = "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL"
+
+        token_response = HTTP.post(
+            token_endpoint;
+            headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
+            body=body,
+            status_exception=false
+        )
+
+        if token_response.status != 200
+            error("Failed to fetch token: $(String(token_response.body))")
+        end
+
+        token_data = JSON.parse(String(token_response.body))
+        access_token = token_data["access_token"]
+        @test !isempty(access_token)
+        println("✅ Access token obtained successfully")
+
+        # Step 2: Create catalog using token-based authentication
+        println("Creating catalog with token authentication...")
+        props = Dict(
+            "token" => access_token,
+            "scope" => "PRINCIPAL_ROLE:ALL",
+            "warehouse" => "warehouse"
+        )
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog != C_NULL
+        println("✅ Catalog created successfully with token authentication")
+
+        # Step 3: List namespaces to verify authentication works
+        println("Listing namespaces with token authentication...")
+        root_namespaces = RustyIceberg.list_namespaces(catalog)
+        @test isa(root_namespaces, Vector{Vector{String}})
+        @test length(root_namespaces) >= 2
+        println("✅ Namespaces listed: $root_namespaces")
+
+        # Step 4: Verify expected namespaces exist
+        @test ["tpch.sf01"] in root_namespaces
+        println("✅ Expected namespace 'tpch.sf01' verified")
+
+        # Step 5: List tables in tpch.sf01
+        println("Listing tables in tpch.sf01...")
+        tpch_tables = RustyIceberg.list_tables(catalog, ["tpch.sf01"])
+        @test isa(tpch_tables, Vector{String})
+        @test length(tpch_tables) > 0
+        println("✅ Tables in tpch.sf01: $tpch_tables")
+
+        # Verify expected TPCH tables exist
+        expected_tables = ["customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier"]
+        for table in expected_tables
+            @test table in tpch_tables
+        end
+        println("✅ All expected TPCH tables found: $expected_tables")
+
     catch e
         rethrow(e)
     finally
@@ -564,7 +655,7 @@ end
         end
     end
 
-    println("✅ Catalog API tests completed!")
+    println("✅ Catalog API with token authentication tests completed!")
 end
 
 @testset "Catalog Table Loading" begin
