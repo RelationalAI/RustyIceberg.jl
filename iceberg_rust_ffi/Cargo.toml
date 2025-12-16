@@ -12,8 +12,8 @@ default = ["julia"]
 julia = []
 
 [dependencies]
-iceberg = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "1bf6d2743a715d24265bf3f0980d8beae418c515", features = ["storage-azdls"] }
-iceberg-catalog-rest = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "1bf6d2743a715d24265bf3f0980d8beae418c515" }
+iceberg = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "5210ce1d93ff6cb70ef382b7573a9b9331ee4e52", features = ["storage-azdls"] }
+iceberg-catalog-rest = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "5210ce1d93ff6cb70ef382b7573a9b9331ee4e52" }
 object_store_ffi = { git = "https://github.com/RelationalAI/object_store_ffi", rev = "79b08071c7a1642532b5891253280861eca9e44e", default-features = false }
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
