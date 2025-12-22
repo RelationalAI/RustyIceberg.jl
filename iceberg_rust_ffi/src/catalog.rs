@@ -132,15 +132,13 @@ impl IcebergCatalog {
             user_data,
         });
 
-        // SAFETY: We own the catalog through the raw pointer. This is safe because:
-        // 1. with_token_authenticator is synchronous
-        // 2. It only updates internal state and returns self
-        // 3. We have exclusive mutable access through &mut self
-        // 4. We use ptr::read/write to move the value without Clone
+        // SAFETY: catalog was checked to be non-null above.
+        // Box::from_raw takes ownership of the heap-allocated catalog.
+        // We immediately apply with_token_authenticator and convert back with into_raw.
         unsafe {
-            let catalog = std::ptr::read(self.catalog);
-            let updated = catalog.with_token_authenticator(authenticator);
-            std::ptr::write(self.catalog, updated);
+            let mut catalog = Box::from_raw(self.catalog);
+            *catalog = catalog.with_token_authenticator(authenticator);
+            self.catalog = Box::into_raw(catalog);
         }
 
         Ok(())
