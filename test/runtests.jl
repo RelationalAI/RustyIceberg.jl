@@ -595,7 +595,11 @@ end
 
         token_response = HTTP.post(
             token_endpoint;
-            headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
+            headers=[
+                "Authorization" => auth_header,
+                "Polaris-Realm" => realm,
+                "Content-Type" => "application/x-www-form-urlencoded"
+            ],
             body=body,
             status_exception=false
         )
@@ -692,7 +696,11 @@ end
 
                 token_response = HTTP.post(
                     token_endpoint;
-                    headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
+                    headers=[
+                        "Authorization" => auth_header,
+                        "Polaris-Realm" => realm,
+                        "Content-Type" => "application/x-www-form-urlencoded"
+                    ],
                     body=body,
                     status_exception=false
                 )
