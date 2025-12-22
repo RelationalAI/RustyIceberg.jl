@@ -674,30 +674,44 @@ end
     function authenticator()
         # Track number of actual token fetches
         fetch_count = Threads.Atomic{Int}(0)
+        # Cache the token - use Ref to store it safely
+        cached_token = Ref{Union{Nothing, String}}(nothing)
+        token_lock = Threads.ReentrantLock()
 
         function get_token_impl()
-            # Fetch access token using client credentials
-            credentials = base64encode("$client_id:$client_secret")
-            auth_header = "Basic $credentials"
-            body = "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL"
+            lock(token_lock) do
+                # Check if we have a cached token
+                if cached_token[] !== nothing
+                    return cached_token[]::String
+                end
 
-            token_response = HTTP.post(
-                token_endpoint;
-                headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
-                body=body,
-                status_exception=false
-            )
+                # Fetch access token using client credentials
+                credentials = base64encode("$client_id:$client_secret")
+                auth_header = "Basic $credentials"
+                body = "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL"
 
-            if token_response.status != 200
-                error("Failed to fetch token: $(String(token_response.body))")
+                token_response = HTTP.post(
+                    token_endpoint;
+                    headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
+                    body=body,
+                    status_exception=false
+                )
+
+                if token_response.status != 200
+                    error("Failed to fetch token: $(String(token_response.body))")
+                end
+
+                token_data = JSON.parse(String(token_response.body))
+                token = token_data["access_token"]
+
+                # Increment fetch count ONLY when actually fetching from server
+                Threads.atomic_add!(fetch_count, 1)
+
+                # Cache the token for future use
+                cached_token[] = token
+
+                return token
             end
-
-            token_data = JSON.parse(String(token_response.body))
-            token = token_data["access_token"]
-
-            # Increment fetch count
-            Threads.atomic_add!(fetch_count, 1)
-            return token
         end
 
         return get_token_impl, fetch_count
@@ -749,10 +763,10 @@ end
         end
         println("✅ All TPCH tables verified to exist: $expected_tables")
 
-        # Verify that authenticator was called multiple times (fresh token each time)
+        # Verify that authenticator fetched the token at least once (subsequent calls use cached token)
         final_fetch_count = fetch_counter[]
         println("✅ Authenticator fetched token $final_fetch_count time(s)")
-        @test final_fetch_count >= 1
+        @test final_fetch_count == 1
     finally
         # Clean up
         if catalog != C_NULL
