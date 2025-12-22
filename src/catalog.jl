@@ -7,11 +7,23 @@ This module provides Julia wrappers for the REST catalog FFI functions.
 """
     Catalog
 
-Opaque pointer type representing an Iceberg catalog handle from the Rust FFI layer.
+Mutable struct holding an Iceberg catalog handle from the Rust FFI layer.
+
+The struct stores both the raw catalog pointer and optionally an authenticator function,
+ensuring the authenticator stays alive while the catalog is in use.
 
 Create a catalog using `catalog_create_rest` and free it with `free_catalog` when done.
 """
-const Catalog = Ptr{Cvoid}
+mutable struct Catalog
+    ptr::Ptr{Cvoid}
+    authenticator::Union{Nothing, Ref}
+end
+
+# Constructor for simple catalogs without authenticator
+Catalog(ptr::Ptr{Cvoid}) = Catalog(ptr, nothing)
+
+# Support conversion to Ptr for FFI calls
+Base.unsafe_convert(::Type{Ptr{Cvoid}}, catalog::Catalog) = catalog.ptr
 
 """
     CatalogResponse
@@ -20,13 +32,13 @@ Response structure for catalog creation operations.
 
 # Fields
 - `result::Cint`: Result code from the operation (0 for success)
-- `catalog::Catalog`: The created catalog handle
+- `catalog::Ptr{Cvoid}`: The created catalog handle (raw pointer)
 - `error_message::Ptr{Cchar}`: Error message string if operation failed
 - `context::Ptr{Cvoid}`: Context pointer for operation cancellation
 """
 mutable struct CatalogResponse
     result::Cint
-    catalog::Catalog
+    catalog::Ptr{Cvoid}
     error_message::Ptr{Cchar}
     context::Ptr{Cvoid}
 
@@ -136,7 +148,99 @@ function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{S
 
     @throw_on_error(response, "catalog_create_rest", IcebergException)
 
-    return response.catalog
+    return Catalog(response.catalog, nothing)
+end
+
+"""
+    catalog_create_rest(authenticator::Function, uri::String; properties::Dict{String,String}=Dict{String,String}())::Catalog
+
+Create a REST catalog connection with custom token authentication.
+
+# Arguments
+- `authenticator::Function`: A callable that takes no arguments and returns a token string.
+  The function will be called whenever a new token is needed for authentication.
+- `uri::String`: URI of the Iceberg REST catalog server (e.g., "http://localhost:8181")
+- `properties::Dict{String,String}`: Optional key-value properties for catalog configuration.
+  By default (empty dict), no additional properties are passed.
+
+# Returns
+- A `Catalog` handle for use in other catalog operations
+
+# Example
+```julia
+function get_token()
+    return ENV["ICEBERG_TOKEN"]
+end
+
+catalog = catalog_create_rest(get_token, "http://polaris:8181")
+```
+"""
+function catalog_create_rest(authenticator::Function, uri::String; properties::Dict{String,String}=Dict{String,String}())
+    # First create the base catalog without the authenticator
+    catalog = catalog_create_rest(uri; properties=properties)
+
+    # Wrap the authenticator in a mutable container so we can get a stable pointer
+    authenticator_ref = Ref(authenticator)
+
+    # Create the C callback function that wraps the Julia authenticator
+    c_callback = @cfunction(
+        $(
+            function token_callback(user_data::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}})::Cint
+                try
+                    # Get the authenticator function from user_data (cast back to its Ref)
+                    # We don't annotate the type here to avoid type mismatch with closures
+                    auth_ref = unsafe_pointer_to_objref(user_data)
+                    auth_fn = auth_ref[]
+
+                    # Call the authenticator to get the token
+                    token_str = auth_fn()::String
+
+                    # Allocate C string using libc malloc and copy the token
+                    # This matches what Rust expects: a CString allocated with libc malloc
+                    token_bytes = Vector{UInt8}(token_str)
+                    token_len = length(token_bytes)
+                    c_str_ptr = @ccall malloc((token_len + 1)::Csize_t)::Ptr{Cchar}
+
+                    if c_str_ptr == C_NULL
+                        return Cint(1)  # Error: allocation failed
+                    end
+
+                    # Copy the token bytes to the allocated memory
+                    unsafe_copyto!(convert(Ptr{UInt8}, c_str_ptr), pointer(token_bytes), token_len)
+                    # Add null terminator
+                    unsafe_store!(convert(Ptr{UInt8}, c_str_ptr), UInt8(0), token_len + 1)
+
+                    # Write the pointer to the output parameter
+                    unsafe_store!(token_ptr, c_str_ptr)
+
+                    return Cint(0)
+                catch e
+                    # Return error code on exception
+                    return Cint(1)
+                end
+            end
+        ),
+        Cint,
+        (Ptr{Cvoid}, Ptr{Ptr{Cchar}})
+    )
+
+    # Set the authenticator on the catalog using the raw pointer from the Catalog struct
+    user_data = pointer_from_objref(authenticator_ref)
+    result = @ccall rust_lib.iceberg_catalog_set_token_authenticator(
+        catalog.ptr::Ptr{Cvoid},
+        c_callback::Ptr{Cvoid},
+        user_data::Ptr{Cvoid}
+    )::Cint
+
+    if result != 0
+        free_catalog(catalog)
+        throw(IcebergException("Failed to set token authenticator"))
+    end
+
+    # Store the authenticator_ref in the catalog struct to keep it alive
+    catalog.authenticator = authenticator_ref
+
+    return catalog
 end
 
 """
@@ -145,7 +249,7 @@ end
 Free the memory associated with a catalog.
 """
 function free_catalog(catalog::Catalog)
-    @ccall rust_lib.iceberg_catalog_free(catalog::Catalog)::Cvoid
+    @ccall rust_lib.iceberg_catalog_free(catalog.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """
@@ -175,7 +279,7 @@ function load_table(catalog::Catalog, namespace::Vector{String}, table_name::Str
 
     async_ccall(response, namespace, namespace_ptrs) do handle
         @ccall rust_lib.iceberg_catalog_load_table(
-            catalog::Catalog,
+            catalog.ptr::Ptr{Cvoid},
             (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
             namespace_len::Csize_t,
             table_name::Cstring,
@@ -215,7 +319,7 @@ function list_tables(catalog::Catalog, namespace::Vector{String})
 
     async_ccall(response, namespace, namespace_ptrs) do handle
         @ccall rust_lib.iceberg_catalog_list_tables(
-            catalog::Catalog,
+            catalog.ptr::Ptr{Cvoid},
             (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
             namespace_len::Csize_t,
             response::Ref{StringListResponse},
@@ -272,7 +376,7 @@ function list_namespaces(catalog::Catalog, parent::Vector{String}=String[])
 
     async_ccall(response, parent, parent_ptrs) do handle
         @ccall rust_lib.iceberg_catalog_list_namespaces(
-            catalog::Catalog,
+            catalog.ptr::Ptr{Cvoid},
             (parent_len > 0 ? pointer(parent_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
             parent_len::Csize_t,
             response::Ref{NestedStringListResponse},
@@ -313,7 +417,7 @@ function table_exists(catalog::Catalog, namespace::Vector{String}, table_name::S
 
     async_ccall(response, namespace, namespace_ptrs) do handle
         @ccall rust_lib.iceberg_catalog_table_exists(
-            catalog::Catalog,
+            catalog.ptr::Ptr{Cvoid},
             (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
             namespace_len::Csize_t,
             table_name::Cstring,

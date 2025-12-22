@@ -657,6 +657,101 @@ end
     println("✅ Catalog API with token authentication tests completed!")
 end
 
+@testset "Catalog API with Custom Authenticator Function" begin
+    println("Testing catalog API with custom authenticator function...")
+
+    using HTTP
+    using JSON
+    using Base64
+
+    # Token endpoint
+    token_endpoint = "http://localhost:8181/api/catalog/v1/oauth/tokens"
+    catalog_uri = "http://localhost:8181/api/catalog"
+
+    # Client credentials
+    client_id = "root"
+    client_secret = "s3cr3t"
+    realm = "POLARIS"
+
+    # Create a custom authenticator function that fetches tokens on demand
+    function get_token()
+        # Fetch access token using client credentials
+        credentials = base64encode("$client_id:$client_secret")
+        auth_header = "Basic $credentials"
+        body = "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL"
+
+        token_response = HTTP.post(
+            token_endpoint;
+            headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
+            body=body,
+            status_exception=false
+        )
+
+        if token_response.status != 200
+            error("Failed to fetch token: $(String(token_response.body))")
+        end
+
+        token_data = JSON.parse(String(token_response.body))
+        return token_data["access_token"]
+    end
+
+    catalog = C_NULL
+    try
+        # Test catalog creation with custom authenticator function
+        println("Creating catalog with custom authenticator function...")
+        props = Dict(
+            "warehouse" => "warehouse"
+        )
+        catalog = RustyIceberg.catalog_create_rest(get_token, catalog_uri; properties=props)
+        @test catalog != C_NULL
+        println("✅ Catalog created successfully with custom authenticator function")
+
+        # Test listing namespaces to verify authentication works
+        println("Listing namespaces with custom authenticator...")
+        root_namespaces = RustyIceberg.list_namespaces(catalog)
+        @test isa(root_namespaces, Vector{Vector{String}})
+        @test length(root_namespaces) >= 2
+        println("✅ Namespaces listed: $root_namespaces")
+
+        # Verify expected namespaces exist
+        @test ["tpch.sf01"] in root_namespaces
+        println("✅ Expected namespace 'tpch.sf01' verified")
+
+        # Test listing tables in tpch.sf01
+        println("Listing tables in tpch.sf01...")
+        tpch_tables = RustyIceberg.list_tables(catalog, ["tpch.sf01"])
+        @test isa(tpch_tables, Vector{String})
+        @test length(tpch_tables) > 0
+        println("✅ Tables in tpch.sf01: $tpch_tables")
+
+        # Verify expected TPCH tables exist
+        expected_tables = ["customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier"]
+        for table in expected_tables
+            @test table in tpch_tables
+        end
+        println("✅ All expected TPCH tables found: $expected_tables")
+
+        # Test table existence check
+        println("Verifying table existence for TPCH tables...")
+        for table in expected_tables
+            exists = RustyIceberg.table_exists(catalog, ["tpch.sf01"], table)
+            @test exists == true
+        end
+        println("✅ All TPCH tables verified to exist: $expected_tables")
+
+    catch e
+        rethrow(e)
+    finally
+        # Clean up
+        if catalog != C_NULL
+            RustyIceberg.free_catalog(catalog)
+            println("✅ Catalog cleaned up successfully")
+        end
+    end
+
+    println("✅ Catalog API with custom authenticator function tests completed!")
+end
+
 @testset "Catalog Table Loading" begin
     println("Testing catalog table loading...")
 

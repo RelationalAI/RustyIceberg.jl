@@ -1,10 +1,12 @@
 /// Catalog support for iceberg_rust_ffi
 use crate::IcebergTable;
 use anyhow::Result;
-use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableIdent};
-use iceberg_catalog_rest::RestCatalogBuilder;
+use async_trait::async_trait;
+use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableIdent};
+use iceberg_catalog_rest::{RestCatalogBuilder, TokenAuthenticator};
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CString};
+use std::sync::Arc;
 
 // FFI exports
 use object_store_ffi::{
@@ -15,11 +17,89 @@ use object_store_ffi::{
 use crate::util::{parse_c_string, parse_properties, parse_string_array};
 use crate::PropertyEntry;
 
+/// Callback function type for token authentication from FFI
+///
+/// The callback receives:
+/// - user_data: opaque pointer to user context (e.g., Julia closure)
+/// - token_ptr: output pointer where the token string should be written
+///
+/// Returns:
+/// - 0 for success (token_ptr must point to a CString allocated with CString::into_raw)
+/// - non-zero for error
+pub type TokenAuthenticatorCallback =
+    extern "C" fn(user_data: *mut c_void, token_ptr: *mut *mut c_char) -> i32;
+
+/// Rust implementation of TokenAuthenticator that calls a C callback with user_data
+#[derive(Debug, Clone)]
+struct FFITokenAuthenticator {
+    callback: TokenAuthenticatorCallback,
+    user_data: *mut c_void,
+}
+
+// SAFETY: We trust that the Julia callback is thread-safe.
+// The user_data pointer is opaque and its thread-safety is the caller's responsibility.
+unsafe impl Send for FFITokenAuthenticator {}
+unsafe impl Sync for FFITokenAuthenticator {}
+
+#[async_trait]
+impl TokenAuthenticator for FFITokenAuthenticator {
+    async fn get_token(&self) -> iceberg::Result<String> {
+        let mut token_ptr: *mut c_char = std::ptr::null_mut();
+
+        let result = (self.callback)(self.user_data, &mut token_ptr);
+
+        if result != 0 {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "Token authenticator callback failed",
+            ));
+        }
+
+        if token_ptr.is_null() {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "Token authenticator returned null pointer",
+            ));
+        }
+
+        // SAFETY: The callback is responsible for ensuring token_ptr is a valid
+        // null-terminated C string that was allocated with CString::into_raw
+        let token_cstring = unsafe { CString::from_raw(token_ptr) };
+
+        token_cstring.into_string().map_err(|e| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("Invalid UTF-8 in token: {}", e),
+            )
+        })
+    }
+}
+
 /// Opaque catalog handle for FFI
+/// Holds a raw pointer to a RestCatalog allocated on the heap.
+/// The catalog is owned by this struct and cleaned up when dropped.
 #[repr(C)]
 pub struct IcebergCatalog {
-    catalog: Box<dyn Catalog>,
+    catalog: *mut iceberg_catalog_rest::RestCatalog,
 }
+
+impl Drop for IcebergCatalog {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.catalog.is_null() {
+                let _ = Box::from_raw(self.catalog);
+            }
+        }
+    }
+}
+
+// SAFETY: The catalog pointer is owned exclusively by this struct.
+// Send and Sync are safe because:
+// 1. The RestCatalog is accessed only through this struct
+// 2. We enforce exclusive mutable access for operations that mutate (set_token_authenticator)
+// 3. The pointer is never shared or aliased from FFI
+unsafe impl Send for IcebergCatalog {}
+unsafe impl Sync for IcebergCatalog {}
 
 impl IcebergCatalog {
     /// Create a new REST catalog
@@ -32,8 +112,38 @@ impl IcebergCatalog {
             .await?;
 
         Ok(IcebergCatalog {
-            catalog: Box::new(catalog),
+            catalog: Box::into_raw(Box::new(catalog)),
         })
+    }
+
+    /// Set a custom token authenticator
+    /// Must be called before the first catalog operation
+    pub fn set_token_authenticator(
+        &mut self,
+        callback: TokenAuthenticatorCallback,
+        user_data: *mut c_void,
+    ) -> Result<()> {
+        if self.catalog.is_null() {
+            return Err(anyhow::anyhow!("Catalog is null"));
+        }
+
+        let authenticator = Arc::new(FFITokenAuthenticator {
+            callback,
+            user_data,
+        });
+
+        // SAFETY: We own the catalog through the raw pointer. This is safe because:
+        // 1. with_token_authenticator is synchronous
+        // 2. It only updates internal state and returns self
+        // 3. We have exclusive mutable access through &mut self
+        // 4. We use ptr::read/write to move the value without Clone
+        unsafe {
+            let catalog = std::ptr::read(self.catalog);
+            let updated = catalog.with_token_authenticator(authenticator);
+            std::ptr::write(self.catalog, updated);
+        }
+
+        Ok(())
     }
 
     /// Load a table by namespace and name
@@ -44,7 +154,8 @@ impl IcebergCatalog {
     ) -> Result<IcebergTable> {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
         let table_ident = TableIdent::new(namespace, table_name);
-        let table = self.catalog.load_table(&table_ident).await?;
+        // SAFETY: catalog is valid as long as self is valid
+        let table = unsafe { (*self.catalog).load_table(&table_ident).await? };
 
         Ok(IcebergTable { table })
     }
@@ -52,7 +163,8 @@ impl IcebergCatalog {
     /// List tables in a namespace
     pub async fn list_tables(&self, namespace_parts: Vec<String>) -> Result<Vec<String>> {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
-        let tables = self.catalog.list_tables(&namespace).await?;
+        // SAFETY: catalog is valid as long as self is valid
+        let tables = unsafe { (*self.catalog).list_tables(&namespace).await? };
 
         Ok(tables.into_iter().map(|t| t.name().to_string()).collect())
     }
@@ -68,7 +180,12 @@ impl IcebergCatalog {
             None
         };
 
-        let namespaces = self.catalog.list_namespaces(parent.as_ref()).await?;
+        // SAFETY: catalog is valid as long as self is valid
+        let namespaces = unsafe {
+            (*self.catalog)
+                .list_namespaces(parent.as_ref())
+                .await?
+        };
 
         Ok(namespaces
             .into_iter()
@@ -84,9 +201,8 @@ impl IcebergCatalog {
     ) -> Result<bool> {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
         let table_ident = TableIdent::new(namespace, table_name);
-        self.catalog
-            .table_exists(&table_ident)
-            .await
+        // SAFETY: catalog is valid as long as self is valid
+        unsafe { (*self.catalog).table_exists(&table_ident).await }
             .map_err(|e| anyhow::anyhow!(e))
     }
 }
@@ -417,3 +533,29 @@ export_runtime_op!(
     namespace_parts_len: usize,
     table_name: *const c_char
 );
+
+/// Set a custom token authenticator for the catalog
+#[no_mangle]
+pub extern "C" fn iceberg_catalog_set_token_authenticator(
+    catalog: *mut IcebergCatalog,
+    callback: TokenAuthenticatorCallback,
+    user_data: *mut c_void,
+) -> crate::CResult {
+    // Check for null catalog pointer
+    if catalog.is_null() {
+        return crate::CResult::Error;
+    }
+
+    // SAFETY: catalog was checked to be non-null above.
+    // The caller must ensure the catalog pointer remains valid for the duration of this call.
+    let catalog_ref = unsafe { &mut *catalog };
+
+    // Call the synchronous set_token_authenticator method
+    match catalog_ref.set_token_authenticator(callback, user_data) {
+        Ok(()) => crate::CResult::Ok,
+        Err(e) => {
+            eprintln!("Error setting token authenticator: {}", e);
+            crate::CResult::Error
+        }
+    }
+}
