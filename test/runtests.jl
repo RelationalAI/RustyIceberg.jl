@@ -674,37 +674,41 @@ end
     function authenticator()
         # Track number of actual token fetches (not calls from cache)
         fetch_count = Threads.Atomic{Int}(0)
+        # Use a lock to protect the cached token
+        token_lock = Threads.ReentrantLock()
         cached_token = Ref{Union{Nothing, String}}(nothing)
 
         function get_token_impl()
-            # Return cached token if available
-            if cached_token[] !== nothing
-                return cached_token[]::String
+            lock(token_lock) do
+                # Return cached token if available
+                if cached_token[] !== nothing
+                    return cached_token[]::String
+                end
+
+                # Fetch access token using client credentials
+                credentials = base64encode("$client_id:$client_secret")
+                auth_header = "Basic $credentials"
+                body = "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL"
+
+                token_response = HTTP.post(
+                    token_endpoint;
+                    headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
+                    body=body,
+                    status_exception=false
+                )
+
+                if token_response.status != 200
+                    error("Failed to fetch token: $(String(token_response.body))")
+                end
+
+                token_data = JSON.parse(String(token_response.body))
+                token = token_data["access_token"]
+
+                # Increment fetch count and cache the token
+                Threads.atomic_add!(fetch_count, 1)
+                cached_token[] = token
+                return token
             end
-
-            # Fetch access token using client credentials
-            credentials = base64encode("$client_id:$client_secret")
-            auth_header = "Basic $credentials"
-            body = "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL"
-
-            token_response = HTTP.post(
-                token_endpoint;
-                headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
-                body=body,
-                status_exception=false
-            )
-
-            if token_response.status != 200
-                error("Failed to fetch token: $(String(token_response.body))")
-            end
-
-            token_data = JSON.parse(String(token_response.body))
-            token = token_data["access_token"]
-
-            # Increment fetch count and cache the token
-            Threads.atomic_add!(fetch_count, 1)
-            cached_token[] = token
-            return token
         end
 
         return get_token_impl, fetch_count
