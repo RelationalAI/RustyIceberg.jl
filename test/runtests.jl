@@ -722,10 +722,10 @@ end
             end
         end
 
-        return get_token_impl, fetch_count
+        return get_token_impl, fetch_count, cached_token
     end
 
-    auth_fn, fetch_counter = authenticator()
+    auth_fn, fetch_counter, cached_token_ref = authenticator()
 
     catalog = C_NULL
     try
@@ -775,6 +775,40 @@ end
         final_fetch_count = fetch_counter[]
         println("✅ Authenticator fetched token $final_fetch_count time(s)")
         @test final_fetch_count == 1
+
+        # Test token invalidation and re-fetch
+        println("\nTesting token invalidation and re-fetch...")
+
+        # Invalidate the cached token by setting it to an invalid value
+        cached_token_ref[] = "invalid_token_foo"
+        println("✅ Invalidated cached token")
+
+        # Attempt to list namespaces with invalid token - should fail with 401
+        println("Attempting to list namespaces with invalid token...")
+        error_occurred = false
+        error_msg = ""
+        try
+            root_namespaces = RustyIceberg.list_namespaces(catalog)
+            # If we get here, the test should fail
+        catch err
+            error_occurred = true
+            error_msg = string(err)
+            println("✅ Got expected error with invalid token: $(typeof(err))")
+            println("   Error message: $error_msg")
+        end
+
+        # Verify that an error occurred when using invalid token
+        @test error_occurred
+
+        # Check if error message contains indication of 401 or authentication failure
+        has_401 = contains(error_msg, "401")
+        has_unauthorized = contains(error_msg, "Unauthorized") || contains(error_msg, "unauthorized")
+        has_unexpected = contains(error_msg, "unexpected status code")
+        has_auth_error = has_401 || has_unauthorized || has_unexpected
+
+        @test has_auth_error
+
+        println("✅ Token invalidation test passed")
     finally
         # Clean up
         if catalog != C_NULL
