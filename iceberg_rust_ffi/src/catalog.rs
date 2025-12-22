@@ -85,11 +85,12 @@ pub struct IcebergCatalog {
     authenticator: Option<Arc<FFITokenAuthenticator>>,
 }
 
-// SAFETY: The catalog pointer is owned exclusively by this struct.
+// SAFETY: The catalog pointer represents unshared ownership across FFI boundary.
 // Send and Sync are safe because:
 // 1. The RestCatalog is accessed only through this struct
 // 2. We enforce exclusive mutable access for operations that mutate (set_token_authenticator)
 // 3. The pointer is never shared or aliased from FFI
+// 4. The struct is manually freed via iceberg_catalog_free(), not via Drop
 unsafe impl Send for IcebergCatalog {}
 unsafe impl Sync for IcebergCatalog {}
 
