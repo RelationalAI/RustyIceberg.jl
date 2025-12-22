@@ -77,22 +77,12 @@ impl CustomAuthenticator for FFITokenAuthenticator {
 
 /// Opaque catalog handle for FFI
 /// Holds a raw pointer to a RestCatalog allocated on the heap.
-/// The catalog is owned by this struct and cleaned up when dropped.
+/// Must be freed explicitly via iceberg_catalog_free() - not automatically dropped.
 /// Also stores the authenticator to allow setting it before catalog creation.
 pub struct IcebergCatalog {
     catalog: Option<*mut RestCatalog>,
     /// Stores a pending authenticator to be applied before first use
     authenticator: Option<Arc<FFITokenAuthenticator>>,
-}
-
-impl Drop for IcebergCatalog {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(catalog_ptr) = self.catalog {
-                let _ = Box::from_raw(catalog_ptr);
-            }
-        }
-    }
 }
 
 // SAFETY: The catalog pointer is owned exclusively by this struct.
