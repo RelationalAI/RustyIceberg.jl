@@ -670,27 +670,47 @@ end
     client_secret = "s3cr3t"
     realm = "POLARIS"
 
-    # Create a custom authenticator function that fetches tokens on demand
-    function get_token()
-        # Fetch access token using client credentials
-        credentials = base64encode("$client_id:$client_secret")
-        auth_header = "Basic $credentials"
-        body = "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL"
+    # Create a custom authenticator function that fetches tokens on demand and caches them
+    function authenticator()
+        # Track number of actual token fetches (not calls from cache)
+        fetch_count = Threads.Atomic{Int}(0)
+        cached_token = Ref{Union{Nothing, String}}(nothing)
 
-        token_response = HTTP.post(
-            token_endpoint;
-            headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
-            body=body,
-            status_exception=false
-        )
+        function get_token_impl()
+            # Return cached token if available
+            if cached_token[] !== nothing
+                return cached_token[]::String
+            end
 
-        if token_response.status != 200
-            error("Failed to fetch token: $(String(token_response.body))")
+            # Fetch access token using client credentials
+            credentials = base64encode("$client_id:$client_secret")
+            auth_header = "Basic $credentials"
+            body = "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL"
+
+            token_response = HTTP.post(
+                token_endpoint;
+                headers=["Authorization" => auth_header, "Polaris-Realm" => realm, "Content-Type" => "application/x-www-form-urlencoded"],
+                body=body,
+                status_exception=false
+            )
+
+            if token_response.status != 200
+                error("Failed to fetch token: $(String(token_response.body))")
+            end
+
+            token_data = JSON.parse(String(token_response.body))
+            token = token_data["access_token"]
+
+            # Increment fetch count and cache the token
+            Threads.atomic_add!(fetch_count, 1)
+            cached_token[] = token
+            return token
         end
 
-        token_data = JSON.parse(String(token_response.body))
-        return token_data["access_token"]
+        return get_token_impl, fetch_count
     end
+
+    auth_fn, fetch_counter = authenticator()
 
     catalog = C_NULL
     try
@@ -699,7 +719,7 @@ end
         props = Dict(
             "warehouse" => "warehouse"
         )
-        catalog = RustyIceberg.catalog_create_rest(get_token, catalog_uri; properties=props)
+        catalog = RustyIceberg.catalog_create_rest(auth_fn, catalog_uri; properties=props)
         @test catalog != C_NULL
         println("✅ Catalog created successfully with custom authenticator function")
 
@@ -735,6 +755,11 @@ end
             @test exists == true
         end
         println("✅ All TPCH tables verified to exist: $expected_tables")
+
+        # Verify that token caching works (only one token should have been fetched)
+        final_fetch_count = fetch_counter[]
+        println("✅ Authenticator fetched token $final_fetch_count time(s) (token caching verified)")
+        @test final_fetch_count == 1
     finally
         # Clean up
         if catalog != C_NULL
