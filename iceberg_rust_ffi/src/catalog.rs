@@ -205,7 +205,7 @@ impl IcebergCatalog {
 /// Response type for catalog operations that return a catalog
 #[repr(C)]
 pub struct IcebergCatalogResponse {
-    pub result: crate::CResult,
+    pub result: CResult,
     pub catalog: *mut IcebergCatalog,
     pub error_message: *mut c_char,
     pub context: *const crate::Context,
@@ -216,7 +216,7 @@ unsafe impl Send for IcebergCatalogResponse {}
 impl crate::RawResponse for IcebergCatalogResponse {
     type Payload = IcebergCatalog;
 
-    fn result_mut(&mut self) -> &mut crate::CResult {
+    fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
 
@@ -242,7 +242,7 @@ impl crate::RawResponse for IcebergCatalogResponse {
 /// Response type for string list operations
 #[repr(C)]
 pub struct IcebergStringListResponse {
-    pub result: crate::CResult,
+    pub result: CResult,
     pub items: *mut *mut c_char,
     pub count: usize,
     pub error_message: *mut c_char,
@@ -254,7 +254,7 @@ unsafe impl Send for IcebergStringListResponse {}
 impl crate::RawResponse for IcebergStringListResponse {
     type Payload = Vec<String>;
 
-    fn result_mut(&mut self) -> &mut crate::CResult {
+    fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
 
@@ -292,7 +292,7 @@ impl crate::RawResponse for IcebergStringListResponse {
 /// Response type for boolean operations
 #[repr(C)]
 pub struct IcebergBoolResponse {
-    pub result: crate::CResult,
+    pub result: CResult,
     pub value: bool,
     pub error_message: *mut c_char,
     pub context: *const crate::Context,
@@ -303,7 +303,7 @@ unsafe impl Send for IcebergBoolResponse {}
 impl crate::RawResponse for IcebergBoolResponse {
     type Payload = bool;
 
-    fn result_mut(&mut self) -> &mut crate::CResult {
+    fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
 
@@ -326,7 +326,7 @@ impl crate::RawResponse for IcebergBoolResponse {
 /// Response type for nested string list operations (for namespace lists)
 #[repr(C)]
 pub struct IcebergNestedStringListResponse {
-    pub result: crate::CResult,
+    pub result: CResult,
     pub outer_items: *mut *mut *mut c_char,
     pub outer_count: usize,
     pub inner_counts: *mut usize,
@@ -339,7 +339,7 @@ unsafe impl Send for IcebergNestedStringListResponse {}
 impl crate::RawResponse for IcebergNestedStringListResponse {
     type Payload = Vec<Vec<String>>;
 
-    fn result_mut(&mut self) -> &mut crate::CResult {
+    fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
 
@@ -535,10 +535,10 @@ pub extern "C" fn iceberg_catalog_set_token_authenticator(
     catalog: *mut IcebergCatalog,
     callback: TokenAuthenticatorCallback,
     user_data: *mut c_void,
-) -> crate::CResult {
+) -> CResult {
     // Check for null catalog pointer
     if catalog.is_null() {
-        return crate::CResult::Error;
+        return CResult::Error;
     }
 
     // SAFETY: catalog was checked to be non-null above.
@@ -547,10 +547,10 @@ pub extern "C" fn iceberg_catalog_set_token_authenticator(
 
     // Call the synchronous set_token_authenticator method
     match catalog_ref.set_token_authenticator(callback, user_data) {
-        Ok(()) => crate::CResult::Ok,
+        Ok(()) => CResult::Ok,
         Err(e) => {
             eprintln!("Error setting token authenticator: {}", e);
-            crate::CResult::Error
+            CResult::Error
         }
     }
 }
