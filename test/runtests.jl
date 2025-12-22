@@ -643,9 +643,6 @@ end
             @test table in tpch_tables
         end
         println("✅ All expected TPCH tables found: $expected_tables")
-
-    catch e
-        rethrow(e)
     finally
         # Clean up
         if catalog != C_NULL
@@ -738,9 +735,6 @@ end
             @test exists == true
         end
         println("✅ All TPCH tables verified to exist: $expected_tables")
-
-    catch e
-        rethrow(e)
     finally
         # Clean up
         if catalog != C_NULL
