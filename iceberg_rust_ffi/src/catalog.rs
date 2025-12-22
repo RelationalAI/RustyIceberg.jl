@@ -181,11 +181,7 @@ impl IcebergCatalog {
         };
 
         // SAFETY: catalog is valid as long as self is valid
-        let namespaces = unsafe {
-            (*self.catalog)
-                .list_namespaces(parent.as_ref())
-                .await?
-        };
+        let namespaces = unsafe { (*self.catalog).list_namespaces(parent.as_ref()).await? };
 
         Ok(namespaces
             .into_iter()
@@ -202,8 +198,7 @@ impl IcebergCatalog {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
         let table_ident = TableIdent::new(namespace, table_name);
         // SAFETY: catalog is valid as long as self is valid
-        unsafe { (*self.catalog).table_exists(&table_ident).await }
-            .map_err(|e| anyhow::anyhow!(e))
+        unsafe { (*self.catalog).table_exists(&table_ident).await }.map_err(|e| anyhow::anyhow!(e))
     }
 }
 
