@@ -130,14 +130,22 @@ catalog = catalog_create_rest("http://polaris:8181")
 ```
 """
 function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{String,String}())
-    response = CatalogResponse()
+    # Create an empty catalog (no authenticator)
+    catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
+    if catalog_ptr == C_NULL
+        throw(IcebergException("Failed to create empty catalog"))
+    end
 
+    # Initialize the catalog with REST connection
     # Convert properties dict to array of PropertyEntry structs
     property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
     properties_len = length(property_entries)
 
+    response = CatalogResponse()
+
     async_ccall(response, property_entries, properties) do handle
         @ccall rust_lib.iceberg_rest_catalog_create(
+            catalog_ptr::Ptr{Cvoid},
             uri::Cstring,
             (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
             properties_len::Csize_t,
@@ -176,13 +184,16 @@ catalog = catalog_create_rest(get_token, "http://polaris:8181")
 ```
 """
 function catalog_create_rest(authenticator::Function, uri::String; properties::Dict{String,String}=Dict{String,String}())
-    # First create the base catalog without the authenticator
-    catalog = catalog_create_rest(uri; properties=properties)
+    # Step 1: Create an empty catalog
+    catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
+    if catalog_ptr == C_NULL
+        throw(IcebergException("Failed to create empty catalog"))
+    end
 
-    # Wrap the authenticator in a mutable container so we can get a stable pointer
+    # Step 2: Wrap the authenticator in a mutable container so we can get a stable pointer
     authenticator_ref = Ref(authenticator)
 
-    # Create the C callback function that wraps the Julia authenticator
+    # Step 3: Create the C callback function that wraps the Julia authenticator
     c_callback = @cfunction(
         $(
             function token_callback(user_data::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}})::Cint
@@ -224,22 +235,43 @@ function catalog_create_rest(authenticator::Function, uri::String; properties::D
         (Ptr{Cvoid}, Ptr{Ptr{Cchar}})
     )
 
-    # Set the authenticator on the catalog using the raw pointer from the Catalog struct
+    # Step 4: Get user_data pointer to pass to the authenticator
     user_data = pointer_from_objref(authenticator_ref)
+
+    # Step 5: Set the authenticator on the empty catalog BEFORE initializing REST
     result = @ccall rust_lib.iceberg_catalog_set_token_authenticator(
-        catalog.ptr::Ptr{Cvoid},
+        catalog_ptr::Ptr{Cvoid},
         c_callback::Ptr{Cvoid},
         user_data::Ptr{Cvoid}
     )::Cint
 
     if result != 0
-        free_catalog(catalog)
+        @ccall rust_lib.iceberg_catalog_free(catalog_ptr::Ptr{Cvoid})::Cvoid
         throw(IcebergException("Failed to set token authenticator"))
     end
 
-    # Store the authenticator_ref in the catalog struct to keep it alive
-    catalog.authenticator = authenticator_ref
+    # Step 6: Initialize the catalog with REST connection
+    # Convert properties dict to array of PropertyEntry structs
+    property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
+    properties_len = length(property_entries)
 
+    response = CatalogResponse()
+
+    async_ccall(response, property_entries, properties) do handle
+        @ccall rust_lib.iceberg_rest_catalog_create(
+            catalog_ptr::Ptr{Cvoid},
+            uri::Cstring,
+            (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
+            properties_len::Csize_t,
+            response::Ref{CatalogResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "catalog_create_rest", IcebergException)
+
+    # Create a Catalog struct that holds the catalog pointer and keeps authenticator alive
+    catalog = Catalog(response.catalog, authenticator_ref)
     return catalog
 end
 

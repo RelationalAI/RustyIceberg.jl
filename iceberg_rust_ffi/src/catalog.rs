@@ -419,21 +419,34 @@ pub extern "C" fn iceberg_catalog_free(catalog: *mut IcebergCatalog) {
 // FFI Export functions for catalog operations
 // These functions are exported to be called from Julia via the FFI
 
-// Create a REST catalog
+// Create an empty catalog (default constructor exposed as sync FFI function)
+#[no_mangle]
+pub extern "C" fn iceberg_catalog_init() -> *mut IcebergCatalog {
+    Box::into_raw(Box::new(IcebergCatalog::default()))
+}
+
+// Create a REST catalog from an existing catalog pointer (which may have an authenticator already set)
+// This function takes ownership of the catalog pointer and returns it in the response
 export_runtime_op!(
     iceberg_rest_catalog_create,
     IcebergCatalogResponse,
     || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+        // SAFETY: catalog was checked to be non-null above and came from FFI
+        let catalog = unsafe { Box::from_raw(catalog) };
         let uri_str = parse_c_string(uri, "uri")?;
         let props = parse_properties(properties, properties_len)?;
-        Ok::<(String, HashMap<String, String>), anyhow::Error>((uri_str, props))
+        Ok::<(Box<IcebergCatalog>, String, HashMap<String, String>), anyhow::Error>((catalog, uri_str, props))
     },
     result_tuple,
     async {
-        let (uri, props) = result_tuple;
-        let catalog = IcebergCatalog::default().create_rest(uri, props).await?;
-        Ok::<IcebergCatalog, anyhow::Error>(catalog)
+        let (catalog, uri, props) = result_tuple;
+        // create_rest takes ownership and returns the catalog
+        catalog.create_rest(uri, props).await
     },
+    catalog: *mut IcebergCatalog,
     uri: *const c_char,
     properties: *const PropertyEntry,
     properties_len: usize
