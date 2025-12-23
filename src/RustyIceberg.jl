@@ -3,6 +3,7 @@ module RustyIceberg
 using Base: @kwdef, @lock
 using Base.Threads: Atomic
 using Arrow
+using FunctionWrappers: FunctionWrapper
 using iceberg_rust_ffi_jll
 
 export Table, Scan, IncrementalScan, ArrowBatch, StaticConfig, ArrowStream

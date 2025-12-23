@@ -1,10 +1,12 @@
 /// Catalog support for iceberg_rust_ffi
 use crate::IcebergTable;
 use anyhow::Result;
-use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableIdent};
-use iceberg_catalog_rest::RestCatalogBuilder;
+use async_trait::async_trait;
+use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableIdent};
+use iceberg_catalog_rest::{CustomAuthenticator, RestCatalog, RestCatalogBuilder};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
+use std::sync::{Arc, Mutex};
 
 // FFI exports
 use object_store_ffi::{
@@ -15,25 +17,189 @@ use object_store_ffi::{
 use crate::util::{parse_c_string, parse_properties, parse_string_array};
 use crate::PropertyEntry;
 
+/// Callback function type for custom token authentication from FFI with token caching support
+///
+/// The callback receives:
+/// - auth_fn: opaque pointer to user context (e.g., Julia Ref to authenticator)
+/// - token_data_ptr: output pointer where token string bytes pointer should be written
+/// - token_len_ptr: output pointer where token string length should be written
+/// - reuse_token_ptr: output pointer for reuse flag (1 = reuse previous token, 0 = new token)
+///
+/// The callback is responsible for:
+/// 1. Extracting the authenticator from auth_fn pointer
+/// 2. Invoking the Julia authenticator function which returns Union{String, Nothing}:
+///    - String: new token to cache and use
+///    - nothing: signal to reuse the previously cached token
+/// 3. Setting reuse_token_ptr to indicate the result:
+///    - Write 1 if Julia returned nothing (reuse the previous token)
+///    - Write 0 if Julia returned a String (new token data provided)
+/// 4. If reuse flag is 0: write token_data_ptr (pointer to bytes) and token_len_ptr (length)
+///    Note: Julia is responsible for keeping the data valid for the duration of the call.
+///    Rust will copy the data immediately.
+///
+/// Returns:
+/// - 0 for success
+/// - non-zero for error
+pub type CustomAuthenticatorCallback = unsafe extern "C" fn(
+    auth_fn: *mut c_void,
+    token_data_ptr: *mut *mut c_char,
+    token_len_ptr: *mut usize,
+    reuse_token_ptr: *mut i32,
+) -> i32;
+
+/// Rust implementation of CustomAuthenticator that calls a C callback with auth_fn pointer
+/// Supports token caching to avoid unnecessary copying when Julia returns the same token
+#[derive(Clone, Debug)]
+struct FFITokenAuthenticator {
+    callback: CustomAuthenticatorCallback,
+    auth_fn: *mut c_void,
+    // Cached token to avoid copying when Julia signals to reuse
+    cached_token: Arc<Mutex<Option<String>>>,
+}
+
+// SAFETY: We trust that the Julia callback is thread-safe.
+// The auth_fn pointer is opaque and its thread-safety is the caller's responsibility.
+unsafe impl Send for FFITokenAuthenticator {}
+unsafe impl Sync for FFITokenAuthenticator {}
+
+#[async_trait]
+impl CustomAuthenticator for FFITokenAuthenticator {
+    async fn get_token(&self) -> iceberg::Result<String> {
+        let mut token_data: *mut c_char = std::ptr::null_mut();
+        let mut token_len: usize = 0;
+        let mut reuse_token_box = Box::new(0i32);
+        let reuse_token_ptr = reuse_token_box.as_mut() as *mut i32;
+
+        let result = unsafe {
+            (self.callback)(
+                self.auth_fn,
+                &mut token_data,
+                &mut token_len,
+                reuse_token_ptr,
+            )
+        };
+
+        if result != 0 {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "Token authenticator callback failed",
+            ));
+        }
+
+        // If Julia signals to reuse the previous token, return it
+        if *reuse_token_box != 0 {
+            let cached = self.cached_token.lock().unwrap();
+            if let Some(token) = cached.as_ref() {
+                return Ok(token.clone());
+            } else {
+                return Err(Error::new(
+                    ErrorKind::DataInvalid,
+                    "Token authenticator requested to reuse previous token, but no cached token exists",
+                ));
+            }
+        }
+
+        // Otherwise, handle the new token from Julia
+        if token_data.is_null() || token_len == 0 {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "Token authenticator returned null pointer or zero length",
+            ));
+        }
+
+        // SAFETY: The callback is responsible for ensuring token_data points to valid
+        // UTF-8 bytes with length token_len. Rust will copy the data immediately.
+        let token = unsafe {
+            let slice = std::slice::from_raw_parts(token_data as *const u8, token_len);
+            String::from_utf8(slice.to_vec()).map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Invalid UTF-8 in token: {}", e),
+                )
+            })?
+        };
+
+        // Cache the new token for potential reuse
+        *self.cached_token.lock().unwrap() = Some(token.clone());
+
+        Ok(token)
+    }
+}
+
 /// Opaque catalog handle for FFI
-#[repr(C)]
+/// Stores a RestCatalog instance wrapped in a Box for safe memory management.
+/// Also stores the authenticator to allow setting it before catalog creation.
 pub struct IcebergCatalog {
-    catalog: Box<dyn Catalog>,
+    catalog: Option<Box<RestCatalog>>,
+    /// Stores a pending authenticator to be applied before first use
+    authenticator: Option<Arc<FFITokenAuthenticator>>,
+}
+
+// SAFETY: Send and Sync are safe because:
+// 1. The RestCatalog is accessed only through this struct via exclusive ownership (Box)
+// 2. We enforce exclusive mutable access for operations that mutate (set_token_authenticator)
+// 3. The struct represents unshared ownership across FFI boundary
+// 4. The struct is manually freed via iceberg_catalog_free(), not via Drop
+unsafe impl Send for IcebergCatalog {}
+unsafe impl Sync for IcebergCatalog {}
+
+impl Default for IcebergCatalog {
+    fn default() -> Self {
+        IcebergCatalog {
+            catalog: None,
+            authenticator: None,
+        }
+    }
 }
 
 impl IcebergCatalog {
-    /// Create a new REST catalog
-    pub async fn create_rest(uri: String, props: HashMap<String, String>) -> Result<Self> {
+    /// Create and initialize a REST catalog with optional authenticator
+    pub async fn create_rest(
+        mut self,
+        uri: String,
+        props: HashMap<String, String>,
+    ) -> Result<Self> {
         let mut catalog_props = props;
         catalog_props.insert("uri".to_string(), uri);
 
-        let catalog = RestCatalogBuilder::default()
-            .load("rest", catalog_props)
-            .await?;
+        // Apply authenticator to builder if set
+        let mut builder = RestCatalogBuilder::default();
+        if let Some(ref authenticator) = self.authenticator {
+            builder = builder.with_token_authenticator(authenticator.clone());
+        }
 
-        Ok(IcebergCatalog {
-            catalog: Box::new(catalog),
-        })
+        let catalog = builder.load("rest", catalog_props).await?;
+        self.catalog = Some(Box::new(catalog));
+
+        Ok(self)
+    }
+
+    /// Set a custom token authenticator before catalog creation
+    pub fn set_token_authenticator(
+        &mut self,
+        callback: CustomAuthenticatorCallback,
+        auth_fn: *mut c_void,
+    ) -> Result<()> {
+        let authenticator = Arc::new(FFITokenAuthenticator {
+            callback,
+            auth_fn,
+            cached_token: Arc::new(Mutex::new(None)),
+        });
+
+        // Store the authenticator to be used when building the catalog
+        self.authenticator = Some(authenticator);
+
+        Ok(())
+    }
+
+    /// Get a reference to the underlying RestCatalog.
+    ///
+    /// Returns a reference to the catalog.
+    /// Panics if the catalog has not been initialized via create_rest.
+    fn as_ref(&self) -> &RestCatalog {
+        self.catalog
+            .as_ref()
+            .expect("catalog should be initialized")
     }
 
     /// Load a table by namespace and name
@@ -44,7 +210,7 @@ impl IcebergCatalog {
     ) -> Result<IcebergTable> {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
         let table_ident = TableIdent::new(namespace, table_name);
-        let table = self.catalog.load_table(&table_ident).await?;
+        let table = self.as_ref().load_table(&table_ident).await?;
 
         Ok(IcebergTable { table })
     }
@@ -52,7 +218,7 @@ impl IcebergCatalog {
     /// List tables in a namespace
     pub async fn list_tables(&self, namespace_parts: Vec<String>) -> Result<Vec<String>> {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
-        let tables = self.catalog.list_tables(&namespace).await?;
+        let tables = self.as_ref().list_tables(&namespace).await?;
 
         Ok(tables.into_iter().map(|t| t.name().to_string()).collect())
     }
@@ -68,7 +234,7 @@ impl IcebergCatalog {
             None
         };
 
-        let namespaces = self.catalog.list_namespaces(parent.as_ref()).await?;
+        let namespaces = self.as_ref().list_namespaces(parent.as_ref()).await?;
 
         Ok(namespaces
             .into_iter()
@@ -84,7 +250,7 @@ impl IcebergCatalog {
     ) -> Result<bool> {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
         let table_ident = TableIdent::new(namespace, table_name);
-        self.catalog
+        self.as_ref()
             .table_exists(&table_ident)
             .await
             .map_err(|e| anyhow::anyhow!(e))
@@ -94,7 +260,7 @@ impl IcebergCatalog {
 /// Response type for catalog operations that return a catalog
 #[repr(C)]
 pub struct IcebergCatalogResponse {
-    pub result: crate::CResult,
+    pub result: CResult,
     pub catalog: *mut IcebergCatalog,
     pub error_message: *mut c_char,
     pub context: *const crate::Context,
@@ -105,7 +271,7 @@ unsafe impl Send for IcebergCatalogResponse {}
 impl crate::RawResponse for IcebergCatalogResponse {
     type Payload = IcebergCatalog;
 
-    fn result_mut(&mut self) -> &mut crate::CResult {
+    fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
 
@@ -131,7 +297,7 @@ impl crate::RawResponse for IcebergCatalogResponse {
 /// Response type for string list operations
 #[repr(C)]
 pub struct IcebergStringListResponse {
-    pub result: crate::CResult,
+    pub result: CResult,
     pub items: *mut *mut c_char,
     pub count: usize,
     pub error_message: *mut c_char,
@@ -143,7 +309,7 @@ unsafe impl Send for IcebergStringListResponse {}
 impl crate::RawResponse for IcebergStringListResponse {
     type Payload = Vec<String>;
 
-    fn result_mut(&mut self) -> &mut crate::CResult {
+    fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
 
@@ -181,7 +347,7 @@ impl crate::RawResponse for IcebergStringListResponse {
 /// Response type for boolean operations
 #[repr(C)]
 pub struct IcebergBoolResponse {
-    pub result: crate::CResult,
+    pub result: CResult,
     pub value: bool,
     pub error_message: *mut c_char,
     pub context: *const crate::Context,
@@ -192,7 +358,7 @@ unsafe impl Send for IcebergBoolResponse {}
 impl crate::RawResponse for IcebergBoolResponse {
     type Payload = bool;
 
-    fn result_mut(&mut self) -> &mut crate::CResult {
+    fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
 
@@ -215,7 +381,7 @@ impl crate::RawResponse for IcebergBoolResponse {
 /// Response type for nested string list operations (for namespace lists)
 #[repr(C)]
 pub struct IcebergNestedStringListResponse {
-    pub result: crate::CResult,
+    pub result: CResult,
     pub outer_items: *mut *mut *mut c_char,
     pub outer_count: usize,
     pub inner_counts: *mut usize,
@@ -228,7 +394,7 @@ unsafe impl Send for IcebergNestedStringListResponse {}
 impl crate::RawResponse for IcebergNestedStringListResponse {
     type Payload = Vec<Vec<String>>;
 
-    fn result_mut(&mut self) -> &mut crate::CResult {
+    fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
 
@@ -295,20 +461,34 @@ pub extern "C" fn iceberg_catalog_free(catalog: *mut IcebergCatalog) {
 // FFI Export functions for catalog operations
 // These functions are exported to be called from Julia via the FFI
 
-// Create a REST catalog
+// Create an empty catalog (default constructor exposed as sync FFI function)
+#[no_mangle]
+pub extern "C" fn iceberg_catalog_init() -> *mut IcebergCatalog {
+    Box::into_raw(Box::new(IcebergCatalog::default()))
+}
+
+// Create a REST catalog from an existing catalog pointer (which may have an authenticator already set)
+// This function takes ownership of the catalog pointer and returns it in the response
 export_runtime_op!(
     iceberg_rest_catalog_create,
     IcebergCatalogResponse,
     || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+        // SAFETY: catalog was checked to be non-null above and came from FFI
+        let catalog = unsafe { Box::from_raw(catalog) };
         let uri_str = parse_c_string(uri, "uri")?;
         let props = parse_properties(properties, properties_len)?;
-        Ok((uri_str, props))
+        Ok::<(Box<IcebergCatalog>, String, HashMap<String, String>), anyhow::Error>((catalog, uri_str, props))
     },
     result_tuple,
     async {
-        let (uri, props) = result_tuple;
-        IcebergCatalog::create_rest(uri, props).await
+        let (catalog, uri, props) = result_tuple;
+        // create_rest takes ownership and returns the catalog
+        catalog.create_rest(uri, props).await
     },
+    catalog: *mut IcebergCatalog,
     uri: *const c_char,
     properties: *const PropertyEntry,
     properties_len: usize
@@ -417,3 +597,28 @@ export_runtime_op!(
     namespace_parts_len: usize,
     table_name: *const c_char
 );
+
+/// Set a custom token authenticator for the catalog
+#[no_mangle]
+pub extern "C" fn iceberg_catalog_set_token_authenticator(
+    catalog: *mut IcebergCatalog,
+    callback: CustomAuthenticatorCallback,
+    auth_fn: *mut c_void,
+) -> CResult {
+    // Check for null catalog pointer
+    if catalog.is_null() {
+        return CResult::Error;
+    }
+
+    // SAFETY: catalog was checked to be non-null above.
+    // The caller must ensure the catalog pointer remains valid for the duration of this call.
+    let result = unsafe { &mut *catalog }.set_token_authenticator(callback, auth_fn);
+
+    match result {
+        Ok(()) => CResult::Ok,
+        Err(e) => {
+            eprintln!("Error setting token authenticator: {}", e);
+            CResult::Error
+        }
+    }
+}
