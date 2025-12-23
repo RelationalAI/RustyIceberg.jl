@@ -6,7 +6,12 @@ This module provides Julia wrappers for the REST catalog FFI functions.
 
 # Token callback function that can be exported as C-callable with token caching support
 # This is a static function (no closure) that takes auth_fn and extracts the authenticator
-function token_callback_impl(auth_fn::Ptr{Cvoid}, token_data_ptr::Ptr{Ptr{Cchar}}, token_len_ptr::Ptr{Csize_t}, reuse_token_ptr::Ptr{Cint})::Cint
+Base.@ccallable function iceberg_token_callback_impl(
+    auth_fn::Ptr{Cvoid},
+    token_data_ptr::Ptr{Ptr{Cchar}},
+    token_len_ptr::Ptr{Csize_t},
+    reuse_token_ptr::Ptr{Cint}
+)::Cint
     try
         # Check that output pointers are valid
         if token_data_ptr == C_NULL || token_len_ptr == C_NULL || reuse_token_ptr == C_NULL
@@ -253,7 +258,7 @@ function catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing
     authenticator_ref = Ref(authenticator)
 
     # Step 3: Create C callback using the static token_callback_impl function
-    c_callback = @cfunction(token_callback_impl, Cint, (Ptr{Cvoid}, Ptr{Ptr{Cchar}}, Ptr{Csize_t}, Ptr{Cint}))
+    c_callback = @cfunction(iceberg_token_callback_impl, Cint, (Ptr{Cvoid}, Ptr{Ptr{Cchar}}, Ptr{Csize_t}, Ptr{Cint}))
 
     # Step 4: Get auth_fn pointer to pass to the authenticator
     auth_fn = pointer_from_objref(authenticator_ref)
