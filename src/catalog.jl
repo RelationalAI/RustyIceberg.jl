@@ -8,6 +8,11 @@ This module provides Julia wrappers for the REST catalog FFI functions.
 # This is a static function (no closure) that takes auth_fn and extracts the authenticator
 function token_callback_impl(auth_fn::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}}, reuse_token_ptr::Ptr{Cint})::Cint
     try
+        # Check that output pointers are valid
+        if token_ptr == C_NULL || reuse_token_ptr == C_NULL
+            return Cint(1)  # Error: invalid output pointers
+        end
+
         # Extract authenticator function from auth_fn pointer
         auth_ref = unsafe_pointer_to_objref(auth_fn)
         auth_fn_call = auth_ref[]

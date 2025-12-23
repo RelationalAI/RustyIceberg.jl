@@ -45,7 +45,7 @@ pub type CustomAuthenticatorCallback = unsafe extern "C" fn(
 
 /// Rust implementation of CustomAuthenticator that calls a C callback with auth_fn pointer
 /// Supports token caching to avoid unnecessary copying when Julia returns the same token
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct FFITokenAuthenticator {
     callback: CustomAuthenticatorCallback,
     auth_fn: *mut c_void,
@@ -62,9 +62,10 @@ unsafe impl Sync for FFITokenAuthenticator {}
 impl CustomAuthenticator for FFITokenAuthenticator {
     async fn get_token(&self) -> iceberg::Result<String> {
         let mut token_ptr: *mut c_char = std::ptr::null_mut();
-        let mut reuse_token: i32 = 0;
+        let mut reuse_token_box = Box::new(0i32);
+        let reuse_token_ptr = reuse_token_box.as_mut() as *mut i32;
 
-        let result = unsafe { (self.callback)(self.auth_fn, &mut token_ptr, &mut reuse_token) };
+        let result = unsafe { (self.callback)(self.auth_fn, &mut token_ptr, reuse_token_ptr) };
 
         if result != 0 {
             return Err(Error::new(
@@ -74,7 +75,7 @@ impl CustomAuthenticator for FFITokenAuthenticator {
         }
 
         // If Julia signals to reuse the previous token, return it
-        if reuse_token != 0 {
+        if *reuse_token_box != 0 {
             let cached = self.cached_token.lock().unwrap();
             if let Some(token) = cached.as_ref() {
                 return Ok(token.clone());
