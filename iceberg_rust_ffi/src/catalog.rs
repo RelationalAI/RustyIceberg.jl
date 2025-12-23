@@ -75,7 +75,7 @@ impl CustomAuthenticator for FFITokenAuthenticator {
                 self.auth_fn,
                 &mut token_data,
                 &mut token_len,
-                reuse_token_ptr
+                reuse_token_ptr,
             )
         };
 
