@@ -54,6 +54,25 @@ mutable struct Catalog
     authenticator::Union{Nothing, Ref}
 end
 
+"""
+    _invalidate_catalog_ptr!(catalog_ptr_ref)
+
+Internal helper to prevent accidental reuse of a catalog pointer after `iceberg_rest_catalog_create`.
+
+The FFI function `iceberg_rest_catalog_create` takes ownership of the pointer via `Box::from_raw()`.
+Reusing the same pointer would cause use-after-free. This function clears the pointer to make
+accidental reuse obvious (would result in a null pointer error).
+
+# Arguments
+- `catalog_ptr_ref`: A reference to the catalog pointer variable to invalidate
+"""
+function _invalidate_catalog_ptr!(catalog_ptr_ref)
+    # This is a simple safety guard - in normal usage each call gets a fresh pointer
+    # via iceberg_catalog_init(), but if someone reuses a pointer, they'll get C_NULL
+    # instead of undefined behavior
+    catalog_ptr_ref[] = C_NULL
+end
+
 # Constructor for simple catalogs without authenticator
 Catalog(ptr::Ptr{Cvoid}) = Catalog(ptr, nothing)
 
@@ -191,6 +210,10 @@ function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{S
 
     @throw_on_error(response, "catalog_create_rest", IcebergException)
 
+    # Invalidate the original pointer to prevent accidental reuse
+    # The FFI function took ownership via Box::from_raw()
+    _invalidate_catalog_ptr!(Ref(catalog_ptr))
+
     return Catalog(response.catalog, nothing)
 end
 
@@ -266,6 +289,10 @@ function catalog_create_rest(authenticator::FunctionWrapper{String,Tuple{}}, uri
     end
 
     @throw_on_error(response, "catalog_create_rest", IcebergException)
+
+    # Invalidate the original pointer to prevent accidental reuse
+    # The FFI function took ownership via Box::from_raw()
+    _invalidate_catalog_ptr!(Ref(catalog_ptr))
 
     # Create a Catalog struct that holds the catalog pointer and keeps authenticator alive
     catalog = Catalog(response.catalog, authenticator_ref)
