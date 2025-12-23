@@ -82,20 +82,18 @@ impl CustomAuthenticator for FFITokenAuthenticator {
 }
 
 /// Opaque catalog handle for FFI
-/// Holds a raw pointer to a RestCatalog allocated on the heap.
-/// Must be freed explicitly via iceberg_catalog_free() - not automatically dropped.
+/// Stores a RestCatalog instance wrapped in a Box for safe memory management.
 /// Also stores the authenticator to allow setting it before catalog creation.
 pub struct IcebergCatalog {
-    catalog: Option<*mut RestCatalog>,
+    catalog: Option<Box<RestCatalog>>,
     /// Stores a pending authenticator to be applied before first use
     authenticator: Option<Arc<FFITokenAuthenticator>>,
 }
 
-// SAFETY: The catalog pointer represents unshared ownership across FFI boundary.
-// Send and Sync are safe because:
-// 1. The RestCatalog is accessed only through this struct
+// SAFETY: Send and Sync are safe because:
+// 1. The RestCatalog is accessed only through this struct via exclusive ownership (Box)
 // 2. We enforce exclusive mutable access for operations that mutate (set_token_authenticator)
-// 3. The pointer is never shared or aliased from FFI
+// 3. The struct represents unshared ownership across FFI boundary
 // 4. The struct is manually freed via iceberg_catalog_free(), not via Drop
 unsafe impl Send for IcebergCatalog {}
 unsafe impl Sync for IcebergCatalog {}
@@ -126,7 +124,7 @@ impl IcebergCatalog {
         }
 
         let catalog = builder.load("rest", catalog_props).await?;
-        self.catalog = Some(Box::into_raw(Box::new(catalog)));
+        self.catalog = Some(Box::new(catalog));
 
         Ok(self)
     }
@@ -147,11 +145,12 @@ impl IcebergCatalog {
 
     /// Get a reference to the underlying RestCatalog.
     ///
-    /// SAFETY: Returns a reference valid only for the lifetime of self.
-    /// The caller must ensure the catalog is initialized before calling this.
+    /// Returns a reference to the catalog.
+    /// Panics if the catalog has not been initialized via create_rest.
     fn as_ref(&self) -> &RestCatalog {
-        // SAFETY: catalog is checked to be Some during create_rest.
-        unsafe { &*self.catalog.expect("catalog should be initialized") }
+        self.catalog
+            .as_ref()
+            .expect("catalog should be initialized")
     }
 
     /// Load a table by namespace and name
