@@ -771,7 +771,7 @@ end
         end
         println("✅ All TPCH tables verified to exist: $expected_tables")
 
-        # Verify that authenticator fetched the token at least once (subsequent calls use cached token)
+        # Verify that authenticator fetched the token exactly once (subsequent calls use cached token)
         final_fetch_count = fetch_counter[]
         println("✅ Authenticator fetched token $final_fetch_count time(s)")
         @test final_fetch_count == 1
