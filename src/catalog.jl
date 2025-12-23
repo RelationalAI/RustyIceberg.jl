@@ -356,15 +356,7 @@ function list_tables(catalog::Catalog, namespace::Vector{String})
         )::Cint
     end
 
-    if response.result != 0
-        error_msg = response.error_message != C_NULL ? unsafe_string(response.error_message) : ""
-        status_code = _extract_status_code_from_error_message(error_msg)
-        if status_code >= 0
-            response.status_code = status_code
-            throw(CatalogException(response))
-        end
-        throw(IcebergException(response_error_to_string(response, "list_tables")))
-    end
+    @throw_on_error(response, "list_tables", IcebergException)
 
     # Convert C string array to Julia strings
     tables = String[]
