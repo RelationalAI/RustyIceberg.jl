@@ -33,7 +33,7 @@ use crate::PropertyEntry;
 /// - 0 for success (token_ptr must point to a C string allocated with libc malloc)
 /// - non-zero for error
 pub type CustomAuthenticatorCallback =
-    extern "C" fn(auth_fn: *mut c_void, token_ptr: *mut *mut c_char) -> i32;
+    unsafe extern "C" fn(auth_fn: *mut c_void, token_ptr: *mut *mut c_char) -> i32;
 
 /// Rust implementation of CustomAuthenticator that calls a C callback with auth_fn pointer
 #[derive(Debug, Clone)]
@@ -52,7 +52,7 @@ impl CustomAuthenticator for FFITokenAuthenticator {
     async fn get_token(&self) -> iceberg::Result<String> {
         let mut token_ptr: *mut c_char = std::ptr::null_mut();
 
-        let result = (self.callback)(self.auth_fn, &mut token_ptr);
+        let result = unsafe { (self.callback)(self.auth_fn, &mut token_ptr) };
 
         if result != 0 {
             return Err(Error::new(
@@ -137,10 +137,7 @@ impl IcebergCatalog {
         callback: CustomAuthenticatorCallback,
         auth_fn: *mut c_void,
     ) -> Result<()> {
-        let authenticator = Arc::new(FFITokenAuthenticator {
-            callback,
-            auth_fn,
-        });
+        let authenticator = Arc::new(FFITokenAuthenticator { callback, auth_fn });
 
         // Store the authenticator to be used when building the catalog
         self.authenticator = Some(authenticator);

@@ -195,12 +195,12 @@ function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{S
 end
 
 """
-    catalog_create_rest(authenticator::Function, uri::String; properties::Dict{String,String}=Dict{String,String}())::Catalog
+    catalog_create_rest(authenticator::FunctionWrapper{String,Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}())::Catalog
 
 Create a REST catalog connection with custom token authentication.
 
 # Arguments
-- `authenticator::Function`: A callable that takes no arguments and returns a token string.
+- `authenticator::FunctionWrapper{String,Tuple{}}`: A callable that takes no arguments and returns a token string.
   The function will be called whenever a new token is needed for authentication.
 - `uri::String`: URI of the Iceberg REST catalog server (e.g., "http://localhost:8181")
 - `properties::Dict{String,String}`: Optional key-value properties for catalog configuration.
@@ -211,14 +211,16 @@ Create a REST catalog connection with custom token authentication.
 
 # Example
 ```julia
+using FunctionWrappers: FunctionWrapper
+
 function get_token()
     return ENV["ICEBERG_TOKEN"]
 end
 
-catalog = catalog_create_rest(get_token, "http://polaris:8181")
+catalog = catalog_create_rest(FunctionWrapper{String,Tuple{}}(get_token), "http://polaris:8181")
 ```
 """
-function catalog_create_rest(authenticator::Function, uri::String; properties::Dict{String,String}=Dict{String,String}())
+function catalog_create_rest(authenticator::FunctionWrapper{String,Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}())
     # Step 1: Create an empty catalog
     catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
     if catalog_ptr == C_NULL
