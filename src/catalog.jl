@@ -4,6 +4,41 @@ Catalog support for RustyIceberg.jl
 This module provides Julia wrappers for the REST catalog FFI functions.
 """
 
+# Token callback function that can be exported as C-callable
+# This is a static function (no closure) that takes auth_fn and extracts the authenticator
+function token_callback_impl(auth_fn::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}})::Cint
+    try
+        # Extract authenticator function from auth_fn pointer
+        auth_ref = unsafe_pointer_to_objref(auth_fn)
+        auth_fn_call = auth_ref[]
+
+        # Call the authenticator to get the token
+        token_str = auth_fn_call()::String
+
+        # Allocate C string using libc malloc and copy the token
+        token_bytes = Vector{UInt8}(token_str)
+        token_len = length(token_bytes)
+        c_str_ptr = @ccall malloc((token_len + 1)::Csize_t)::Ptr{Cchar}
+
+        if c_str_ptr == C_NULL
+            return Cint(1)  # Error: allocation failed
+        end
+
+        # Copy the token bytes to the allocated memory
+        unsafe_copyto!(convert(Ptr{UInt8}, c_str_ptr), pointer(token_bytes), token_len)
+        # Add null terminator
+        unsafe_store!(convert(Ptr{UInt8}, c_str_ptr), UInt8(0), token_len + 1)
+
+        # Write the pointer to the output parameter
+        unsafe_store!(token_ptr, c_str_ptr)
+
+        return Cint(0)
+    catch e
+        # Return error code on exception
+        return Cint(1)
+    end
+end
+
 """
     Catalog
 
@@ -190,63 +225,23 @@ function catalog_create_rest(authenticator::Function, uri::String; properties::D
         throw(IcebergException("Failed to create empty catalog"))
     end
 
-    # Step 2: Wrap the authenticator in a mutable container so we can get a stable pointer
+    # Step 2: Wrap the authenticator in a Ref for stable memory address
     authenticator_ref = Ref(authenticator)
 
-    # Step 3: Create the C callback function that wraps the Julia authenticator
-    c_callback = @cfunction(
-        $(
-            function token_callback(user_data::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}})::Cint
-                try
-                    # Get the authenticator function from user_data (cast back to its Ref)
-                    # We don't annotate the type here to avoid type mismatch with closures
-                    auth_ref = unsafe_pointer_to_objref(user_data)
-                    auth_fn = auth_ref[]
+    # Step 3: Create C callback using the static token_callback_impl function
+    c_callback = @cfunction(token_callback_impl, Cint, (Ptr{Cvoid}, Ptr{Ptr{Cchar}}))
 
-                    # Call the authenticator to get the token
-                    token_str = auth_fn()::String
-
-                    # Allocate C string using libc malloc and copy the token
-                    # This matches what Rust expects: a CString allocated with libc malloc
-                    token_bytes = Vector{UInt8}(token_str)
-                    token_len = length(token_bytes)
-                    c_str_ptr = @ccall malloc((token_len + 1)::Csize_t)::Ptr{Cchar}
-
-                    if c_str_ptr == C_NULL
-                        return Cint(1)  # Error: allocation failed
-                    end
-
-                    # Copy the token bytes to the allocated memory
-                    unsafe_copyto!(convert(Ptr{UInt8}, c_str_ptr), pointer(token_bytes), token_len)
-                    # Add null terminator
-                    unsafe_store!(convert(Ptr{UInt8}, c_str_ptr), UInt8(0), token_len + 1)
-
-                    # Write the pointer to the output parameter
-                    unsafe_store!(token_ptr, c_str_ptr)
-
-                    return Cint(0)
-                catch e
-                    # Return error code on exception
-                    return Cint(1)
-                end
-            end
-        ),
-        Cint,
-        (Ptr{Cvoid}, Ptr{Ptr{Cchar}})
-    )
-
-    # Step 4: Get user_data pointer to pass to the authenticator
-    user_data = pointer_from_objref(authenticator_ref)
+    # Step 4: Get auth_fn pointer to pass to the authenticator
+    auth_fn = pointer_from_objref(authenticator_ref)
 
     # Step 5: Set the authenticator on the empty catalog BEFORE initializing REST
     result = @ccall rust_lib.iceberg_catalog_set_token_authenticator(
         catalog_ptr::Ptr{Cvoid},
         c_callback::Ptr{Cvoid},
-        user_data::Ptr{Cvoid}
+        auth_fn::Ptr{Cvoid}
     )::Cint
 
     if result != 0
-        @ccall rust_lib.iceberg_catalog_free(catalog_ptr::Ptr{Cvoid})::Cvoid
         throw(IcebergException("Failed to set token authenticator"))
     end
 
@@ -359,7 +354,15 @@ function list_tables(catalog::Catalog, namespace::Vector{String})
         )::Cint
     end
 
-    @throw_on_error(response, "list_tables", IcebergException)
+    if response.result != 0
+        error_msg = response.error_message != C_NULL ? unsafe_string(response.error_message) : ""
+        status_code = _extract_status_code_from_error_message(error_msg)
+        if status_code >= 0
+            response.status_code = status_code
+            throw(CatalogException(response))
+        end
+        throw(IcebergException(response_error_to_string(response, "list_tables")))
+    end
 
     # Convert C string array to Julia strings
     tables = String[]

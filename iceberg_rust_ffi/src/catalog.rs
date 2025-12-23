@@ -20,24 +20,30 @@ use crate::PropertyEntry;
 /// Callback function type for custom token authentication from FFI
 ///
 /// The callback receives:
-/// - user_data: opaque pointer to user context (e.g., Julia closure)
+/// - auth_fn: opaque pointer to user context (e.g., Julia Ref to authenticator)
 /// - token_ptr: output pointer where the token string should be written
 ///
+/// The callback is responsible for:
+/// 1. Extracting the authenticator from auth_fn pointer
+/// 2. Invoking the Julia authenticator function
+/// 3. Allocating the token string with libc malloc
+/// 4. Writing its pointer to token_ptr
+///
 /// Returns:
-/// - 0 for success (token_ptr must point to a CString allocated with CString::into_raw)
+/// - 0 for success (token_ptr must point to a C string allocated with libc malloc)
 /// - non-zero for error
 pub type CustomAuthenticatorCallback =
-    extern "C" fn(user_data: *mut c_void, token_ptr: *mut *mut c_char) -> i32;
+    extern "C" fn(auth_fn: *mut c_void, token_ptr: *mut *mut c_char) -> i32;
 
-/// Rust implementation of CustomAuthenticator that calls a C callback with user_data
+/// Rust implementation of CustomAuthenticator that calls a C callback with auth_fn pointer
 #[derive(Debug, Clone)]
 struct FFITokenAuthenticator {
     callback: CustomAuthenticatorCallback,
-    user_data: *mut c_void,
+    auth_fn: *mut c_void,
 }
 
 // SAFETY: We trust that the Julia callback is thread-safe.
-// The user_data pointer is opaque and its thread-safety is the caller's responsibility.
+// The auth_fn pointer is opaque and its thread-safety is the caller's responsibility.
 unsafe impl Send for FFITokenAuthenticator {}
 unsafe impl Sync for FFITokenAuthenticator {}
 
@@ -46,7 +52,7 @@ impl CustomAuthenticator for FFITokenAuthenticator {
     async fn get_token(&self) -> iceberg::Result<String> {
         let mut token_ptr: *mut c_char = std::ptr::null_mut();
 
-        let result = (self.callback)(self.user_data, &mut token_ptr);
+        let result = (self.callback)(self.auth_fn, &mut token_ptr);
 
         if result != 0 {
             return Err(Error::new(
@@ -129,11 +135,11 @@ impl IcebergCatalog {
     pub fn set_token_authenticator(
         &mut self,
         callback: CustomAuthenticatorCallback,
-        user_data: *mut c_void,
+        auth_fn: *mut c_void,
     ) -> Result<()> {
         let authenticator = Arc::new(FFITokenAuthenticator {
             callback,
-            user_data,
+            auth_fn,
         });
 
         // Store the authenticator to be used when building the catalog
@@ -552,7 +558,7 @@ export_runtime_op!(
 pub extern "C" fn iceberg_catalog_set_token_authenticator(
     catalog: *mut IcebergCatalog,
     callback: CustomAuthenticatorCallback,
-    user_data: *mut c_void,
+    auth_fn: *mut c_void,
 ) -> CResult {
     // Check for null catalog pointer
     if catalog.is_null() {
@@ -561,7 +567,7 @@ pub extern "C" fn iceberg_catalog_set_token_authenticator(
 
     // SAFETY: catalog was checked to be non-null above.
     // The caller must ensure the catalog pointer remains valid for the duration of this call.
-    let result = unsafe { &mut *catalog }.set_token_authenticator(callback, user_data);
+    let result = unsafe { &mut *catalog }.set_token_authenticator(callback, auth_fn);
 
     match result {
         Ok(()) => CResult::Ok,
