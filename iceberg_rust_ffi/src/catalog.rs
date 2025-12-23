@@ -6,7 +6,7 @@ use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableId
 use iceberg_catalog_rest::{CustomAuthenticator, RestCatalog, RestCatalogBuilder};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CString};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // FFI exports
 use object_store_ffi::{
@@ -17,29 +17,40 @@ use object_store_ffi::{
 use crate::util::{parse_c_string, parse_properties, parse_string_array};
 use crate::PropertyEntry;
 
-/// Callback function type for custom token authentication from FFI
+/// Callback function type for custom token authentication from FFI with token caching support
 ///
 /// The callback receives:
 /// - auth_fn: opaque pointer to user context (e.g., Julia Ref to authenticator)
-/// - token_ptr: output pointer where the token string should be written
+/// - token_ptr: output pointer where the token string should be written (only if not reusing)
+/// - reuse_token_ptr: output pointer for reuse flag (1 = reuse previous token, 0 = new token)
 ///
 /// The callback is responsible for:
 /// 1. Extracting the authenticator from auth_fn pointer
-/// 2. Invoking the Julia authenticator function
-/// 3. Allocating the token string with libc malloc
-/// 4. Writing its pointer to token_ptr
+/// 2. Invoking the Julia authenticator function which returns Union{String, Nothing}:
+///    - String: new token to cache and use
+///    - nothing: signal to reuse the previously cached token
+/// 3. Setting reuse_token_ptr to indicate the result:
+///    - Write 1 if Julia returned nothing (reuse the previous token)
+///    - Write 0 if Julia returned a String (new token provided in token_ptr)
+/// 4. If reuse flag is 0: allocate the token string with libc malloc and write to token_ptr
 ///
 /// Returns:
-/// - 0 for success (token_ptr must point to a C string allocated with libc malloc)
+/// - 0 for success
 /// - non-zero for error
-pub type CustomAuthenticatorCallback =
-    unsafe extern "C" fn(auth_fn: *mut c_void, token_ptr: *mut *mut c_char) -> i32;
+pub type CustomAuthenticatorCallback = unsafe extern "C" fn(
+    auth_fn: *mut c_void,
+    token_ptr: *mut *mut c_char,
+    reuse_token_ptr: *mut i32,
+) -> i32;
 
 /// Rust implementation of CustomAuthenticator that calls a C callback with auth_fn pointer
-#[derive(Debug, Clone)]
+/// Supports token caching to avoid unnecessary copying when Julia returns the same token
+#[derive(Clone)]
 struct FFITokenAuthenticator {
     callback: CustomAuthenticatorCallback,
     auth_fn: *mut c_void,
+    // Cached token to avoid copying when Julia signals to reuse
+    cached_token: Arc<Mutex<Option<String>>>,
 }
 
 // SAFETY: We trust that the Julia callback is thread-safe.
@@ -51,8 +62,9 @@ unsafe impl Sync for FFITokenAuthenticator {}
 impl CustomAuthenticator for FFITokenAuthenticator {
     async fn get_token(&self) -> iceberg::Result<String> {
         let mut token_ptr: *mut c_char = std::ptr::null_mut();
+        let mut reuse_token: i32 = 0;
 
-        let result = unsafe { (self.callback)(self.auth_fn, &mut token_ptr) };
+        let result = unsafe { (self.callback)(self.auth_fn, &mut token_ptr, &mut reuse_token) };
 
         if result != 0 {
             return Err(Error::new(
@@ -61,6 +73,20 @@ impl CustomAuthenticator for FFITokenAuthenticator {
             ));
         }
 
+        // If Julia signals to reuse the previous token, return it
+        if reuse_token != 0 {
+            let cached = self.cached_token.lock().unwrap();
+            if let Some(token) = cached.as_ref() {
+                return Ok(token.clone());
+            } else {
+                return Err(Error::new(
+                    ErrorKind::DataInvalid,
+                    "Token authenticator requested to reuse previous token, but no cached token exists",
+                ));
+            }
+        }
+
+        // Otherwise, handle the new token from Julia
         if token_ptr.is_null() {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
@@ -69,15 +95,20 @@ impl CustomAuthenticator for FFITokenAuthenticator {
         }
 
         // SAFETY: The callback is responsible for ensuring token_ptr is a valid
-        // null-terminated C string that was allocated with CString::into_raw
+        // null-terminated C string that was allocated with libc malloc
         let token_cstring = unsafe { CString::from_raw(token_ptr) };
 
-        token_cstring.into_string().map_err(|e| {
+        let token = token_cstring.into_string().map_err(|e| {
             Error::new(
                 ErrorKind::DataInvalid,
                 format!("Invalid UTF-8 in token: {}", e),
             )
-        })
+        })?;
+
+        // Cache the new token for potential reuse
+        *self.cached_token.lock().unwrap() = Some(token.clone());
+
+        Ok(token)
     }
 }
 
@@ -135,7 +166,11 @@ impl IcebergCatalog {
         callback: CustomAuthenticatorCallback,
         auth_fn: *mut c_void,
     ) -> Result<()> {
-        let authenticator = Arc::new(FFITokenAuthenticator { callback, auth_fn });
+        let authenticator = Arc::new(FFITokenAuthenticator {
+            callback,
+            auth_fn,
+            cached_token: Arc::new(Mutex::new(None)),
+        });
 
         // Store the authenticator to be used when building the catalog
         self.authenticator = Some(authenticator);

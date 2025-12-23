@@ -4,16 +4,31 @@ Catalog support for RustyIceberg.jl
 This module provides Julia wrappers for the REST catalog FFI functions.
 """
 
-# Token callback function that can be exported as C-callable
+# Token callback function that can be exported as C-callable with token caching support
 # This is a static function (no closure) that takes auth_fn and extracts the authenticator
-function token_callback_impl(auth_fn::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}})::Cint
+function token_callback_impl(auth_fn::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}}, reuse_token_ptr::Ptr{Cint})::Cint
     try
         # Extract authenticator function from auth_fn pointer
         auth_ref = unsafe_pointer_to_objref(auth_fn)
         auth_fn_call = auth_ref[]
 
         # Call the authenticator to get the token
-        token_str = auth_fn_call()::String
+        # The authenticator should return either:
+        # - A String with the token to use and cache
+        # - nothing to signal reuse of the previously cached token
+        token_result = auth_fn_call()
+
+        # Handle nothing (signal to reuse cached token)
+        if token_result === nothing
+            unsafe_store!(reuse_token_ptr, Cint(1))
+            return Cint(0)
+        end
+
+        # Ensure we got a String
+        token_str = token_result::String
+
+        # Signal that this is a new token (not reusing)
+        unsafe_store!(reuse_token_ptr, Cint(0))
 
         # Allocate C string using libc malloc and copy the token
         token_bytes = Vector{UInt8}(token_str)
@@ -33,7 +48,7 @@ function token_callback_impl(auth_fn::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}})::C
         unsafe_store!(token_ptr, c_str_ptr)
 
         return Cint(0)
-    catch e
+    catch
         # Return error code on exception
         return Cint(1)
     end
@@ -195,13 +210,17 @@ function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{S
 end
 
 """
-    catalog_create_rest(authenticator::FunctionWrapper{String,Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}())::Catalog
+    catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}())::Catalog
 
-Create a REST catalog connection with custom token authentication.
+Create a REST catalog connection with custom token authentication and token caching support.
 
 # Arguments
-- `authenticator::FunctionWrapper{String,Tuple{}}`: A callable that takes no arguments and returns a token string.
-  The function will be called whenever a new token is needed for authentication.
+- `authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}}`: A callable that takes no arguments and returns either:
+  - A `String` containing the token: Rust will cache it and use it for authentication
+  - `nothing`: Signal to reuse the previously cached token (avoids malloc, memory copy, and free operations)
+
+  **Token Caching Optimization**: Returning `nothing` allows efficient token reuse without unnecessary copying.
+
 - `uri::String`: URI of the Iceberg REST catalog server (e.g., "http://localhost:8181")
 - `properties::Dict{String,String}`: Optional key-value properties for catalog configuration.
   By default (empty dict), no additional properties are passed.
@@ -209,18 +228,23 @@ Create a REST catalog connection with custom token authentication.
 # Returns
 - A `Catalog` handle for use in other catalog operations
 
-# Example
+# Example with Token Caching
 ```julia
 using FunctionWrappers: FunctionWrapper
 
 function get_token()
-    return ENV["ICEBERG_TOKEN"]
+    # Check if we need a new token, or if we can reuse the cached one
+    if needs_refresh()
+        return fetch_new_token()  # Returns String with token
+    else
+        return nothing  # Signal to reuse cached token (efficient!)
+    end
 end
 
-catalog = catalog_create_rest(FunctionWrapper{String,Tuple{}}(get_token), "http://polaris:8181")
+catalog = catalog_create_rest(FunctionWrapper{Union{String,Nothing},Tuple{}}(get_token), "http://polaris:8181")
 ```
 """
-function catalog_create_rest(authenticator::FunctionWrapper{String,Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}())
+function catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}())
     # Step 1: Create an empty catalog
     catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
     if catalog_ptr == C_NULL
@@ -231,7 +255,7 @@ function catalog_create_rest(authenticator::FunctionWrapper{String,Tuple{}}, uri
     authenticator_ref = Ref(authenticator)
 
     # Step 3: Create C callback using the static token_callback_impl function
-    c_callback = @cfunction(token_callback_impl, Cint, (Ptr{Cvoid}, Ptr{Ptr{Cchar}}))
+    c_callback = @cfunction(token_callback_impl, Cint, (Ptr{Cvoid}, Ptr{Ptr{Cchar}}, Ptr{Cint}))
 
     # Step 4: Get auth_fn pointer to pass to the authenticator
     auth_fn = pointer_from_objref(authenticator_ref)

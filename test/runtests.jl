@@ -735,7 +735,7 @@ end
         props = Dict(
             "warehouse" => "warehouse"
         )
-        catalog = RustyIceberg.catalog_create_rest(FunctionWrapper{String,Tuple{}}(auth_fn), catalog_uri; properties=props)
+        catalog = RustyIceberg.catalog_create_rest(FunctionWrapper{Union{String,Nothing},Tuple{}}(auth_fn), catalog_uri; properties=props)
         @test catalog != C_NULL
         println("✅ Catalog created successfully with custom authenticator function")
 
