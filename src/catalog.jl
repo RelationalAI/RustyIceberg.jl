@@ -6,10 +6,10 @@ This module provides Julia wrappers for the REST catalog FFI functions.
 
 # Token callback function that can be exported as C-callable with token caching support
 # This is a static function (no closure) that takes auth_fn and extracts the authenticator
-function token_callback_impl(auth_fn::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}}, reuse_token_ptr::Ptr{Cint})::Cint
+function token_callback_impl(auth_fn::Ptr{Cvoid}, token_data_ptr::Ptr{Ptr{Cchar}}, token_len_ptr::Ptr{Csize_t}, reuse_token_ptr::Ptr{Cint})::Cint
     try
         # Check that output pointers are valid
-        if token_ptr == C_NULL || reuse_token_ptr == C_NULL
+        if token_data_ptr == C_NULL || token_len_ptr == C_NULL || reuse_token_ptr == C_NULL
             return Cint(1)  # Error: invalid output pointers
         end
 
@@ -35,22 +35,15 @@ function token_callback_impl(auth_fn::Ptr{Cvoid}, token_ptr::Ptr{Ptr{Cchar}}, re
         # Signal that this is a new token (not reusing)
         unsafe_store!(reuse_token_ptr, Cint(0))
 
-        # Allocate C string using libc malloc and copy the token
+        # Get token bytes and write data pointer and length to output parameters
+        # The data will be kept alive by the token_str variable until the callback returns
         token_bytes = Vector{UInt8}(token_str)
         token_len = length(token_bytes)
-        c_str_ptr = @ccall malloc((token_len + 1)::Csize_t)::Ptr{Cchar}
+        token_data = pointer(token_bytes)
 
-        if c_str_ptr == C_NULL
-            return Cint(1)  # Error: allocation failed
-        end
-
-        # Copy the token bytes to the allocated memory
-        unsafe_copyto!(convert(Ptr{UInt8}, c_str_ptr), pointer(token_bytes), token_len)
-        # Add null terminator
-        unsafe_store!(convert(Ptr{UInt8}, c_str_ptr), UInt8(0), token_len + 1)
-
-        # Write the pointer to the output parameter
-        unsafe_store!(token_ptr, c_str_ptr)
+        # Write the pointer and length to the output parameters
+        unsafe_store!(token_data_ptr, token_data)
+        unsafe_store!(token_len_ptr, Csize_t(token_len))
 
         return Cint(0)
     catch
@@ -260,7 +253,7 @@ function catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing
     authenticator_ref = Ref(authenticator)
 
     # Step 3: Create C callback using the static token_callback_impl function
-    c_callback = @cfunction(token_callback_impl, Cint, (Ptr{Cvoid}, Ptr{Ptr{Cchar}}, Ptr{Cint}))
+    c_callback = @cfunction(token_callback_impl, Cint, (Ptr{Cvoid}, Ptr{Ptr{Cchar}}, Ptr{Csize_t}, Ptr{Cint}))
 
     # Step 4: Get auth_fn pointer to pass to the authenticator
     auth_fn = pointer_from_objref(authenticator_ref)

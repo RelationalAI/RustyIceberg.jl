@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableIdent};
 use iceberg_catalog_rest::{CustomAuthenticator, RestCatalog, RestCatalogBuilder};
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_void};
 use std::sync::{Arc, Mutex};
 
 // FFI exports
@@ -21,7 +21,8 @@ use crate::PropertyEntry;
 ///
 /// The callback receives:
 /// - auth_fn: opaque pointer to user context (e.g., Julia Ref to authenticator)
-/// - token_ptr: output pointer where the token string should be written (only if not reusing)
+/// - token_data_ptr: output pointer where token string bytes pointer should be written
+/// - token_len_ptr: output pointer where token string length should be written
 /// - reuse_token_ptr: output pointer for reuse flag (1 = reuse previous token, 0 = new token)
 ///
 /// The callback is responsible for:
@@ -31,15 +32,18 @@ use crate::PropertyEntry;
 ///    - nothing: signal to reuse the previously cached token
 /// 3. Setting reuse_token_ptr to indicate the result:
 ///    - Write 1 if Julia returned nothing (reuse the previous token)
-///    - Write 0 if Julia returned a String (new token provided in token_ptr)
-/// 4. If reuse flag is 0: allocate the token string with libc malloc and write to token_ptr
+///    - Write 0 if Julia returned a String (new token data provided)
+/// 4. If reuse flag is 0: write token_data_ptr (pointer to bytes) and token_len_ptr (length)
+///    Note: Julia is responsible for keeping the data valid for the duration of the call.
+///    Rust will copy the data immediately.
 ///
 /// Returns:
 /// - 0 for success
 /// - non-zero for error
 pub type CustomAuthenticatorCallback = unsafe extern "C" fn(
     auth_fn: *mut c_void,
-    token_ptr: *mut *mut c_char,
+    token_data_ptr: *mut *mut c_char,
+    token_len_ptr: *mut usize,
     reuse_token_ptr: *mut i32,
 ) -> i32;
 
@@ -61,11 +65,19 @@ unsafe impl Sync for FFITokenAuthenticator {}
 #[async_trait]
 impl CustomAuthenticator for FFITokenAuthenticator {
     async fn get_token(&self) -> iceberg::Result<String> {
-        let mut token_ptr: *mut c_char = std::ptr::null_mut();
+        let mut token_data: *mut c_char = std::ptr::null_mut();
+        let mut token_len: usize = 0;
         let mut reuse_token_box = Box::new(0i32);
         let reuse_token_ptr = reuse_token_box.as_mut() as *mut i32;
 
-        let result = unsafe { (self.callback)(self.auth_fn, &mut token_ptr, reuse_token_ptr) };
+        let result = unsafe {
+            (self.callback)(
+                self.auth_fn,
+                &mut token_data,
+                &mut token_len,
+                reuse_token_ptr
+            )
+        };
 
         if result != 0 {
             return Err(Error::new(
@@ -88,23 +100,24 @@ impl CustomAuthenticator for FFITokenAuthenticator {
         }
 
         // Otherwise, handle the new token from Julia
-        if token_ptr.is_null() {
+        if token_data.is_null() || token_len == 0 {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
-                "Token authenticator returned null pointer",
+                "Token authenticator returned null pointer or zero length",
             ));
         }
 
-        // SAFETY: The callback is responsible for ensuring token_ptr is a valid
-        // null-terminated C string that was allocated with libc malloc
-        let token_cstring = unsafe { CString::from_raw(token_ptr) };
-
-        let token = token_cstring.into_string().map_err(|e| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("Invalid UTF-8 in token: {}", e),
-            )
-        })?;
+        // SAFETY: The callback is responsible for ensuring token_data points to valid
+        // UTF-8 bytes with length token_len. Rust will copy the data immediately.
+        let token = unsafe {
+            let slice = std::slice::from_raw_parts(token_data as *const u8, token_len);
+            String::from_utf8(slice.to_vec()).map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Invalid UTF-8 in token: {}", e),
+                )
+            })?
+        };
 
         // Cache the new token for potential reuse
         *self.cached_token.lock().unwrap() = Some(token.clone());
