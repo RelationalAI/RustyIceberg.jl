@@ -54,7 +54,7 @@ jobs:
           cargo build --release
 
       - name: Start Iceberg catalog and S3 storage with Docker Compose
-        run: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris polaris-setup init table-creation
+        run: docker compose -f ${{ github.workspace }}/docker/docker-compose.yml up -d minio setup_bucket polaris init table-creation
 
       - name: Wait for table-creation container to complete
         run: |
