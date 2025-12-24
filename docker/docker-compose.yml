@@ -86,37 +86,15 @@ services:
     working_dir: /app
     command: sh -c "pip install --no-cache-dir boto3 requests && python3 init-datasets.py"
 
-  polaris-setup:
-    image: alpine/curl:latest
-    container_name: polaris-setup
-    depends_on:
-      polaris:
-        condition: service_healthy
-      init:
-        condition: service_completed_successfully
-    networks:
-      iceberg_net:
-    environment:
-      - CLIENT_ID=root
-      - CLIENT_SECRET=s3cr3t
-    volumes:
-      - ./assets/polaris:/polaris
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - >-
-        echo 'Setting up Polaris catalog...' &&
-        chmod +x /polaris/setup-all.sh &&
-        /polaris/setup-all.sh POLARIS &&
-        echo 'Polaris setup complete!'
-
   table-creation:
     image: python:3.11-slim
     container_name: table-creation
     networks:
       iceberg_net:
     depends_on:
-      polaris-setup:
+      polaris:
+        condition: service_healthy
+      init:
         condition: service_completed_successfully
     volumes:
       - ./scripts/create-tables.py:/app/create-tables.py
