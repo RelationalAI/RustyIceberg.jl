@@ -171,6 +171,90 @@ def ensure_catalog_exists(token):
         return False
 
 
+def grant_catalog_permissions(token):
+    """Grant TABLE_READ_DATA and TABLE_WRITE_DATA privileges to catalog_admin role."""
+    print(f"\nGranting data access privileges to catalog_admin role...")
+
+    try:
+        # Grant TABLE_READ_DATA
+        read_grant = {
+            "grant": {
+                "type": "catalog",
+                "privilege": "TABLE_READ_DATA"
+            }
+        }
+
+        print("  Granting TABLE_READ_DATA...")
+        response = requests.put(
+            f'{POLARIS_API}/catalogs/{CATALOG_NAME}/catalog-roles/catalog_admin/grants',
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json',
+                'Polaris-Realm': 'POLARIS'
+            },
+            json=read_grant,
+            timeout=10
+        )
+
+        if response.status_code in [200, 201]:
+            print(f"  ✓ TABLE_READ_DATA privilege granted")
+        else:
+            print(f"  Warning: TABLE_READ_DATA grant returned status {response.status_code}")
+            print(f"  Response: {response.text}")
+
+        # Grant TABLE_WRITE_DATA
+        write_grant = {
+            "grant": {
+                "type": "catalog",
+                "privilege": "TABLE_WRITE_DATA"
+            }
+        }
+
+        print("  Granting TABLE_WRITE_DATA...")
+        response = requests.put(
+            f'{POLARIS_API}/catalogs/{CATALOG_NAME}/catalog-roles/catalog_admin/grants',
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json',
+                'Polaris-Realm': 'POLARIS'
+            },
+            json=write_grant,
+            timeout=10
+        )
+
+        if response.status_code in [200, 201]:
+            print(f"  ✓ TABLE_WRITE_DATA privilege granted")
+        else:
+            print(f"  Warning: TABLE_WRITE_DATA grant returned status {response.status_code}")
+            print(f"  Response: {response.text}")
+
+        # Verify grants were applied
+        print("\n  Verifying grants...")
+        response = requests.get(
+            f'{POLARIS_API}/catalogs/{CATALOG_NAME}/catalog-roles/catalog_admin/grants',
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Polaris-Realm': 'POLARIS'
+            },
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            grants = response.json().get('grants', [])
+            print("  Current grants for catalog_admin:")
+            for grant in grants:
+                print(f"    - {grant.get('type')}: {grant.get('privilege')}")
+        else:
+            print(f"  Could not verify grants (status {response.status_code})")
+
+        return True
+
+    except Exception as e:
+        print(f"ERROR: Failed to grant permissions: {e}")
+        traceback.print_exc()
+        return False
+
+
 def create_namespace(token, namespace, max_retries=5):
     """Create a namespace if it doesn't exist.
     namespace should be a string, which can contain dots (e.g., 'tpch.sf01').
@@ -350,6 +434,11 @@ def main():
     # Ensure catalog exists (this makes namespaces accessible via the REST API)
     if not ensure_catalog_exists(token):
         print("ERROR: Failed to ensure catalog exists")
+        sys.exit(1)
+
+    # Grant permissions to catalog_admin role
+    if not grant_catalog_permissions(token):
+        print("ERROR: Failed to grant catalog permissions")
         sys.exit(1)
 
     # Create namespaces
