@@ -888,9 +888,6 @@ end
                 RustyIceberg.free_batch(batch_ptr)
             end
         end
-
-    catch e
-        rethrow(e)
     finally
         # Clean up all resources in reverse order
         if stream != C_NULL
@@ -909,6 +906,93 @@ end
     end
 
     println("✅ Catalog table loading tests completed!")
+end
+
+@testset "Catalog Table Loading with Credentials" begin
+    println("Testing catalog table loading with vended credentials...")
+
+    catalog_uri = "http://localhost:8181/api/catalog"
+
+    catalog = C_NULL
+    table = C_NULL
+    scan = C_NULL
+    stream = C_NULL
+    batch = nothing
+
+    try
+        # Create catalog connection WITHOUT S3 credentials
+        # When using load_credentials=true, the catalog will provide vended credentials
+        props = Dict(
+            "credential" => "root:s3cr3t",
+            "scope" => "PRINCIPAL_ROLE:ALL",
+            "warehouse" => "warehouse",
+            # Note: We include s3.endpoint as we would get the domain name `minio` otherwise.
+            "s3.endpoint" => "http://localhost:9000",
+            "s3.region" => "us-east-1"
+        )
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog != C_NULL
+        println("✅ Catalog created successfully")
+
+        # Load the customer table with vended credentials
+        # The catalog will provide short-lived S3 credentials
+        println("Attempting to load customer table from tpch.sf01 with vended credentials...")
+        table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer"; load_credentials=true)
+        @test table != C_NULL
+        println("✅ Customer table loaded successfully with vended credentials")
+
+        # Create a scan on the loaded table
+        println("Creating scan on loaded customer table...")
+        scan = RustyIceberg.new_scan(table)
+        @test scan != C_NULL
+        println("✅ Scan created successfully on loaded table")
+
+        # Select specific columns
+        println("Selecting specific columns from customer table...")
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
+        println("✅ Column selection completed")
+
+        # Execute the scan
+        println("Executing scan on loaded customer table...")
+        stream = RustyIceberg.scan!(scan)
+        @test stream != C_NULL
+        println("✅ Scan executed successfully")
+
+        # Read the first batch to verify data
+        println("Reading first batch from loaded customer table...")
+        batch_ptr = RustyIceberg.next_batch(stream)
+
+        if batch_ptr != C_NULL
+            batch = unsafe_load(batch_ptr)
+            if batch.data != C_NULL && batch.length > 0
+                println("✅ Successfully read first batch with $(batch.length) bytes of Arrow IPC data")
+
+                # Verify we got actual data
+                @test batch.length > 0
+                println("✅ Batch contains valid Arrow data from catalog-loaded customer table with vended credentials")
+
+                # Clean up the batch
+                RustyIceberg.free_batch(batch_ptr)
+            end
+        end
+    finally
+        # Clean up all resources in reverse order
+        if stream != C_NULL
+            RustyIceberg.free_stream(stream)
+        end
+        if scan != C_NULL
+            RustyIceberg.free_scan!(scan)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+        end
+        if catalog != C_NULL
+            RustyIceberg.free_catalog(catalog)
+        end
+        println("✅ All resources cleaned up successfully")
+    end
+
+    println("✅ Catalog table loading with credentials tests completed!")
 end
 
 @testset "Catalog Incremental Scan" begin
@@ -1019,9 +1103,6 @@ end
         println("✅ Successfully read from catalog-loaded incremental scan")
         println("   - Inserts batches: $inserts_count, total rows: $total_inserts")
         println("   - Deletes batches: $deletes_count, total rows: $total_deletes")
-
-    catch e
-        rethrow(e)
     finally
         # Clean up all resources in reverse order
         if inserts_stream != C_NULL

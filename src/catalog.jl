@@ -309,7 +309,7 @@ function free_catalog(catalog::Catalog)
 end
 
 """
-    load_table(catalog::Catalog, namespace::Vector{String}, table_name::String)::Table
+    load_table(catalog::Catalog, namespace::Vector{String}, table_name::String; load_credentials::Bool=false)::Table
 
 Load a table from a catalog by namespace and name.
 
@@ -317,31 +317,48 @@ Load a table from a catalog by namespace and name.
 - `catalog::Catalog`: The catalog handle
 - `namespace::Vector{String}`: Namespace parts (e.g., ["warehouse", "orders"])
 - `table_name::String`: The table name
+- `load_credentials::Bool=false`: If true, fetches vended credentials from the catalog server
 
 # Returns
 - A `Table` handle for use in scan operations
 
 # Example
 ```julia
+# Load without credentials (default)
 table = load_table(catalog, ["warehouse", "orders"], "customers")
+
+# Load with vended credentials
+table = load_table(catalog, ["warehouse", "orders"], "customers"; load_credentials=true)
 ```
 """
-function load_table(catalog::Catalog, namespace::Vector{String}, table_name::String)
+function load_table(catalog::Catalog, namespace::Vector{String}, table_name::String; load_credentials::Bool=false)
     response = TableResponse()
 
     # Convert namespace to array of C strings
     namespace_ptrs = [pointer(part) for part in namespace]
     namespace_len = length(namespace)
+    namespace_ptrs_ptr = (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)
 
     async_ccall(response, namespace, namespace_ptrs) do handle
-        @ccall rust_lib.iceberg_catalog_load_table(
-            catalog.ptr::Ptr{Cvoid},
-            (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
-            namespace_len::Csize_t,
-            table_name::Cstring,
-            response::Ref{TableResponse},
-            handle::Ptr{Cvoid}
-        )::Cint
+        if load_credentials
+            @ccall rust_lib.iceberg_catalog_load_table_with_credentials(
+                catalog.ptr::Ptr{Cvoid},
+                namespace_ptrs_ptr::Ptr{Ptr{Cchar}},
+                namespace_len::Csize_t,
+                table_name::Cstring,
+                response::Ref{TableResponse},
+                handle::Ptr{Cvoid}
+            )::Cint
+        else
+            @ccall rust_lib.iceberg_catalog_load_table(
+                catalog.ptr::Ptr{Cvoid},
+                namespace_ptrs_ptr::Ptr{Ptr{Cchar}},
+                namespace_len::Csize_t,
+                table_name::Cstring,
+                response::Ref{TableResponse},
+                handle::Ptr{Cvoid}
+            )::Cint
+        end
     end
 
     @throw_on_error(response, "catalog_load_table", IcebergException)
