@@ -223,7 +223,10 @@ impl IcebergCatalog {
     ) -> Result<IcebergTable> {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
         let table_ident = TableIdent::new(namespace, table_name);
-        let table = self.as_ref().load_table_with_credentials(&table_ident).await?;
+        let table = self
+            .as_ref()
+            .load_table_with_credentials(&table_ident)
+            .await?;
 
         Ok(IcebergTable { table })
     }
