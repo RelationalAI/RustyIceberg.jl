@@ -215,6 +215,22 @@ impl IcebergCatalog {
         Ok(IcebergTable { table })
     }
 
+    /// Load a table by namespace and name with vended credentials
+    pub async fn load_table_with_credentials(
+        &self,
+        namespace_parts: Vec<String>,
+        table_name: String,
+    ) -> Result<IcebergTable> {
+        let namespace = NamespaceIdent::from_vec(namespace_parts)?;
+        let table_ident = TableIdent::new(namespace, table_name);
+        let table = self
+            .as_ref()
+            .load_table_with_credentials(&table_ident)
+            .await?;
+
+        Ok(IcebergTable { table })
+    }
+
     /// List tables in a namespace
     pub async fn list_tables(&self, namespace_parts: Vec<String>) -> Result<Vec<String>> {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
@@ -513,6 +529,32 @@ export_runtime_op!(
     async {
         let (catalog_ref, namespace_parts, table_name) = result_tuple;
         catalog_ref.load_table(namespace_parts, table_name).await
+    },
+    catalog: *mut IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize,
+    table_name: *const c_char
+);
+
+// Load a table from the catalog with vended credentials
+export_runtime_op!(
+    iceberg_catalog_load_table_with_credentials,
+    crate::IcebergTableResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        let table_name = parse_c_string(table_name, "table_name")?;
+        let catalog_ref = unsafe { &*catalog };
+
+        Ok((catalog_ref, namespace_parts, table_name))
+    },
+    result_tuple,
+    async {
+        let (catalog_ref, namespace_parts, table_name) = result_tuple;
+        catalog_ref.load_table_with_credentials(namespace_parts, table_name).await
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
