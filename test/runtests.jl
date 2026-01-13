@@ -560,6 +560,7 @@ end
         if catalog != C_NULL
             RustyIceberg.free_catalog!(catalog)
             println("✅ Catalog cleaned up successfully")
+            RustyIceberg.free_catalog!(catalog) # Double free to test safety
         end
     end
 
