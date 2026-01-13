@@ -500,7 +500,7 @@ end
     # This requires the catalog to be running via docker-compose
     catalog_uri = "http://localhost:8181/api/catalog"
 
-    catalog = C_NULL
+    catalog = nothing
     try
         # Test catalog creation with REST API and Polaris credentials
         props = Dict(
@@ -509,7 +509,7 @@ end
             "warehouse" => "warehouse"
         )
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
-        @test catalog != C_NULL
+        @test catalog !== nothing
         println("✅ Catalog created successfully at $catalog_uri with authentication")
 
         # Test listing namespaces
@@ -557,9 +557,10 @@ end
         println("✅ Non-existent table correctly returns false")
     finally
         # Clean up
-        if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
             println("✅ Catalog cleaned up successfully")
+            RustyIceberg.free_catalog!(catalog) # Double free to test safety
         end
     end
 
@@ -577,7 +578,7 @@ end
     token_endpoint = "http://localhost:8181/api/catalog/v1/oauth/tokens"
     catalog_uri = "http://localhost:8181/api/catalog"
 
-    catalog = C_NULL
+    catalog = nothing
     try
         # Step 1: Fetch access token using client credentials
         println("Fetching access token...")
@@ -621,7 +622,7 @@ end
             "warehouse" => "warehouse"
         )
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
-        @test catalog != C_NULL
+        @test catalog !== nothing
         println("✅ Catalog created successfully with token authentication")
 
         # Step 3: List namespaces to verify authentication works
@@ -650,8 +651,8 @@ end
         println("✅ All expected TPCH tables found: $expected_tables")
     finally
         # Clean up
-        if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
             println("✅ Catalog cleaned up successfully")
         end
     end
@@ -728,7 +729,7 @@ end
 
     auth_fn, fetch_counter, cached_token_ref = authenticator()
 
-    catalog = C_NULL
+    catalog = nothing
     try
         # Test catalog creation with custom authenticator function
         println("Creating catalog with custom authenticator function...")
@@ -736,7 +737,7 @@ end
             "warehouse" => "warehouse"
         )
         catalog = RustyIceberg.catalog_create_rest(FunctionWrapper{Union{String,Nothing},Tuple{}}(auth_fn), catalog_uri; properties=props)
-        @test catalog != C_NULL
+        @test catalog !== nothing
         println("✅ Catalog created successfully with custom authenticator function")
 
         # Test listing namespaces to verify authentication works
@@ -812,8 +813,8 @@ end
         println("✅ Token invalidation test passed")
     finally
         # Clean up
-        if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
             println("✅ Catalog cleaned up successfully")
         end
     end
@@ -826,7 +827,7 @@ end
 
     catalog_uri = "http://localhost:8181/api/catalog"
 
-    catalog = C_NULL
+    catalog = nothing
     table = C_NULL
     scan = C_NULL
     stream = C_NULL
@@ -845,7 +846,7 @@ end
             "s3.region" => "us-east-1"
         )
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
-        @test catalog != C_NULL
+        @test catalog !== nothing
         println("✅ Catalog created successfully")
 
         # Load the customer table from tpch.sf01 namespace
@@ -899,8 +900,8 @@ end
         if table != C_NULL
             RustyIceberg.free_table(table)
         end
-        if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
         end
         println("✅ All resources cleaned up successfully")
     end
@@ -913,7 +914,7 @@ end
 
     catalog_uri = "http://localhost:8181/api/catalog"
 
-    catalog = C_NULL
+    catalog = nothing
     table = C_NULL
     scan = C_NULL
     stream = C_NULL
@@ -931,7 +932,7 @@ end
             "s3.region" => "us-east-1"
         )
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
-        @test catalog != C_NULL
+        @test catalog !== nothing
         println("✅ Catalog created successfully")
 
         # Load the customer table with vended credentials
@@ -986,8 +987,8 @@ end
         if table != C_NULL
             RustyIceberg.free_table(table)
         end
-        if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
         end
         println("✅ All resources cleaned up successfully")
     end
@@ -1000,7 +1001,7 @@ end
 
     catalog_uri = "http://localhost:8181/api/catalog"
 
-    catalog = C_NULL
+    catalog = nothing
     table = C_NULL
     scan = C_NULL
     inserts_stream = C_NULL
@@ -1018,7 +1019,7 @@ end
             "s3.region" => "us-east-1"
         )
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
-        @test catalog != C_NULL
+        @test catalog !== nothing
         println("✅ Catalog created successfully")
 
         # Load the incremental test table from catalog
@@ -1117,8 +1118,8 @@ end
         if table != C_NULL
             RustyIceberg.free_table(table)
         end
-        if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
         end
         println("✅ All resources cleaned up successfully")
     end

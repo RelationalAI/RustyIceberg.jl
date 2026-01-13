@@ -300,12 +300,17 @@ function catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing
 end
 
 """
-    free_catalog(catalog::Catalog)
+    free_catalog!(catalog::Catalog)
 
 Free the memory associated with a catalog.
 """
-function free_catalog(catalog::Catalog)
+function free_catalog!(catalog::Catalog)
+    if catalog.ptr == C_NULL
+        return nothing
+    end
     @ccall rust_lib.iceberg_catalog_free(catalog.ptr::Ptr{Cvoid})::Cvoid
+    catalog.ptr = C_NULL
+    return nothing
 end
 
 """
