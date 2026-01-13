@@ -558,7 +558,7 @@ end
     finally
         # Clean up
         if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+            RustyIceberg.free_catalog!(catalog)
             println("✅ Catalog cleaned up successfully")
         end
     end
@@ -651,7 +651,7 @@ end
     finally
         # Clean up
         if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+            RustyIceberg.free_catalog!(catalog)
             println("✅ Catalog cleaned up successfully")
         end
     end
@@ -813,7 +813,7 @@ end
     finally
         # Clean up
         if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+            RustyIceberg.free_catalog!(catalog)
             println("✅ Catalog cleaned up successfully")
         end
     end
@@ -900,7 +900,7 @@ end
             RustyIceberg.free_table(table)
         end
         if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+            RustyIceberg.free_catalog!(catalog)
         end
         println("✅ All resources cleaned up successfully")
     end
@@ -987,7 +987,7 @@ end
             RustyIceberg.free_table(table)
         end
         if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+            RustyIceberg.free_catalog!(catalog)
         end
         println("✅ All resources cleaned up successfully")
     end
@@ -1118,7 +1118,7 @@ end
             RustyIceberg.free_table(table)
         end
         if catalog != C_NULL
-            RustyIceberg.free_catalog(catalog)
+            RustyIceberg.free_catalog!(catalog)
         end
         println("✅ All resources cleaned up successfully")
     end
