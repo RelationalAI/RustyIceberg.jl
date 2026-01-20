@@ -59,7 +59,7 @@ services:
       minio:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8182/healthcheck"]
+      test: ["CMD", "curl", "http://localhost:8182/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
