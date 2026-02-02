@@ -584,3 +584,91 @@ function _parse_nested_c_string_list(
 
     return result
 end
+
+"""
+    create_table(catalog::Catalog, namespace::Vector{String}, table_name::String, schema::Schema; partition_spec::Union{PartitionSpec, Nothing}=nothing, sort_order::Union{SortOrder, Nothing}=nothing, properties::Dict{String,String}=Dict{String,String}())::Table
+
+Create a new Iceberg table in the catalog.
+
+# Arguments
+- `catalog::Catalog`: The catalog handle
+- `namespace::Vector{String}`: Namespace parts (e.g., ["warehouse", "analytics"])
+- `table_name::String`: The name for the new table
+- `schema::Schema`: The table schema
+- `partition_spec::Union{PartitionSpec, Nothing}`: Optional partition specification
+- `sort_order::Union{SortOrder, Nothing}`: Optional sort order specification
+- `properties::Dict{String,String}`: Optional table properties
+
+# Returns
+- A `Table` handle for the newly created table
+
+# Example
+```julia
+schema = SchemaBuilder()
+    |> s -> add_field(s, "id", LONG; required=true)
+    |> s -> add_field(s, "name", STRING)
+    |> s -> add_field(s, "created_at", TIMESTAMP)
+    |> build
+
+partition_spec = PartitionSpec([
+    PartitionField(Int32(3), "created_day", "day")
+])
+
+table = create_table(
+    catalog,
+    ["warehouse"],
+    "events",
+    schema;
+    partition_spec=partition_spec
+)
+```
+"""
+function create_table(
+    catalog::Catalog,
+    namespace::Vector{String},
+    table_name::String,
+    schema::Schema;
+    partition_spec::Union{PartitionSpec, Nothing}=nothing,
+    sort_order::Union{SortOrder, Nothing}=nothing,
+    properties::Dict{String,String}=Dict{String,String}()
+)::Table
+    response = TableResponse()
+
+    # Serialize schema to JSON
+    schema_json = schema_to_json(schema)
+
+    # Serialize partition spec to JSON (empty string if none)
+    partition_spec_json = partition_spec === nothing ? "{}" : partition_spec_to_json(partition_spec)
+
+    # Serialize sort order to JSON (empty string if none)
+    sort_order_json = sort_order === nothing ? "{}" : sort_order_to_json(sort_order)
+
+    # Convert namespace to array of C strings
+    namespace_ptrs = [pointer(part) for part in namespace]
+    namespace_len = length(namespace)
+    namespace_ptrs_ptr = (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)
+
+    # Convert properties dict to array of PropertyEntry structs
+    property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
+    properties_len = length(property_entries)
+
+    async_ccall(response, namespace, namespace_ptrs, schema_json, partition_spec_json, sort_order_json, property_entries, properties) do handle
+        @ccall rust_lib.iceberg_catalog_create_table(
+            catalog.ptr::Ptr{Cvoid},
+            namespace_ptrs_ptr::Ptr{Ptr{Cchar}},
+            namespace_len::Csize_t,
+            table_name::Cstring,
+            schema_json::Cstring,
+            partition_spec_json::Cstring,
+            sort_order_json::Cstring,
+            (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
+            properties_len::Csize_t,
+            response::Ref{TableResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "create_table", IcebergException)
+
+    return response.table
+end

@@ -4,6 +4,7 @@ using Base: @kwdef, @lock
 using Base.Threads: Atomic
 using Arrow
 using FunctionWrappers: FunctionWrapper
+using JSON
 using iceberg_rust_ffi_jll
 
 export Table, Scan, IncrementalScan, ArrowBatch, StaticConfig, ArrowStream
@@ -16,7 +17,10 @@ export with_file_column!, with_pos_column!
 export scan!, next_batch, free_batch, free_stream
 export FILE_COLUMN, POS_COLUMN
 export Catalog, catalog_create_rest, free_catalog
-export load_table, list_tables, list_namespaces, table_exists
+export load_table, list_tables, list_namespaces, table_exists, create_table
+export Field, Schema, PartitionField, PartitionSpec, SortField, SortOrder
+export SchemaBuilder, add_field, with_identifier, build
+export schema_to_json, partition_spec_to_json, sort_order_to_json
 
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:
@@ -301,6 +305,9 @@ end
 include("scan_common.jl")
 include("full.jl")
 include("incremental.jl")
+
+# Include schema and write support
+include("schema.jl")
 
 # Include catalog module
 include("catalog.jl")
