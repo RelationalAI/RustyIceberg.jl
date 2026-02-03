@@ -139,39 +139,6 @@ impl RawResponse for IcebergBatchResponse {
     }
 }
 
-/// Response type for string properties - needs custom implementation
-#[repr(C)]
-pub struct IcebergStringPropertyResponse {
-    pub result: CResult,
-    pub value: *mut c_char,
-    pub error_message: *mut c_char,
-    pub context: *const Context,
-}
-
-unsafe impl Send for IcebergStringPropertyResponse {}
-
-impl RawResponse for IcebergStringPropertyResponse {
-    type Payload = String;
-    fn result_mut(&mut self) -> &mut CResult {
-        &mut self.result
-    }
-    fn context_mut(&mut self) -> &mut *const Context {
-        &mut self.context
-    }
-    fn error_message_mut(&mut self) -> &mut *mut c_char {
-        &mut self.error_message
-    }
-    fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        match payload {
-            Some(s) => {
-                let c_str = std::ffi::CString::new(s).expect("String contained null byte");
-                self.value = c_str.into_raw();
-            }
-            None => self.value = ptr::null_mut(),
-        }
-    }
-}
-
 /// Synchronous operations for table and batch management
 
 /// Free a table
