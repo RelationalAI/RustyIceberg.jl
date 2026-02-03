@@ -78,25 +78,9 @@ Catalog(ptr::Ptr{Cvoid}) = Catalog(ptr, nothing)
 # Support conversion to Ptr for FFI calls
 Base.unsafe_convert(::Type{Ptr{Cvoid}}, catalog::Catalog) = catalog.ptr
 
-"""
-    CatalogResponse
-
-Response structure for catalog creation operations.
-
-# Fields
-- `result::Cint`: Result code from the operation (0 for success)
-- `catalog::Ptr{Cvoid}`: The created catalog handle (raw pointer)
-- `error_message::Ptr{Cchar}`: Error message string if operation failed
-- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
-"""
-mutable struct CatalogResponse
-    result::Cint
-    catalog::Ptr{Cvoid}
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    CatalogResponse() = new(-1, C_NULL, C_NULL, C_NULL)
-end
+# Type aliases using the generic Response{T} from RustyIceberg
+const CatalogResponse = Response{Ptr{Cvoid}}
+const BoolResponse = Response{Bool}
 
 """
     StringListResponse
@@ -118,26 +102,6 @@ mutable struct StringListResponse
     context::Ptr{Cvoid}
 
     StringListResponse() = new(-1, C_NULL, 0, C_NULL, C_NULL)
-end
-
-"""
-    BoolResponse
-
-Response structure for boolean operations (e.g., table_exists).
-
-# Fields
-- `result::Cint`: Result code from the operation (0 for success)
-- `value::Bool`: The boolean result
-- `error_message::Ptr{Cchar}`: Error message string if operation failed
-- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
-"""
-mutable struct BoolResponse
-    result::Cint
-    value::Bool
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    BoolResponse() = new(-1, false, C_NULL, C_NULL)
 end
 
 """
@@ -209,7 +173,7 @@ function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{S
 
     @throw_on_error(response, "catalog_create_rest", IcebergException)
 
-    return Catalog(response.catalog, nothing)
+    return Catalog(response.value, nothing)
 end
 
 """
@@ -295,7 +259,7 @@ function catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing
     @throw_on_error(response, "catalog_create_rest", IcebergException)
 
     # Create a Catalog struct that holds the catalog pointer and keeps authenticator alive
-    catalog = Catalog(response.catalog, authenticator_ref)
+    catalog = Catalog(response.value, authenticator_ref)
     return catalog
 end
 
@@ -368,7 +332,7 @@ function load_table(catalog::Catalog, namespace::Vector{String}, table_name::Str
 
     @throw_on_error(response, "catalog_load_table", IcebergException)
 
-    return response.table
+    return response.value
 end
 
 """
@@ -466,6 +430,63 @@ function list_namespaces(catalog::Catalog, parent::Vector{String}=String[])
 
     # Parse nested C string array using helper function
     return _parse_nested_c_string_list(response.outer_items, response.outer_count, response.inner_counts)
+end
+
+"""
+    create_namespace(
+        catalog::Catalog,
+        namespace::Vector{String};
+        properties::Dict{String,String}=Dict{String,String}()
+    )::Nothing
+
+Create a new namespace in the catalog.
+
+# Arguments
+- `catalog::Catalog`: The catalog handle
+- `namespace::Vector{String}`: Namespace parts (e.g., ["warehouse", "orders"])
+- `properties::Dict{String,String}`: Namespace properties (optional)
+
+# Returns
+- `nothing` on success
+
+# Throws
+- `IcebergException` if the namespace already exists or creation fails
+
+# Example
+```julia
+create_namespace(catalog, ["warehouse", "new_ns"])
+create_namespace(catalog, ["warehouse", "new_ns"]; properties=Dict("owner" => "data_team"))
+```
+"""
+function create_namespace(
+    catalog::Catalog,
+    namespace::Vector{String};
+    properties::Dict{String,String}=Dict{String,String}()
+)
+    response = BoolResponse()
+
+    # Convert namespace to array of C strings
+    namespace_ptrs = [pointer(part) for part in namespace]
+    namespace_len = length(namespace)
+
+    # Convert properties dict to array of PropertyEntry structs
+    property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
+    properties_len = length(property_entries)
+
+    async_ccall(response, namespace, namespace_ptrs, property_entries, properties) do handle
+        @ccall rust_lib.iceberg_catalog_create_namespace(
+            catalog.ptr::Ptr{Cvoid},
+            (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
+            namespace_len::Csize_t,
+            (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
+            properties_len::Csize_t,
+            response::Ref{BoolResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "create_namespace", IcebergException)
+    return nothing
 end
 
 """
@@ -583,4 +604,184 @@ function _parse_nested_c_string_list(
     end
 
     return result
+end
+
+"""
+    create_table(
+        catalog::Catalog,
+        namespace::Vector{String},
+        table_name::String,
+        schema::Schema;
+        partition_spec::Union{PartitionSpec, Nothing}=nothing,
+        sort_order::Union{SortOrder, Nothing}=nothing,
+        properties::Dict{String,String}=Dict{String,String}()
+    )::Table
+
+Create a new Iceberg table in the catalog.
+
+# Arguments
+- `catalog::Catalog`: The catalog handle
+- `namespace::Vector{String}`: Namespace parts (e.g., ["warehouse", "analytics"])
+- `table_name::String`: The name for the new table
+- `schema::Schema`: The table schema
+- `partition_spec::Union{PartitionSpec, Nothing}`: Optional partition specification
+- `sort_order::Union{SortOrder, Nothing}`: Optional sort order specification
+- `properties::Dict{String,String}`: Optional table properties
+
+# Returns
+- A `Table` handle for the newly created table
+
+# Example
+```julia
+schema = SchemaBuilder()
+    |> s -> add_field(s, "id", LONG; required=true)
+    |> s -> add_field(s, "name", STRING)
+    |> s -> add_field(s, "created_at", TIMESTAMP)
+    |> build
+
+partition_spec = PartitionSpec([
+    PartitionField(Int32(3), "created_day", "day")
+])
+
+table = create_table(
+    catalog,
+    ["warehouse"],
+    "events",
+    schema;
+    partition_spec=partition_spec
+)
+```
+"""
+function create_table(
+    catalog::Catalog,
+    namespace::Vector{String},
+    table_name::String,
+    schema::Schema;
+    partition_spec::Union{PartitionSpec, Nothing}=nothing,
+    sort_order::Union{SortOrder, Nothing}=nothing,
+    properties::Dict{String,String}=Dict{String,String}()
+)
+    response = TableResponse()
+
+    # Serialize schema to JSON
+    schema_json = schema_to_json(schema)
+
+    # Serialize partition spec to JSON (empty string if none)
+    partition_spec_json = partition_spec === nothing ? "{}" : partition_spec_to_json(partition_spec)
+
+    # Serialize sort order to JSON (empty string if none)
+    sort_order_json = sort_order === nothing ? "{}" : sort_order_to_json(sort_order)
+
+    # Convert namespace to array of C strings
+    namespace_ptrs = [pointer(part) for part in namespace]
+    namespace_len = length(namespace)
+    namespace_ptrs_ptr = (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)
+
+    # Convert properties dict to array of PropertyEntry structs
+    property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
+    properties_len = length(property_entries)
+
+    async_ccall(response, namespace, namespace_ptrs, schema_json, partition_spec_json, sort_order_json, property_entries, properties) do handle
+        @ccall rust_lib.iceberg_catalog_create_table(
+            catalog.ptr::Ptr{Cvoid},
+            namespace_ptrs_ptr::Ptr{Ptr{Cchar}},
+            namespace_len::Csize_t,
+            table_name::Cstring,
+            schema_json::Cstring,
+            partition_spec_json::Cstring,
+            sort_order_json::Cstring,
+            (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
+            properties_len::Csize_t,
+            response::Ref{TableResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "create_table", IcebergException)
+
+    return response.value
+end
+
+"""
+    drop_table(catalog::Catalog, namespace::Vector{String}, table_name::String)::Nothing
+
+Drop a table from the catalog.
+
+# Arguments
+- `catalog::Catalog`: The catalog handle
+- `namespace::Vector{String}`: Namespace parts (e.g., ["warehouse", "orders"])
+- `table_name::String`: The table name
+
+# Returns
+- `nothing` on success
+
+# Throws
+- `IcebergException` if the table doesn't exist or deletion fails
+
+# Example
+```julia
+drop_table(catalog, ["warehouse"], "events")
+```
+"""
+function drop_table(catalog::Catalog, namespace::Vector{String}, table_name::String)
+    response = BoolResponse()
+
+    # Convert namespace to array of C strings
+    namespace_ptrs = [pointer(part) for part in namespace]
+    namespace_len = length(namespace)
+
+    async_ccall(response, namespace, namespace_ptrs) do handle
+        @ccall rust_lib.iceberg_catalog_drop_table(
+            catalog.ptr::Ptr{Cvoid},
+            (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
+            namespace_len::Csize_t,
+            table_name::Cstring,
+            response::Ref{BoolResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "drop_table", IcebergException)
+    return nothing
+end
+
+"""
+    drop_namespace(catalog::Catalog, namespace::Vector{String})::Nothing
+
+Drop a namespace from the catalog.
+
+# Arguments
+- `catalog::Catalog`: The catalog handle
+- `namespace::Vector{String}`: Namespace parts (e.g., ["warehouse", "orders"])
+
+# Returns
+- `nothing` on success
+
+# Throws
+- `IcebergException` if the namespace doesn't exist or deletion fails
+
+# Example
+```julia
+drop_namespace(catalog, ["warehouse"])
+```
+"""
+function drop_namespace(catalog::Catalog, namespace::Vector{String})
+    response = BoolResponse()
+
+    # Convert namespace to array of C strings
+    namespace_ptrs = [pointer(part) for part in namespace]
+    namespace_len = length(namespace)
+
+    async_ccall(response, namespace, namespace_ptrs) do handle
+        @ccall rust_lib.iceberg_catalog_drop_namespace(
+            catalog.ptr::Ptr{Cvoid},
+            (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
+            namespace_len::Csize_t,
+            response::Ref{BoolResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "drop_namespace", IcebergException)
+    return nothing
 end

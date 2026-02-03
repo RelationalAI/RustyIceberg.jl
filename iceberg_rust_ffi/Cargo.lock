@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "iceberg_rust_ffi"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -1610,6 +1610,7 @@ dependencies = [
  "libc",
  "object_store_ffi",
  "once_cell",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

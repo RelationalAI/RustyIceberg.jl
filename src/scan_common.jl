@@ -46,25 +46,9 @@ stream = scan!(scan)
 """
 const POS_COLUMN = "_pos"
 
-"""
-    BatchResponse
-
-Response structure for asynchronous batch operations.
-
-# Fields
-- `result::Cint`: Result code from the operation (0 for success)
-- `batch::Ptr{ArrowBatch}`: Pointer to the Arrow batch data
-- `error_message::Ptr{Cchar}`: Error message string if operation failed
-- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
-"""
-mutable struct BatchResponse
-    result::Cint
-    batch::Ptr{ArrowBatch}
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    BatchResponse() = new(-1, C_NULL, C_NULL, C_NULL)
-end
+# Type alias using generic Response{T}
+const BatchResponse = Response{Ptr{ArrowBatch}}
+Response{Ptr{ArrowBatch}}() = Response{Ptr{ArrowBatch}}(-1, C_NULL, C_NULL, C_NULL)
 
 """
     next_batch(stream::ArrowStream)::Ptr{ArrowBatch}
@@ -86,7 +70,7 @@ function next_batch(stream::ArrowStream)
     @throw_on_error(response, "iceberg_next_batch", IcebergException)
 
     # Return the batch pointer directly
-    return response.batch
+    return response.value
 end
 
 """

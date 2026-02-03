@@ -1,6 +1,6 @@
 [package]
 name = "iceberg_rust_ffi"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 
 [lib]
@@ -28,6 +28,7 @@ async-trait = "0.1"
 # Pin home to 0.5.9 to support rustc < 1.88
 # (0.5.11+ requires rustc 1.88+)
 home = "=0.5.9"
+serde_json = "1.0.142"
 
 [dev-dependencies]
 tempfile = "3.0"

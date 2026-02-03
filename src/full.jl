@@ -222,25 +222,9 @@ function build!(scan::Scan)
     return nothing
 end
 
-"""
-    ArrowStreamResponse
-
-Response structure for asynchronous Arrow stream initialization operations.
-
-# Fields
-- `result::Cint`: Result code from the operation (0 for success)
-- `stream::ArrowStream`: The initialized Arrow stream
-- `error_message::Ptr{Cchar}`: Error message string if operation failed
-- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
-"""
-mutable struct ArrowStreamResponse
-    result::Cint
-    stream::ArrowStream
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    ArrowStreamResponse() = new(-1, C_NULL, C_NULL, C_NULL)
-end
+# Type alias using generic Response{T}
+# Note: ArrowStream = Ptr{Cvoid}, so Response{ArrowStream} uses the Response{Ptr{Cvoid}} constructor
+const ArrowStreamResponse = Response{ArrowStream}
 
 """
     arrow_stream(scan::Scan)::ArrowStream
@@ -260,7 +244,7 @@ function arrow_stream(scan::Scan)
 
     @throw_on_error(response, "iceberg_arrow_stream", IcebergException)
 
-    return response.stream
+    return response.value
 end
 
 """
