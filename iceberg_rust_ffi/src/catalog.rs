@@ -271,6 +271,83 @@ impl IcebergCatalog {
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
+
+    /// Create a new table in the catalog
+    pub async fn create_table(
+        &self,
+        namespace_parts: Vec<String>,
+        table_name: String,
+        schema: iceberg::spec::Schema,
+        partition_spec: Option<iceberg::spec::PartitionSpec>,
+        sort_order: Option<iceberg::spec::SortOrder>,
+        properties: HashMap<String, String>,
+    ) -> Result<IcebergTable> {
+        // Convert namespace parts to NamespaceIdent
+        let namespace_ident = iceberg::NamespaceIdent::from_vec(namespace_parts)?;
+
+        // Convert PartitionSpec to UnboundPartitionSpec if present
+        let unbound_partition_spec = partition_spec.map(|ps| ps.into());
+
+        // Build the table creation request
+        let table_creation = iceberg::TableCreation::builder()
+            .name(table_name)
+            .schema(schema)
+            .partition_spec_opt(unbound_partition_spec)
+            .sort_order_opt(sort_order)
+            .properties(properties)
+            .build();
+
+        // Call the catalog to create the table
+        let table = self
+            .as_ref()
+            .create_table(&namespace_ident, table_creation)
+            .await?;
+
+        Ok(IcebergTable { table })
+    }
+
+    /// Create a new namespace in the catalog
+    pub async fn create_namespace(
+        &self,
+        namespace_parts: Vec<String>,
+        properties: HashMap<String, String>,
+    ) -> Result<()> {
+        // Convert namespace parts to NamespaceIdent
+        let namespace_ident = iceberg::NamespaceIdent::from_vec(namespace_parts)?;
+
+        // Create namespace with properties
+        let _namespace = self
+            .as_ref()
+            .create_namespace(&namespace_ident, properties)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Drop a table from the catalog
+    pub async fn drop_table(&self, namespace_parts: Vec<String>, table_name: String) -> Result<()> {
+        // Convert namespace parts and table name to TableIdent
+        let table_ident = iceberg::TableIdent::new(
+            iceberg::NamespaceIdent::from_vec(namespace_parts)?,
+            table_name,
+        );
+
+        // Drop the table
+        self.as_ref().drop_table(&table_ident).await?;
+
+        Ok(())
+    }
+
+    /// Drop a namespace from the catalog
+    pub async fn drop_namespace(&self, namespace_parts: Vec<String>) -> Result<()> {
+        // Convert namespace parts to NamespaceIdent
+        let namespace_ident = iceberg::NamespaceIdent::from_vec(namespace_parts)?;
+
+        // Drop the namespace
+        self.as_ref().drop_namespace(&namespace_ident).await?;
+
+        Ok(())
+    }
 }
 
 /// Response type for catalog operations that return a catalog
@@ -664,3 +741,152 @@ pub extern "C" fn iceberg_catalog_set_token_authenticator(
         }
     }
 }
+
+// Create a new table in the catalog
+export_runtime_op!(
+    iceberg_catalog_create_table,
+    crate::IcebergTableResponse,
+    || {
+        // Input validation
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        // Parse arguments
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        let table_name = parse_c_string(table_name, "table_name")?;
+        let schema_json = parse_c_string(schema_json, "schema_json")?;
+        let partition_spec_json = parse_c_string(partition_spec_json, "partition_spec_json")?;
+        let sort_order_json = parse_c_string(sort_order_json, "sort_order_json")?;
+        let props = parse_properties(properties, properties_len)?;
+
+        // Get catalog reference
+        let catalog_ref = unsafe { &*catalog };
+
+        // Deserialize JSON to Iceberg types
+        let schema: iceberg::spec::Schema = serde_json::from_str(&schema_json)
+            .map_err(|e| anyhow::anyhow!("Failed to parse schema JSON: {}", e))?;
+
+        let partition_spec = if !partition_spec_json.is_empty() && partition_spec_json != "{}" {
+            Some(serde_json::from_str(&partition_spec_json)
+                .map_err(|e| anyhow::anyhow!("Failed to parse partition spec JSON: {}", e))?)
+        } else {
+            None
+        };
+
+        let sort_order = if !sort_order_json.is_empty() && sort_order_json != "{}" {
+            Some(serde_json::from_str(&sort_order_json)
+                .map_err(|e| anyhow::anyhow!("Failed to parse sort order JSON: {}", e))?)
+        } else {
+            None
+        };
+
+        Ok((catalog_ref, namespace_parts, table_name, schema, partition_spec, sort_order, props))
+    },
+    result_tuple,
+    async {
+        let (catalog_ref, namespace_parts, table_name, schema, partition_spec, sort_order, props) = result_tuple;
+        catalog_ref.create_table(namespace_parts, table_name, schema, partition_spec, sort_order, props).await
+    },
+    catalog: *mut IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize,
+    table_name: *const c_char,
+    schema_json: *const c_char,
+    partition_spec_json: *const c_char,
+    sort_order_json: *const c_char,
+    properties: *const PropertyEntry,
+    properties_len: usize
+);
+
+// Create a new namespace in the catalog
+export_runtime_op!(
+    iceberg_catalog_create_namespace,
+    crate::IcebergBoolResponse,
+    || {
+        // Input validation
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        // Parse arguments
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        let props = parse_properties(properties, properties_len)?;
+
+        // Get catalog reference
+        let catalog_ref = unsafe { &*catalog };
+
+        Ok((catalog_ref, namespace_parts, props))
+    },
+    result_tuple,
+    async {
+        let (catalog_ref, namespace_parts, props) = result_tuple;
+        catalog_ref.create_namespace(namespace_parts, props).await?;
+        Ok::<bool, anyhow::Error>(true) // Return true to indicate success
+    },
+    catalog: *mut IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize,
+    properties: *const PropertyEntry,
+    properties_len: usize
+);
+
+// Drop a table from the catalog
+export_runtime_op!(
+    iceberg_catalog_drop_table,
+    crate::IcebergBoolResponse,
+    || {
+        // Input validation
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        // Parse arguments
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+        let table_name = parse_c_string(table_name, "table_name")?;
+
+        // Get catalog reference
+        let catalog_ref = unsafe { &*catalog };
+
+        Ok((catalog_ref, namespace_parts, table_name))
+    },
+    result_tuple,
+    async {
+        let (catalog_ref, namespace_parts, table_name) = result_tuple;
+        catalog_ref.drop_table(namespace_parts, table_name).await?;
+        Ok::<bool, anyhow::Error>(true) // Return true to indicate success
+    },
+    catalog: *mut IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize,
+    table_name: *const c_char
+);
+
+// Drop a namespace from the catalog
+export_runtime_op!(
+    iceberg_catalog_drop_namespace,
+    crate::IcebergBoolResponse,
+    || {
+        // Input validation
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+
+        // Parse arguments
+        let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
+
+        // Get catalog reference
+        let catalog_ref = unsafe { &*catalog };
+
+        Ok((catalog_ref, namespace_parts))
+    },
+    result_tuple,
+    async {
+        let (catalog_ref, namespace_parts) = result_tuple;
+        catalog_ref.drop_namespace(namespace_parts).await?;
+        Ok::<bool, anyhow::Error>(true) // Return true to indicate success
+    },
+    catalog: *mut IcebergCatalog,
+    namespace_parts_ptr: *const *const c_char,
+    namespace_parts_len: usize
+);

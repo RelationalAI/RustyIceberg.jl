@@ -469,6 +469,55 @@ function list_namespaces(catalog::Catalog, parent::Vector{String}=String[])
 end
 
 """
+    create_namespace(catalog::Catalog, namespace::Vector{String}; properties::Dict{String,String}=Dict{String,String}())::Nothing
+
+Create a new namespace in the catalog.
+
+# Arguments
+- `catalog::Catalog`: The catalog handle
+- `namespace::Vector{String}`: Namespace parts (e.g., ["warehouse", "orders"])
+- `properties::Dict{String,String}`: Namespace properties (optional)
+
+# Returns
+- `nothing` on success
+
+# Throws
+- `IcebergException` if the namespace already exists or creation fails
+
+# Example
+```julia
+create_namespace(catalog, ["warehouse", "new_ns"])
+create_namespace(catalog, ["warehouse", "new_ns"]; properties=Dict("owner" => "data_team"))
+```
+"""
+function create_namespace(catalog::Catalog, namespace::Vector{String}; properties::Dict{String,String}=Dict{String,String}())
+    response = BoolResponse()
+
+    # Convert namespace to array of C strings
+    namespace_ptrs = [pointer(part) for part in namespace]
+    namespace_len = length(namespace)
+
+    # Convert properties dict to array of PropertyEntry structs
+    property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
+    properties_len = length(property_entries)
+
+    async_ccall(response, namespace, namespace_ptrs, property_entries, properties) do handle
+        @ccall rust_lib.iceberg_catalog_create_namespace(
+            catalog.ptr::Ptr{Cvoid},
+            (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
+            namespace_len::Csize_t,
+            (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
+            properties_len::Csize_t,
+            response::Ref{BoolResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "create_namespace", IcebergException)
+    return nothing
+end
+
+"""
     table_exists(catalog::Catalog, namespace::Vector{String}, table_name::String)::Bool
 
 Check if a table exists in a catalog.
@@ -671,4 +720,88 @@ function create_table(
     @throw_on_error(response, "create_table", IcebergException)
 
     return response.table
+end
+
+"""
+    drop_table(catalog::Catalog, namespace::Vector{String}, table_name::String)::Nothing
+
+Drop a table from the catalog.
+
+# Arguments
+- `catalog::Catalog`: The catalog handle
+- `namespace::Vector{String}`: Namespace parts (e.g., ["warehouse", "orders"])
+- `table_name::String`: The table name
+
+# Returns
+- `nothing` on success
+
+# Throws
+- `IcebergException` if the table doesn't exist or deletion fails
+
+# Example
+```julia
+drop_table(catalog, ["warehouse"], "events")
+```
+"""
+function drop_table(catalog::Catalog, namespace::Vector{String}, table_name::String)
+    response = BoolResponse()
+
+    # Convert namespace to array of C strings
+    namespace_ptrs = [pointer(part) for part in namespace]
+    namespace_len = length(namespace)
+
+    async_ccall(response, namespace, namespace_ptrs) do handle
+        @ccall rust_lib.iceberg_catalog_drop_table(
+            catalog.ptr::Ptr{Cvoid},
+            (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
+            namespace_len::Csize_t,
+            table_name::Cstring,
+            response::Ref{BoolResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "drop_table", IcebergException)
+    return nothing
+end
+
+"""
+    drop_namespace(catalog::Catalog, namespace::Vector{String})::Nothing
+
+Drop a namespace from the catalog.
+
+# Arguments
+- `catalog::Catalog`: The catalog handle
+- `namespace::Vector{String}`: Namespace parts (e.g., ["warehouse", "orders"])
+
+# Returns
+- `nothing` on success
+
+# Throws
+- `IcebergException` if the namespace doesn't exist or deletion fails
+
+# Example
+```julia
+drop_namespace(catalog, ["warehouse"])
+```
+"""
+function drop_namespace(catalog::Catalog, namespace::Vector{String})
+    response = BoolResponse()
+
+    # Convert namespace to array of C strings
+    namespace_ptrs = [pointer(part) for part in namespace]
+    namespace_len = length(namespace)
+
+    async_ccall(response, namespace, namespace_ptrs) do handle
+        @ccall rust_lib.iceberg_catalog_drop_namespace(
+            catalog.ptr::Ptr{Cvoid},
+            (namespace_len > 0 ? pointer(namespace_ptrs) : C_NULL)::Ptr{Ptr{Cchar}},
+            namespace_len::Csize_t,
+            response::Ref{BoolResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "drop_namespace", IcebergException)
+    return nothing
 end

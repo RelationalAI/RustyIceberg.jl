@@ -17,7 +17,7 @@ export with_file_column!, with_pos_column!
 export scan!, next_batch, free_batch, free_stream
 export FILE_COLUMN, POS_COLUMN
 export Catalog, catalog_create_rest, free_catalog
-export load_table, list_tables, list_namespaces, table_exists, create_table
+export load_table, list_tables, list_namespaces, table_exists, create_table, drop_table, drop_namespace, create_namespace
 export Field, Schema, PartitionField, PartitionSpec, SortField, SortOrder
 export SchemaBuilder, add_field, with_identifier, build
 export schema_to_json, partition_spec_to_json, sort_order_to_json

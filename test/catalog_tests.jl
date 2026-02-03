@@ -5,6 +5,7 @@ using Arrow
 using HTTP
 using JSON
 using Base64
+using RustyIceberg: Field, Schema, PartitionSpec, SortOrder, PartitionField
 
 @testset "Catalog API" begin
     println("Testing catalog API...")
@@ -634,4 +635,187 @@ end
     end
 
     println("✅ Catalog incremental scan tests completed!")
+end
+
+@testset "Catalog Table Creation" begin
+    println("Testing catalog table creation...")
+
+    catalog_uri = "http://localhost:8181/api/catalog"
+
+    catalog = nothing
+
+    try
+        # Create catalog connection
+        props = Dict(
+            "credential" => "root:s3cr3t",
+            "scope" => "PRINCIPAL_ROLE:ALL",
+            "warehouse" => "warehouse",
+            "s3.endpoint" => "http://localhost:9000",
+            "s3.access-key-id" => "root",
+            "s3.secret-access-key" => "password",
+            "s3.region" => "us-east-1"
+        )
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+        println("✅ Catalog created successfully")
+
+        # Define a test namespace for table creation
+        test_namespace = ["test_create_table_$(round(Int, time() * 1000))"]
+
+        # Create a new namespace for testing
+        try
+            RustyIceberg.create_namespace(catalog, test_namespace)
+            println("✅ Test namespace created: $test_namespace")
+        catch e
+            # If namespace already exists, that's acceptable for retry scenarios
+            # But we should fail for other errors
+            if !contains(string(e), "already exists")
+                rethrow()
+            end
+            println("ℹ️  Test namespace already exists: $test_namespace")
+        end
+
+        # Create a simple schema for the test table
+        schema = Schema([
+            Field(Int32(1), "id", "long"; required=true),
+            Field(Int32(2), "name", "string"; required=false),
+            Field(Int32(3), "age", "int"; required=false),
+            Field(Int32(4), "salary", "double"; required=false),
+        ])
+        println("✅ Schema created with 4 fields")
+
+        # Test 1: Create table without partition spec or sort order
+        println("\nTest 1: Creating table without optional parameters...")
+        table_name_1 = "simple_table_$(round(Int, time() * 1000))"
+
+        table_1 = RustyIceberg.create_table(
+            catalog,
+            test_namespace,
+            table_name_1,
+            schema
+        )
+        @test table_1 !== nothing
+        @test table_1 isa RustyIceberg.Table
+        println("✅ Simple table created: $table_name_1")
+
+        # Verify table exists
+        exists = RustyIceberg.table_exists(catalog, test_namespace, table_name_1)
+        @test exists == true
+        println("✅ Table existence verified: $table_name_1")
+
+        # Clean up first table
+        RustyIceberg.free_table(table_1)
+
+        # Test 2: Create table with custom properties
+        println("\nTest 2: Creating table with custom properties...")
+        table_name_2 = "table_with_props_$(round(Int, time() * 1000))"
+        custom_properties = Dict(
+            "description" => "Test table with properties",
+            "owner" => "test_user",
+            "custom_prop" => "custom_value"
+        )
+
+        table_2 = RustyIceberg.create_table(
+            catalog,
+            test_namespace,
+            table_name_2,
+            schema;
+            properties=custom_properties
+        )
+        @test table_2 !== nothing
+        @test table_2 isa RustyIceberg.Table
+        println("✅ Table with properties created: $table_name_2")
+
+        # Verify table exists
+        exists = RustyIceberg.table_exists(catalog, test_namespace, table_name_2)
+        @test exists == true
+        println("✅ Table existence verified: $table_name_2")
+
+        # Clean up second table
+        RustyIceberg.free_table(table_2)
+
+        # Test 3: Create table with partition spec
+        println("\nTest 3: Creating table with partition spec...")
+        table_name_3 = "partitioned_table_$(round(Int, time() * 1000))"
+
+        partition_spec = PartitionSpec([
+            PartitionField(Int32(1), "id", "identity")
+        ])
+        println("✅ Partition spec created")
+
+        table_3 = RustyIceberg.create_table(
+            catalog,
+            test_namespace,
+            table_name_3,
+            schema;
+            partition_spec=partition_spec
+        )
+        @test table_3 !== nothing
+        @test table_3 isa RustyIceberg.Table
+        println("✅ Partitioned table created: $table_name_3")
+
+        # Verify table exists
+        exists = RustyIceberg.table_exists(catalog, test_namespace, table_name_3)
+        @test exists == true
+        println("✅ Table existence verified: $table_name_3")
+
+        # Clean up third table
+        RustyIceberg.free_table(table_3)
+
+        # Test 4: List tables in test namespace to verify all created tables
+        println("\nTest 4: Verifying all created tables in namespace...")
+        tables = RustyIceberg.list_tables(catalog, test_namespace)
+        println("✅ Tables in test_namespace: $tables")
+
+        # All three tables should be in the list
+        @test table_name_1 in tables
+        @test table_name_2 in tables
+        @test table_name_3 in tables
+        println("✅ All created tables found in namespace listing")
+
+        # Test 5: Drop operations
+        println("\nTest 5: Testing drop operations...")
+
+        # Drop the first table successfully
+        RustyIceberg.drop_table(catalog, test_namespace, table_name_1)
+        @test !RustyIceberg.table_exists(catalog, test_namespace, table_name_1)
+        println("✅ Successfully dropped table: $table_name_1")
+
+        # Verify that dropping a non-existent table throws an error
+        try
+            RustyIceberg.drop_table(catalog, test_namespace, table_name_1)
+            error("Expected IcebergException for non-existent table")
+        catch e
+            @test e isa RustyIceberg.IcebergException
+            println("✅ Correctly threw exception for non-existent table: $table_name_1")
+        end
+
+        # Drop the second and third tables
+        RustyIceberg.drop_table(catalog, test_namespace, table_name_2)
+        println("✅ Successfully dropped table: $table_name_2")
+        RustyIceberg.drop_table(catalog, test_namespace, table_name_3)
+        println("✅ Successfully dropped table: $table_name_3")
+
+        # Drop the namespace successfully
+        RustyIceberg.drop_namespace(catalog, test_namespace)
+        println("✅ Successfully dropped namespace: $test_namespace")
+
+        # Verify that dropping a non-existent namespace throws an error
+        try
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+            error("Expected IcebergException for non-existent namespace")
+        catch e
+            @test e isa RustyIceberg.IcebergException
+            println("✅ Correctly threw exception for non-existent namespace: $test_namespace")
+        end
+
+    finally
+        # Clean up - tables and namespace should already be dropped in the test
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+            println("✅ Catalog cleaned up successfully")
+        end
+    end
+
+    println("✅ Catalog table creation and drop tests completed!")
 end
