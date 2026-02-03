@@ -469,7 +469,11 @@ function list_namespaces(catalog::Catalog, parent::Vector{String}=String[])
 end
 
 """
-    create_namespace(catalog::Catalog, namespace::Vector{String}; properties::Dict{String,String}=Dict{String,String}())::Nothing
+    create_namespace(
+        catalog::Catalog,
+        namespace::Vector{String};
+        properties::Dict{String,String}=Dict{String,String}()
+    )::Nothing
 
 Create a new namespace in the catalog.
 
@@ -490,7 +494,11 @@ create_namespace(catalog, ["warehouse", "new_ns"])
 create_namespace(catalog, ["warehouse", "new_ns"]; properties=Dict("owner" => "data_team"))
 ```
 """
-function create_namespace(catalog::Catalog, namespace::Vector{String}; properties::Dict{String,String}=Dict{String,String}())
+function create_namespace(
+    catalog::Catalog,
+    namespace::Vector{String};
+    properties::Dict{String,String}=Dict{String,String}()
+)
     response = BoolResponse()
 
     # Convert namespace to array of C strings
@@ -635,7 +643,15 @@ function _parse_nested_c_string_list(
 end
 
 """
-    create_table(catalog::Catalog, namespace::Vector{String}, table_name::String, schema::Schema; partition_spec::Union{PartitionSpec, Nothing}=nothing, sort_order::Union{SortOrder, Nothing}=nothing, properties::Dict{String,String}=Dict{String,String}())::Table
+    create_table(
+        catalog::Catalog,
+        namespace::Vector{String},
+        table_name::String,
+        schema::Schema;
+        partition_spec::Union{PartitionSpec, Nothing}=nothing,
+        sort_order::Union{SortOrder, Nothing}=nothing,
+        properties::Dict{String,String}=Dict{String,String}()
+    )::Table
 
 Create a new Iceberg table in the catalog.
 
@@ -680,7 +696,7 @@ function create_table(
     partition_spec::Union{PartitionSpec, Nothing}=nothing,
     sort_order::Union{SortOrder, Nothing}=nothing,
     properties::Dict{String,String}=Dict{String,String}()
-)::Table
+)
     response = TableResponse()
 
     # Serialize schema to JSON
