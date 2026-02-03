@@ -12,6 +12,7 @@ export init_runtime
 export IcebergException
 export new_incremental_scan, free_incremental_scan!
 export table_open, free_table, new_scan, free_scan!
+export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_schema
 export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
 export with_file_column!, with_pos_column!
 export scan!, next_batch, free_batch, free_stream
@@ -264,42 +265,30 @@ struct PropertyEntry
 end
 
 """
-    TableResponse
+    Response{T}
 
-Response structure for asynchronous table operations.
-
-# Fields
-- `result::Cint`: Result code from the operation (0 for success)
-- `table::Table`: The opened table handle
-- `error_message::Ptr{Cchar}`: Error message string if operation failed
-- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
-"""
-mutable struct TableResponse
-    result::Cint
-    table::Table
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    TableResponse() = new(-1, C_NULL, C_NULL, C_NULL)
-end
-
-"""
-    Response
-
-Generic response structure for asynchronous operations.
+Generic response structure for asynchronous operations returning a value of type T.
 
 # Fields
 - `result::Cint`: Result code from the operation (0 for success)
+- `value::T`: The response value
 - `error_message::Ptr{Cchar}`: Error message string if operation failed
 - `context::Ptr{Cvoid}`: Context pointer for operation cancellation
 """
-mutable struct Response
+mutable struct Response{T}
     result::Cint
+    value::T
     error_message::Ptr{Cchar}
     context::Ptr{Cvoid}
-
-    Response() = new(-1, C_NULL, C_NULL)
 end
+
+# Default constructors for common response types
+# Note: Table = Ptr{Cvoid}, so Response{Table} and Response{Ptr{Cvoid}} are the same type
+Response{Ptr{Cvoid}}() = Response{Ptr{Cvoid}}(-1, C_NULL, C_NULL, C_NULL)
+Response{Bool}() = Response{Bool}(-1, false, C_NULL, C_NULL)
+
+# Type aliases for common response types
+const TableResponse = Response{Table}
 
 # Include scan modules
 include("scan_common.jl")
@@ -396,7 +385,7 @@ function table_open(snapshot_path::String; scheme::String="s3", properties::Dict
 
     @throw_on_error(response, "table_open", IcebergException)
 
-    return response.table
+    return response.value
 end
 
 """
@@ -406,6 +395,93 @@ Free the memory associated with an Iceberg table.
 """
 function free_table(table::Table)
     @ccall rust_lib.iceberg_table_free(table::Table)::Cvoid
+end
+
+"""
+    table_location(table::Table)::String
+
+Get the storage location of an Iceberg table.
+"""
+function table_location(table::Table)
+    ptr = @ccall rust_lib.iceberg_table_location(table::Table)::Ptr{Cchar}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to get table location"))
+    end
+    result = unsafe_string(ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
+    return result
+end
+
+"""
+    table_uuid(table::Table)::String
+
+Get the UUID of an Iceberg table.
+"""
+function table_uuid(table::Table)
+    ptr = @ccall rust_lib.iceberg_table_uuid(table::Table)::Ptr{Cchar}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to get table UUID"))
+    end
+    result = unsafe_string(ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
+    return result
+end
+
+"""
+    table_format_version(table::Table)::Int64
+
+Get the format version of an Iceberg table (1, 2, or 3).
+"""
+function table_format_version(table::Table)
+    version = @ccall rust_lib.iceberg_table_format_version(table::Table)::Int64
+    if version == 0
+        throw(IcebergException("Failed to get table format version"))
+    end
+    return version
+end
+
+"""
+    table_last_sequence_number(table::Table)::Int64
+
+Get the last sequence number of an Iceberg table.
+"""
+function table_last_sequence_number(table::Table)
+    seq_num = @ccall rust_lib.iceberg_table_last_sequence_number(table::Table)::Int64
+    if seq_num == -1
+        throw(IcebergException("Failed to get table last sequence number"))
+    end
+    return seq_num
+end
+
+"""
+    table_last_updated_ms(table::Table)::Int64
+
+Get the last updated timestamp of an Iceberg table in milliseconds since epoch.
+"""
+function table_last_updated_ms(table::Table)
+    timestamp = @ccall rust_lib.iceberg_table_last_updated_ms(table::Table)::Int64
+    if timestamp == -1
+        throw(IcebergException("Failed to get table last updated timestamp"))
+    end
+    return timestamp
+end
+
+"""
+    table_schema(table::Table)::String
+
+Get the current schema of an Iceberg table as a JSON string.
+
+The returned JSON contains the schema definition including field names, types,
+and other metadata in the Iceberg schema format.
+"""
+function table_schema(table::Table)
+    ptr = @ccall rust_lib.iceberg_table_schema(table::Table)::Ptr{Cchar}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to get table schema"))
+    end
+    result = unsafe_string(ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
+    return result
 end
 
 end # module RustyIceberg

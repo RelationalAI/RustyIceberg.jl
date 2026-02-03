@@ -703,6 +703,44 @@ end
         @test exists == true
         println("✅ Table existence verified: $table_name_1")
 
+        # Verify table properties
+        location = RustyIceberg.table_location(table_1)
+        @test !isempty(location)
+        @test startswith(location, "s3://")
+        println("✅ Table location: $location")
+
+        uuid = RustyIceberg.table_uuid(table_1)
+        @test !isempty(uuid)
+        @test length(uuid) == 36  # UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        println("✅ Table UUID: $uuid")
+
+        format_version = RustyIceberg.table_format_version(table_1)
+        @test format_version in [1, 2, 3]
+        println("✅ Table format version: $format_version")
+
+        last_seq = RustyIceberg.table_last_sequence_number(table_1)
+        @test last_seq >= 0
+        println("✅ Table last sequence number: $last_seq")
+
+        last_updated = RustyIceberg.table_last_updated_ms(table_1)
+        @test last_updated > 0
+        println("✅ Table last updated (ms): $last_updated")
+
+        # Verify table schema
+        schema_json = RustyIceberg.table_schema(table_1)
+        @test !isempty(schema_json)
+        parsed_schema = JSON.parse(schema_json)
+        @test haskey(parsed_schema, "type")
+        @test parsed_schema["type"] == "struct"
+        @test haskey(parsed_schema, "fields")
+        @test length(parsed_schema["fields"]) == 4  # id, name, age, salary fields
+        field_names = [f["name"] for f in parsed_schema["fields"]]
+        @test "id" in field_names
+        @test "name" in field_names
+        @test "age" in field_names
+        @test "salary" in field_names
+        println("✅ Table schema retrieved: $(length(parsed_schema["fields"])) fields")
+
         # Clean up first table
         RustyIceberg.free_table(table_1)
 

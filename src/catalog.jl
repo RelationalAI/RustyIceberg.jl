@@ -78,25 +78,9 @@ Catalog(ptr::Ptr{Cvoid}) = Catalog(ptr, nothing)
 # Support conversion to Ptr for FFI calls
 Base.unsafe_convert(::Type{Ptr{Cvoid}}, catalog::Catalog) = catalog.ptr
 
-"""
-    CatalogResponse
-
-Response structure for catalog creation operations.
-
-# Fields
-- `result::Cint`: Result code from the operation (0 for success)
-- `catalog::Ptr{Cvoid}`: The created catalog handle (raw pointer)
-- `error_message::Ptr{Cchar}`: Error message string if operation failed
-- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
-"""
-mutable struct CatalogResponse
-    result::Cint
-    catalog::Ptr{Cvoid}
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    CatalogResponse() = new(-1, C_NULL, C_NULL, C_NULL)
-end
+# Type aliases using the generic Response{T} from RustyIceberg
+const CatalogResponse = Response{Ptr{Cvoid}}
+const BoolResponse = Response{Bool}
 
 """
     StringListResponse
@@ -118,26 +102,6 @@ mutable struct StringListResponse
     context::Ptr{Cvoid}
 
     StringListResponse() = new(-1, C_NULL, 0, C_NULL, C_NULL)
-end
-
-"""
-    BoolResponse
-
-Response structure for boolean operations (e.g., table_exists).
-
-# Fields
-- `result::Cint`: Result code from the operation (0 for success)
-- `value::Bool`: The boolean result
-- `error_message::Ptr{Cchar}`: Error message string if operation failed
-- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
-"""
-mutable struct BoolResponse
-    result::Cint
-    value::Bool
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    BoolResponse() = new(-1, false, C_NULL, C_NULL)
 end
 
 """
@@ -209,7 +173,7 @@ function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{S
 
     @throw_on_error(response, "catalog_create_rest", IcebergException)
 
-    return Catalog(response.catalog, nothing)
+    return Catalog(response.value, nothing)
 end
 
 """
@@ -295,7 +259,7 @@ function catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing
     @throw_on_error(response, "catalog_create_rest", IcebergException)
 
     # Create a Catalog struct that holds the catalog pointer and keeps authenticator alive
-    catalog = Catalog(response.catalog, authenticator_ref)
+    catalog = Catalog(response.value, authenticator_ref)
     return catalog
 end
 
@@ -368,7 +332,7 @@ function load_table(catalog::Catalog, namespace::Vector{String}, table_name::Str
 
     @throw_on_error(response, "catalog_load_table", IcebergException)
 
-    return response.table
+    return response.value
 end
 
 """
@@ -735,7 +699,7 @@ function create_table(
 
     @throw_on_error(response, "create_table", IcebergException)
 
-    return response.table
+    return response.value
 end
 
 """

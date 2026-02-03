@@ -33,8 +33,8 @@ pub use catalog::{
 pub use full::IcebergScan;
 pub use incremental::{IcebergIncrementalScan, IcebergUnzippedStreamsResponse};
 pub use table::{
-    ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse, IcebergTable,
-    IcebergTableResponse,
+    ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse,
+    IcebergBoxedResponse, IcebergPropertyResponse, IcebergTable, IcebergTableResponse,
 };
 
 // We use `jl_adopt_thread` to ensure Rust can call into Julia when notifying

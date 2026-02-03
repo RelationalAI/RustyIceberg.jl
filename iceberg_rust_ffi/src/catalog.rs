@@ -350,42 +350,8 @@ impl IcebergCatalog {
     }
 }
 
-/// Response type for catalog operations that return a catalog
-#[repr(C)]
-pub struct IcebergCatalogResponse {
-    pub result: CResult,
-    pub catalog: *mut IcebergCatalog,
-    pub error_message: *mut c_char,
-    pub context: *const crate::Context,
-}
-
-unsafe impl Send for IcebergCatalogResponse {}
-
-impl crate::RawResponse for IcebergCatalogResponse {
-    type Payload = IcebergCatalog;
-
-    fn result_mut(&mut self) -> &mut CResult {
-        &mut self.result
-    }
-
-    fn context_mut(&mut self) -> &mut *const crate::Context {
-        &mut self.context
-    }
-
-    fn error_message_mut(&mut self) -> &mut *mut c_char {
-        &mut self.error_message
-    }
-
-    fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        match payload {
-            Some(catalog) => {
-                let catalog_ptr = Box::into_raw(Box::new(catalog));
-                self.catalog = catalog_ptr;
-            }
-            None => self.catalog = std::ptr::null_mut(),
-        }
-    }
-}
+// Type alias for catalog response - uses generic boxed response pattern
+pub type IcebergCatalogResponse = crate::IcebergBoxedResponse<IcebergCatalog>;
 
 /// Response type for string list operations
 #[repr(C)]
@@ -437,39 +403,8 @@ impl crate::RawResponse for IcebergStringListResponse {
     }
 }
 
-/// Response type for boolean operations
-#[repr(C)]
-pub struct IcebergBoolResponse {
-    pub result: CResult,
-    pub value: bool,
-    pub error_message: *mut c_char,
-    pub context: *const crate::Context,
-}
-
-unsafe impl Send for IcebergBoolResponse {}
-
-impl crate::RawResponse for IcebergBoolResponse {
-    type Payload = bool;
-
-    fn result_mut(&mut self) -> &mut CResult {
-        &mut self.result
-    }
-
-    fn context_mut(&mut self) -> &mut *const crate::Context {
-        &mut self.context
-    }
-
-    fn error_message_mut(&mut self) -> &mut *mut c_char {
-        &mut self.error_message
-    }
-
-    fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        match payload {
-            Some(value) => self.value = value,
-            None => self.value = false,
-        }
-    }
-}
+// Type alias for boolean response operations
+pub type IcebergBoolResponse = crate::IcebergPropertyResponse<bool>;
 
 /// Response type for nested string list operations (for namespace lists)
 #[repr(C)]

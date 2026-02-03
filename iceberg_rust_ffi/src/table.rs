@@ -43,19 +43,50 @@ pub struct ArrowBatch {
 // making it safe to send between threads.
 unsafe impl Send for ArrowBatch {}
 
-/// Response type for table operations
+/// Generic response type for scalar property operations
+/// Can be used for bool, i64, and other simple types
 #[repr(C)]
-pub struct IcebergTableResponse {
+pub struct IcebergPropertyResponse<T> {
     pub result: CResult,
-    pub table: *mut IcebergTable,
+    pub value: T,
     pub error_message: *mut c_char,
     pub context: *const Context,
 }
 
-unsafe impl Send for IcebergTableResponse {}
+unsafe impl<T: Send> Send for IcebergPropertyResponse<T> {}
 
-impl RawResponse for IcebergTableResponse {
-    type Payload = IcebergTable;
+impl<T: Default> RawResponse for IcebergPropertyResponse<T> {
+    type Payload = T;
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.error_message
+    }
+    fn set_payload(&mut self, payload: Option<Self::Payload>) {
+        if let Some(val) = payload {
+            self.value = val;
+        }
+    }
+}
+
+/// Generic response type for boxed/pointer payloads
+/// The value field is a raw pointer, and the payload gets boxed before storing
+#[repr(C)]
+pub struct IcebergBoxedResponse<T> {
+    pub result: CResult,
+    pub value: *mut T,
+    pub error_message: *mut c_char,
+    pub context: *const Context,
+}
+
+unsafe impl<T: Send> Send for IcebergBoxedResponse<T> {}
+
+impl<T> RawResponse for IcebergBoxedResponse<T> {
+    type Payload = T;
     fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
@@ -67,65 +98,61 @@ impl RawResponse for IcebergTableResponse {
     }
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload {
-            Some(table) => {
-                let table_ptr = Box::into_raw(Box::new(table));
-                self.table = table_ptr;
+            Some(val) => {
+                self.value = Box::into_raw(Box::new(val));
             }
-            None => self.table = ptr::null_mut(),
+            None => self.value = ptr::null_mut(),
         }
     }
 }
 
-/// Response type for stream operations
-#[repr(C)]
-pub struct IcebergArrowStreamResponse {
-    pub result: CResult,
-    pub stream: *mut IcebergArrowStream,
-    pub error_message: *mut c_char,
-    pub context: *const Context,
-}
+/// Type aliases for boxed response types
+pub type IcebergTableResponse = IcebergBoxedResponse<IcebergTable>;
+pub type IcebergArrowStreamResponse = IcebergBoxedResponse<IcebergArrowStream>;
 
-unsafe impl Send for IcebergArrowStreamResponse {}
-
-impl RawResponse for IcebergArrowStreamResponse {
-    type Payload = IcebergArrowStream;
-
-    fn result_mut(&mut self) -> &mut CResult {
-        &mut self.result
-    }
-
-    fn context_mut(&mut self) -> &mut *const Context {
-        &mut self.context
-    }
-
-    fn error_message_mut(&mut self) -> &mut *mut c_char {
-        &mut self.error_message
-    }
-
-    fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        match payload {
-            Some(stream) => {
-                self.stream = Box::into_raw(Box::new(stream));
-            }
-            None => self.stream = ptr::null_mut(),
-        }
-    }
-}
-
-/// Response type for batch operations
-#[repr(C)]
-pub struct IcebergBatchResponse {
-    pub result: CResult,
-    pub batch: *mut ArrowBatch,
-    pub error_message: *mut c_char,
-    pub context: *const Context,
-}
+/// Batch response - same memory layout as IcebergBoxedResponse<ArrowBatch>
+/// but with Option<ArrowBatch> payload to handle end-of-stream (None) case.
+/// Uses #[repr(transparent)] to ensure identical FFI layout.
+#[repr(transparent)]
+pub struct IcebergBatchResponse(pub IcebergBoxedResponse<ArrowBatch>);
 
 unsafe impl Send for IcebergBatchResponse {}
 
 impl RawResponse for IcebergBatchResponse {
     type Payload = Option<ArrowBatch>;
     fn result_mut(&mut self) -> &mut CResult {
+        &mut self.0.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.0.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.0.error_message
+    }
+    fn set_payload(&mut self, payload: Option<Self::Payload>) {
+        match payload.flatten() {
+            Some(arrow_batch) => {
+                self.0.value = Box::into_raw(Box::new(arrow_batch));
+            }
+            None => self.0.value = ptr::null_mut(),
+        }
+    }
+}
+
+/// Response type for string properties - needs custom implementation
+#[repr(C)]
+pub struct IcebergStringPropertyResponse {
+    pub result: CResult,
+    pub value: *mut c_char,
+    pub error_message: *mut c_char,
+    pub context: *const Context,
+}
+
+unsafe impl Send for IcebergStringPropertyResponse {}
+
+impl RawResponse for IcebergStringPropertyResponse {
+    type Payload = String;
+    fn result_mut(&mut self) -> &mut CResult {
         &mut self.result
     }
     fn context_mut(&mut self) -> &mut *const Context {
@@ -135,11 +162,12 @@ impl RawResponse for IcebergBatchResponse {
         &mut self.error_message
     }
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        match payload.flatten() {
-            Some(arrow_batch) => {
-                self.batch = Box::into_raw(Box::new(arrow_batch));
+        match payload {
+            Some(s) => {
+                let c_str = std::ffi::CString::new(s).expect("String contained null byte");
+                self.value = c_str.into_raw();
             }
-            None => self.batch = ptr::null_mut(),
+            None => self.value = ptr::null_mut(),
         }
     }
 }
@@ -252,3 +280,84 @@ export_runtime_op!(
     },
     stream: *mut IcebergArrowStream
 );
+
+// Synchronous table property functions
+
+/// Get table location
+#[no_mangle]
+pub extern "C" fn iceberg_table_location(table: *mut IcebergTable) -> *mut c_char {
+    if table.is_null() {
+        return ptr::null_mut();
+    }
+    let table_ref = unsafe { &*table };
+    let location = table_ref.table.metadata().location().to_string();
+    match std::ffi::CString::new(location) {
+        Ok(c_str) => c_str.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Get table UUID
+#[no_mangle]
+pub extern "C" fn iceberg_table_uuid(table: *mut IcebergTable) -> *mut c_char {
+    if table.is_null() {
+        return ptr::null_mut();
+    }
+    let table_ref = unsafe { &*table };
+    let uuid = table_ref.table.metadata().uuid().to_string();
+    match std::ffi::CString::new(uuid) {
+        Ok(c_str) => c_str.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Get table format version (returns 0 on error)
+#[no_mangle]
+pub extern "C" fn iceberg_table_format_version(table: *mut IcebergTable) -> i64 {
+    if table.is_null() {
+        return 0;
+    }
+    let table_ref = unsafe { &*table };
+    match table_ref.table.metadata().format_version() {
+        iceberg::spec::FormatVersion::V1 => 1,
+        iceberg::spec::FormatVersion::V2 => 2,
+        iceberg::spec::FormatVersion::V3 => 3,
+    }
+}
+
+/// Get table last sequence number (returns -1 on error)
+#[no_mangle]
+pub extern "C" fn iceberg_table_last_sequence_number(table: *mut IcebergTable) -> i64 {
+    if table.is_null() {
+        return -1;
+    }
+    let table_ref = unsafe { &*table };
+    table_ref.table.metadata().last_sequence_number()
+}
+
+/// Get table last updated timestamp in milliseconds (returns -1 on error)
+#[no_mangle]
+pub extern "C" fn iceberg_table_last_updated_ms(table: *mut IcebergTable) -> i64 {
+    if table.is_null() {
+        return -1;
+    }
+    let table_ref = unsafe { &*table };
+    table_ref.table.metadata().last_updated_ms()
+}
+
+/// Get table current schema as JSON string
+#[no_mangle]
+pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char {
+    if table.is_null() {
+        return ptr::null_mut();
+    }
+    let table_ref = unsafe { &*table };
+    let schema = table_ref.table.metadata().current_schema();
+    match serde_json::to_string(schema.as_ref()) {
+        Ok(json) => match std::ffi::CString::new(json) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null_mut(),
+        },
+        Err(_) => ptr::null_mut(),
+    }
+}
