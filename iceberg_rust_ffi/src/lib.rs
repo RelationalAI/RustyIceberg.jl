@@ -22,19 +22,23 @@ mod catalog;
 // Table and streaming module
 mod table;
 
+// Response types module
+mod response;
+
 // Utility module for FFI parsing
 mod util;
 
 // Re-export types and functions from submodules
-pub use catalog::{
-    IcebergBoolResponse, IcebergCatalog, IcebergCatalogResponse, IcebergNestedStringListResponse,
-    IcebergStringListResponse,
-};
+pub use catalog::{IcebergBoolResponse, IcebergCatalog, IcebergCatalogResponse};
 pub use full::IcebergScan;
 pub use incremental::{IcebergIncrementalScan, IcebergUnzippedStreamsResponse};
+pub use response::{
+    IcebergBoxedResponse, IcebergNestedStringListResponse, IcebergPropertyResponse,
+    IcebergStringListResponse,
+};
 pub use table::{
-    ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse,
-    IcebergBoxedResponse, IcebergPropertyResponse, IcebergTable, IcebergTableResponse,
+    ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse, IcebergTable,
+    IcebergTableResponse,
 };
 
 // We use `jl_adopt_thread` to ensure Rust can call into Julia when notifying

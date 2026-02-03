@@ -1,3 +1,4 @@
+use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
 use iceberg::io::FileIOBuilder;
@@ -43,70 +44,7 @@ pub struct ArrowBatch {
 // making it safe to send between threads.
 unsafe impl Send for ArrowBatch {}
 
-/// Generic response type for scalar property operations
-/// Can be used for bool, i64, and other simple types
-#[repr(C)]
-pub struct IcebergPropertyResponse<T> {
-    pub result: CResult,
-    pub value: T,
-    pub error_message: *mut c_char,
-    pub context: *const Context,
-}
-
-unsafe impl<T: Send> Send for IcebergPropertyResponse<T> {}
-
-impl<T: Default> RawResponse for IcebergPropertyResponse<T> {
-    type Payload = T;
-    fn result_mut(&mut self) -> &mut CResult {
-        &mut self.result
-    }
-    fn context_mut(&mut self) -> &mut *const Context {
-        &mut self.context
-    }
-    fn error_message_mut(&mut self) -> &mut *mut c_char {
-        &mut self.error_message
-    }
-    fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        if let Some(val) = payload {
-            self.value = val;
-        }
-    }
-}
-
-/// Generic response type for boxed/pointer payloads
-/// The value field is a raw pointer, and the payload gets boxed before storing
-#[repr(C)]
-pub struct IcebergBoxedResponse<T> {
-    pub result: CResult,
-    pub value: *mut T,
-    pub error_message: *mut c_char,
-    pub context: *const Context,
-}
-
-unsafe impl<T: Send> Send for IcebergBoxedResponse<T> {}
-
-impl<T> RawResponse for IcebergBoxedResponse<T> {
-    type Payload = T;
-    fn result_mut(&mut self) -> &mut CResult {
-        &mut self.result
-    }
-    fn context_mut(&mut self) -> &mut *const Context {
-        &mut self.context
-    }
-    fn error_message_mut(&mut self) -> &mut *mut c_char {
-        &mut self.error_message
-    }
-    fn set_payload(&mut self, payload: Option<Self::Payload>) {
-        match payload {
-            Some(val) => {
-                self.value = Box::into_raw(Box::new(val));
-            }
-            None => self.value = ptr::null_mut(),
-        }
-    }
-}
-
-/// Type aliases for boxed response types
+/// Type aliases for response types
 pub type IcebergTableResponse = IcebergBoxedResponse<IcebergTable>;
 pub type IcebergArrowStreamResponse = IcebergBoxedResponse<IcebergArrowStream>;
 
