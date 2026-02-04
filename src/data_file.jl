@@ -15,8 +15,15 @@ mutable struct DataFiles
     ptr::Ptr{Cvoid}
 end
 
-# Internal: free memory for data files handle
-function _free_data_files!(df::DataFiles)
+"""
+    free_data_files!(df::DataFiles)
+
+Free the memory associated with a data files handle.
+
+This is called automatically by `add_data_files` after consuming the data files,
+but can also be called manually if the data files won't be used in a transaction.
+"""
+function free_data_files!(df::DataFiles)
     if df.ptr == C_NULL
         return nothing
     end

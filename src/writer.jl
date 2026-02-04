@@ -148,7 +148,7 @@ the writer is no longer needed.
 function free_writer!(writer::DataFileWriter)
     # Free any associated DataFiles first
     if writer.data_files !== nothing
-        _free_data_files!(writer.data_files)
+        free_data_files!(writer.data_files)
         writer.data_files = nothing
     end
     if writer.ptr == C_NULL

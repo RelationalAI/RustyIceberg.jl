@@ -194,7 +194,7 @@ function add_data_files(action::FastAppendAction, data_files::DataFiles)
     # Free the now-empty DataFiles container and mark as consumed
     # The Rust side took the Vec<DataFile> contents via std::mem::take,
     # but we still need to free the IcebergDataFiles struct itself
-    _free_data_files!(data_files)
+    free_data_files!(data_files)
 
     return nothing
 end
