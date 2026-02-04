@@ -22,7 +22,8 @@ export load_table, list_tables, list_namespaces, table_exists, create_table, dro
 export Field, Schema, PartitionField, PartitionSpec, SortField, SortOrder
 export SchemaBuilder, add_field, with_identifier, build
 export schema_to_json, partition_spec_to_json, sort_order_to_json
-export Transaction, DataFiles, free_transaction!, free_data_files!, fast_append, commit
+export Transaction, DataFiles, free_transaction!, free_data_files!, commit, transaction
+export FastAppendAction, free_fast_append_action!, add_data_files, apply, with_fast_append
 export DataFileWriter, free_writer!, close_writer
 
 # Always use the JLL library - override via Preferences if needed for local development

@@ -80,6 +80,39 @@ function DataFileWriter(table::Table; prefix::String="data")
 
     return DataFileWriter(response.value, table, colmeta)
 end
+"""
+    DataFileWriter(f::Function, table::Table; prefix::String="data") -> DataFiles
+
+Create a writer, pass it to `f` for writing, then close and free it.
+
+This provides a convenient way to write data with automatic cleanup,
+ensuring the writer is closed and freed even if an error occurs.
+
+# Arguments
+- `f`: A function that takes a `DataFileWriter` and writes data to it
+- `table::Table`: The table to create a writer for
+- `prefix::String`: Prefix for generated file names (default: "data")
+
+# Returns
+A `DataFiles` handle containing the written files.
+
+# Example
+```julia
+data_files = DataFileWriter(table) do writer
+    write(writer, batch1)
+    write(writer, batch2)
+end
+```
+"""
+function DataFileWriter(f::Function, table::Table; prefix::String="data")
+    writer = DataFileWriter(table; prefix=prefix)
+    try
+        f(writer)
+        return close_writer(writer)
+    finally
+        free_writer!(writer)
+    end
+end
 
 """
     free_writer!(writer::DataFileWriter)
@@ -161,7 +194,7 @@ Close the writer and return the written data files.
 
 This flushes any remaining data, closes the Parquet file(s), and returns
 a `DataFiles` handle containing metadata about the written files. The
-`DataFiles` can then be used with `fast_append` in a Transaction.
+`DataFiles` can then be used with `add_data_files` in a `FastAppendAction`.
 
 After calling this, the writer cannot be used for writing again.
 
@@ -181,7 +214,9 @@ write(writer, data)
 data_files = close_writer(writer)
 
 tx = Transaction(table)
-fast_append(tx, data_files)
+with_fast_append(tx) do action
+    add_data_files(action, data_files)
+end
 updated_table = commit(tx, catalog)
 
 free_data_files!(data_files)
