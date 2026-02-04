@@ -12,7 +12,7 @@ const PARQUET_FIELD_ID_META_KEY = "PARQUET:field_id"
 Opaque handle representing an Iceberg data file writer.
 
 Create a writer using `DataFileWriter(table)` and free it with `free_writer!`
-when done. Writers should be closed using `close_writer!` to get the written
+when done. Writers should be closed using `close_writer` to get the written
 data files.
 """
 mutable struct DataFileWriter
@@ -48,8 +48,8 @@ A new `DataFileWriter` handle that must be freed with `free_writer!`.
 ```julia
 table = load_table(catalog, ["db"], "users")
 writer = DataFileWriter(table)
-write!(writer, arrow_batch)
-data_files = close_writer!(writer)
+write(writer, arrow_batch)
+data_files = close_writer(writer)
 free_writer!(writer)
 ```
 """
@@ -101,12 +101,12 @@ function free_writer!(writer::DataFileWriter)
 end
 
 """
-    write!(writer::DataFileWriter, data)
+    write(writer::DataFileWriter, data)
 
 Write Arrow data to the writer.
 
 The data is serialized to Arrow IPC format and written to Parquet files.
-Multiple calls to `write!` accumulate data until `close_writer!` is called.
+Multiple calls to `write` accumulate data until `close_writer!` is called.
 
 # Arguments
 - `writer::DataFileWriter`: The writer to write to
@@ -118,11 +118,11 @@ Multiple calls to `write!` accumulate data until `close_writer!` is called.
 # Example
 ```julia
 # Write a single batch
-write!(writer, (id=[1, 2, 3], name=["a", "b", "c"]))
+write(writer, (id=[1, 2, 3], name=["a", "b", "c"]))
 
 # Write multiple batches
 for batch in batches
-    write!(writer, batch)
+    write(writer, batch)
 end
 ```
 """
@@ -151,19 +151,19 @@ function Base.write(writer::DataFileWriter, data)
         )::Cint
     end
 
-    @throw_on_error(response, "write!", IcebergException)
+    @throw_on_error(response, "write", IcebergException)
 
     return nothing
 end
 
 """
-    close_writer!(writer::DataFileWriter) -> DataFiles
+    close_writer(writer::DataFileWriter) -> DataFiles
 
 Close the writer and return the written data files.
 
 This flushes any remaining data, closes the Parquet file(s), and returns
 a `DataFiles` handle containing metadata about the written files. The
-`DataFiles` can then be used with `fast_append!` in a Transaction.
+`DataFiles` can then be used with `fast_append` in a Transaction.
 
 After calling this, the writer cannot be used for writing again.
 
@@ -171,7 +171,7 @@ After calling this, the writer cannot be used for writing again.
 - `writer::DataFileWriter`: The writer to close
 
 # Returns
-A `DataFiles` handle that can be used with `fast_append!`.
+A `DataFiles` handle that can be used with `fast_append`.
 
 # Throws
 - `IcebergException` if the close fails
@@ -179,18 +179,18 @@ A `DataFiles` handle that can be used with `fast_append!`.
 # Example
 ```julia
 writer = DataFileWriter(table)
-write!(writer, data)
-data_files = close_writer!(writer)
+write(writer, data)
+data_files = close_writer(writer)
 
 tx = Transaction(table)
-fast_append!(tx, data_files)
-updated_table = commit!(tx, catalog)
+fast_append(tx, data_files)
+updated_table = commit(tx, catalog)
 
 free_data_files!(data_files)
 free_writer!(writer)
 ```
 """
-function close_writer!(writer::DataFileWriter)
+function close_writer(writer::DataFileWriter)
     if writer.ptr == C_NULL
         throw(IcebergException("Writer has been freed"))
     end
@@ -205,7 +205,7 @@ function close_writer!(writer::DataFileWriter)
         )::Cint
     end
 
-    @throw_on_error(response, "close_writer!", IcebergException)
+    @throw_on_error(response, "close_writer", IcebergException)
 
     return DataFiles(response.value)
 end

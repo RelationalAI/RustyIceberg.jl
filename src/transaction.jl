@@ -9,7 +9,7 @@
 Opaque handle representing an Iceberg transaction.
 
 Create a transaction using `Transaction(table)` and free it with `free_transaction!`
-when done. Transactions should be committed using `commit!` before being freed.
+when done. Transactions should be committed using `commit` before being freed.
 """
 mutable struct Transaction
     ptr::Ptr{Cvoid}
@@ -34,7 +34,7 @@ A new `Transaction` handle that must be freed with `free_transaction!`.
 table = load_table(catalog, ["db"], "users")
 tx = Transaction(table)
 # ... add operations to transaction ...
-updated_table = commit!(tx, catalog)
+updated_table = commit(tx, catalog)
 free_transaction!(tx)
 ```
 """
@@ -64,7 +64,7 @@ function free_transaction!(tx::Transaction)
 end
 
 """
-    fast_append!(tx::Transaction, data_files::DataFiles)
+    fast_append(tx::Transaction, data_files::DataFiles)
 
 Add data files to a transaction using fast append.
 
@@ -87,11 +87,11 @@ moved into the transaction and the handle becomes empty.
 ```julia
 tx = Transaction(table)
 # data_files would come from a writer (not yet implemented)
-fast_append!(tx, data_files)
-updated_table = commit!(tx, catalog)
+fast_append(tx, data_files)
+updated_table = commit(tx, catalog)
 ```
 """
-function fast_append!(tx::Transaction, data_files::DataFiles)
+function fast_append(tx::Transaction, data_files::DataFiles)
     if tx.ptr == C_NULL
         throw(IcebergException("Transaction has been freed or consumed"))
     end
@@ -120,7 +120,7 @@ function fast_append!(tx::Transaction, data_files::DataFiles)
 end
 
 """
-    commit!(tx::Transaction, catalog::Catalog) -> Table
+    commit(tx::Transaction, catalog::Catalog) -> Table
 
 Commit a transaction to the catalog.
 
@@ -141,13 +141,13 @@ The updated `Table` after the transaction has been committed.
 # Example
 ```julia
 tx = Transaction(table)
-fast_append!(tx, data_files)
-updated_table = commit!(tx, catalog)
+fast_append(tx, data_files)
+updated_table = commit(tx, catalog)
 free_transaction!(tx)
 # Now use updated_table for subsequent operations
 ```
 """
-function commit!(tx::Transaction, catalog::Catalog)
+function commit(tx::Transaction, catalog::Catalog)
     if tx.ptr == C_NULL
         throw(IcebergException("Transaction has been freed or consumed"))
     end
@@ -166,7 +166,7 @@ function commit!(tx::Transaction, catalog::Catalog)
         )::Cint
     end
 
-    @throw_on_error(response, "commit!", IcebergException)
+    @throw_on_error(response, "commit", IcebergException)
 
     return response.value
 end

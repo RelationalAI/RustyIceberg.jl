@@ -73,7 +73,7 @@ using Tables
 
         # Test 4: Close writer and get data files
         println("\nTest 4: Closing writer...")
-        data_files = RustyIceberg.close_writer!(writer)
+        data_files = RustyIceberg.close_writer(writer)
         @test data_files !== nothing
         @test data_files.ptr != C_NULL
         println("✅ Writer closed successfully, got DataFiles handle")
@@ -81,8 +81,8 @@ using Tables
         # Test 5: Create transaction and append data files
         println("\nTest 5: Committing data files via transaction...")
         tx = RustyIceberg.Transaction(table)
-        RustyIceberg.fast_append!(tx, data_files)
-        updated_table = RustyIceberg.commit!(tx, catalog)
+        RustyIceberg.fast_append(tx, data_files)
+        updated_table = RustyIceberg.commit(tx, catalog)
         @test updated_table != C_NULL
         println("✅ Transaction committed successfully")
 
@@ -226,13 +226,13 @@ end
         println("\nTest 2: Testing double close...")
         writer = RustyIceberg.DataFileWriter(table)
         write(writer, (id = Int64[1], name = ["test"]))
-        data_files = RustyIceberg.close_writer!(writer)
+        data_files = RustyIceberg.close_writer(writer)
         @test data_files !== nothing
         RustyIceberg.free_data_files!(data_files)
 
         error_caught = false
         try
-            RustyIceberg.close_writer!(writer)
+            RustyIceberg.close_writer(writer)
         catch e
             error_caught = true
             @test e isa RustyIceberg.IcebergException

@@ -52,7 +52,7 @@ using Test
         # Test 5: Commit empty transaction (no data files added)
         # This should work - an empty transaction just returns the same table state
         println("\nTest 5: Committing empty transaction...")
-        updated_table = RustyIceberg.commit!(tx, catalog)
+        updated_table = RustyIceberg.commit(tx, catalog)
         @test updated_table != C_NULL
         println("✅ Empty transaction committed successfully")
 
@@ -101,7 +101,7 @@ end
 
         error_caught = false
         try
-            RustyIceberg.commit!(tx, catalog)
+            RustyIceberg.commit(tx, catalog)
         catch e
             error_caught = true
             @test e isa RustyIceberg.IcebergException
@@ -113,14 +113,14 @@ end
         # Test 2: Create transaction, commit, then try to commit again
         println("\nTest 2: Testing double commit...")
         tx = RustyIceberg.Transaction(table)
-        updated_table = RustyIceberg.commit!(tx, catalog)
+        updated_table = RustyIceberg.commit(tx, catalog)
         @test updated_table != C_NULL
         RustyIceberg.free_table(updated_table)
 
         # Transaction is consumed after commit, second commit should fail
         error_caught = false
         try
-            RustyIceberg.commit!(tx, catalog)
+            RustyIceberg.commit(tx, catalog)
         catch e
             error_caught = true
             @test e isa RustyIceberg.IcebergException
