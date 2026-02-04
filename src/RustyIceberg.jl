@@ -25,6 +25,7 @@ export schema_to_json, partition_spec_to_json, sort_order_to_json
 export Transaction, DataFiles, free_transaction!, free_data_files!, commit, transaction
 export FastAppendAction, free_fast_append_action!, add_data_files, apply, with_fast_append
 export DataFileWriter, free_writer!, close_writer
+export WriterConfig, CompressionCodec, UNCOMPRESSED, SNAPPY, GZIP, LZ4, ZSTD
 
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:

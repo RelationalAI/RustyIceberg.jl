@@ -6,6 +6,56 @@
 # Parquet field ID metadata key (must match iceberg-rust's PARQUET_FIELD_ID_META_KEY)
 const PARQUET_FIELD_ID_META_KEY = "PARQUET:field_id"
 
+# Default target file size: 512 MB (matches iceberg-rust default)
+const DEFAULT_TARGET_FILE_SIZE_BYTES = 512 * 1024 * 1024
+
+"""
+    CompressionCodec
+
+Compression codec for Parquet files.
+
+# Values
+- `UNCOMPRESSED`: No compression
+- `SNAPPY`: Snappy compression (fast, moderate compression)
+- `GZIP`: Gzip compression (slower, better compression)
+- `LZ4`: LZ4 compression (very fast, lower compression)
+- `ZSTD`: Zstandard compression (good balance of speed and compression)
+"""
+@enum CompressionCodec begin
+    UNCOMPRESSED = 0
+    SNAPPY = 1
+    GZIP = 2
+    LZ4 = 3
+    ZSTD = 4
+end
+
+"""
+    WriterConfig
+
+Configuration options for the DataFileWriter.
+
+# Fields
+- `prefix::String`: Prefix for output file names (default: "data")
+- `target_file_size_bytes::Int`: Target size for rolling to a new file (default: 512 MB)
+- `compression::CompressionCodec`: Compression codec for Parquet files (default: SNAPPY)
+
+# Example
+```julia
+# Override defaults: use smaller file size and ZSTD compression
+config = WriterConfig(
+    prefix = "my_data",
+    target_file_size_bytes = 128 * 1024 * 1024,  # 128 MB (default is 512 MB)
+    compression = ZSTD
+)
+writer = DataFileWriter(table, config)
+```
+"""
+@kwdef struct WriterConfig
+    prefix::String = "data"
+    target_file_size_bytes::Int = DEFAULT_TARGET_FILE_SIZE_BYTES
+    compression::CompressionCodec = SNAPPY
+end
+
 """
     DataFileWriter
 
@@ -33,7 +83,8 @@ const DataFileWriterResponse = Response{Ptr{Cvoid}}
 const WriterCloseResponse = Response{Ptr{Cvoid}}
 
 """
-    DataFileWriter(table::Table; prefix::String="data") -> DataFileWriter
+    DataFileWriter(table::Table, config::WriterConfig) -> DataFileWriter
+    DataFileWriter(table::Table; prefix="data", target_file_size_bytes=512MB, compression=SNAPPY) -> DataFileWriter
 
 Create a new data file writer for the given table.
 
@@ -42,27 +93,39 @@ Files are named using the prefix (e.g., "data-xxx.parquet").
 
 # Arguments
 - `table::Table`: The table to write data files for
+- `config::WriterConfig`: Configuration options for the writer
+
+Or use keyword arguments:
 - `prefix::String`: Prefix for output file names (default: "data")
+- `target_file_size_bytes::Int`: Target file size before rolling (default: 512 MB)
+- `compression::CompressionCodec`: Compression codec (default: SNAPPY)
 
 # Returns
 A new `DataFileWriter` handle that must be freed with `free_writer!`.
 
 # Example
 ```julia
-table = load_table(catalog, ["db"], "users")
-writer = DataFileWriter(table)
+# Using keyword arguments
+writer = DataFileWriter(table; compression=ZSTD)
+
+# Using WriterConfig
+config = WriterConfig(prefix="mydata", compression=ZSTD)
+writer = DataFileWriter(table, config)
+
 write(writer, arrow_batch)
 data_files = close_writer(writer)
 free_writer!(writer)
 ```
 """
-function DataFileWriter(table::Table; prefix::String="data")
+function DataFileWriter(table::Table, config::WriterConfig)
     response = DataFileWriterResponse()
 
-    async_ccall(response, prefix) do handle
+    async_ccall(response, config.prefix) do handle
         @ccall rust_lib.iceberg_writer_new(
             table::Table,
-            prefix::Cstring,
+            config.prefix::Cstring,
+            config.target_file_size_bytes::Int64,
+            Int32(config.compression)::Int32,
             response::Ref{DataFileWriterResponse},
             handle::Ptr{Cvoid}
         )::Cint
@@ -85,8 +148,19 @@ function DataFileWriter(table::Table; prefix::String="data")
 
     return DataFileWriter(response.value, table, colmeta, nothing)
 end
+
+# Convenience constructor with keyword arguments
+function DataFileWriter(table::Table;
+    prefix::String="data",
+    target_file_size_bytes::Int=DEFAULT_TARGET_FILE_SIZE_BYTES,
+    compression::CompressionCodec=SNAPPY
+)
+    config = WriterConfig(prefix=prefix, target_file_size_bytes=target_file_size_bytes, compression=compression)
+    return DataFileWriter(table, config)
+end
 """
-    DataFileWriter(f::Function, table::Table; prefix::String="data") -> DataFiles
+    DataFileWriter(f::Function, table::Table, config::WriterConfig) -> DataFiles
+    DataFileWriter(f::Function, table::Table; prefix="data", ...) -> DataFiles
 
 Create a writer, pass it to `f` for writing, then close and free it.
 
@@ -98,7 +172,12 @@ used in a transaction via `add_data_files`.
 # Arguments
 - `f`: A function that takes a `DataFileWriter` and writes data to it
 - `table::Table`: The table to create a writer for
+- `config::WriterConfig`: Configuration options for the writer
+
+Or use keyword arguments:
 - `prefix::String`: Prefix for generated file names (default: "data")
+- `target_file_size_bytes::Int`: Target file size before rolling (default: 512 MB)
+- `compression::CompressionCodec`: Compression codec (default: SNAPPY)
 
 # Returns
 A `DataFiles` handle containing the written files. This handle will be
@@ -106,9 +185,16 @@ automatically freed when passed to `add_data_files`.
 
 # Example
 ```julia
-data_files = DataFileWriter(table) do writer
+# Using keyword arguments
+data_files = DataFileWriter(table; compression=ZSTD) do writer
     write(writer, batch1)
     write(writer, batch2)
+end
+
+# Using WriterConfig
+config = WriterConfig(compression=ZSTD)
+data_files = DataFileWriter(table, config) do writer
+    write(writer, batch1)
 end
 
 # Use the data files in a transaction
@@ -119,8 +205,8 @@ transaction(table, catalog) do tx
 end
 ```
 """
-function DataFileWriter(f::Function, table::Table; prefix::String="data")
-    writer = DataFileWriter(table; prefix=prefix)
+function DataFileWriter(f::Function, table::Table, config::WriterConfig)
+    writer = DataFileWriter(table, config)
     try
         f(writer)
         data_files = close_writer(writer)
@@ -131,6 +217,16 @@ function DataFileWriter(f::Function, table::Table; prefix::String="data")
     finally
         free_writer!(writer)
     end
+end
+
+# Convenience do-block constructor with keyword arguments
+function DataFileWriter(f::Function, table::Table;
+    prefix::String="data",
+    target_file_size_bytes::Int=DEFAULT_TARGET_FILE_SIZE_BYTES,
+    compression::CompressionCodec=SNAPPY
+)
+    config = WriterConfig(prefix=prefix, target_file_size_bytes=target_file_size_bytes, compression=compression)
+    return DataFileWriter(f, table, config)
 end
 
 """

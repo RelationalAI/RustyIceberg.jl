@@ -15,7 +15,27 @@ use iceberg::writer::file_writer::location_generator::{
 use iceberg::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg::writer::file_writer::ParquetWriterBuilder;
 use iceberg::writer::{IcebergWriter, IcebergWriterBuilder};
+use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+
+/// Compression codec values (must match Julia's CompressionCodec enum)
+const COMPRESSION_UNCOMPRESSED: i32 = 0;
+const COMPRESSION_SNAPPY: i32 = 1;
+const COMPRESSION_GZIP: i32 = 2;
+const COMPRESSION_LZ4: i32 = 3;
+const COMPRESSION_ZSTD: i32 = 4;
+
+/// Convert FFI compression code to parquet Compression
+fn compression_from_code(code: i32) -> Compression {
+    match code {
+        COMPRESSION_UNCOMPRESSED => Compression::UNCOMPRESSED,
+        COMPRESSION_SNAPPY => Compression::SNAPPY,
+        COMPRESSION_GZIP => Compression::GZIP(Default::default()),
+        COMPRESSION_LZ4 => Compression::LZ4,
+        COMPRESSION_ZSTD => Compression::ZSTD(Default::default()),
+        _ => Compression::SNAPPY, // Default to SNAPPY for unknown values
+    }
+}
 
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
@@ -54,17 +74,15 @@ pub extern "C" fn iceberg_writer_free(writer: *mut IcebergDataFileWriter) {
     }
 }
 
-// Create a new DataFileWriter from a table
+// Create a new DataFileWriter from a table with configuration options
 //
 // This creates the full writer chain:
 // ParquetWriterBuilder -> RollingFileWriterBuilder -> DataFileWriterBuilder -> build()
 //
-// The writer is built with default settings:
-// - Default parquet writer properties
-// - Rolling file writer with default file size
-// - No partition key (unpartitioned writes)
-//
-// The `prefix` parameter is used to name output files (e.g., "data" produces files like "data-xxx.parquet")
+// Configuration options:
+// - `prefix`: File name prefix (e.g., "data" produces files like "data-xxx.parquet")
+// - `target_file_size_bytes`: Target size for rolling to a new file (0 = use default 512 MB)
+// - `compression_codec`: Compression codec (0=UNCOMPRESSED, 1=SNAPPY, 2=GZIP, 3=LZ4, 4=ZSTD)
 export_runtime_op!(
     iceberg_writer_new,
     IcebergDataFileWriterResponse,
@@ -75,11 +93,11 @@ export_runtime_op!(
 
         let prefix_str = parse_c_string(prefix, "prefix")?;
         let table_ref = unsafe { &*table };
-        Ok((table_ref, prefix_str))
+        Ok((table_ref, prefix_str, target_file_size_bytes, compression_codec))
     },
     result_tuple,
     async {
-        let (table_ref, prefix_str) = result_tuple;
+        let (table_ref, prefix_str, target_file_size_bytes, compression_codec) = result_tuple;
         let table = &table_ref.table;
 
         // Create LocationGenerator from table metadata
@@ -93,19 +111,35 @@ export_runtime_op!(
             DataFileFormat::Parquet,
         );
 
-        // Create ParquetWriterBuilder with table schema and default properties
+        // Create WriterProperties with compression
+        let compression = compression_from_code(compression_codec);
+        let writer_props = WriterProperties::builder()
+            .set_compression(compression)
+            .build();
+
+        // Create ParquetWriterBuilder with table schema and configured properties
         let parquet_writer_builder = ParquetWriterBuilder::new(
-            WriterProperties::default(),
+            writer_props,
             table.metadata().current_schema().clone(),
         );
 
-        // Create RollingFileWriterBuilder with table's FileIO
-        let rolling_file_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            parquet_writer_builder,
-            table.file_io().clone(),
-            location_generator,
-            file_name_generator,
-        );
+        // Create RollingFileWriterBuilder with configured file size
+        let rolling_file_writer_builder = if target_file_size_bytes > 0 {
+            RollingFileWriterBuilder::new(
+                parquet_writer_builder,
+                target_file_size_bytes as usize,
+                table.file_io().clone(),
+                location_generator,
+                file_name_generator,
+            )
+        } else {
+            RollingFileWriterBuilder::new_with_default_file_size(
+                parquet_writer_builder,
+                table.file_io().clone(),
+                location_generator,
+                file_name_generator,
+            )
+        };
 
         // Create DataFileWriterBuilder
         let data_file_writer_builder = DataFileWriterBuilder::new(rolling_file_writer_builder);
@@ -121,7 +155,9 @@ export_runtime_op!(
         })
     },
     table: *mut IcebergTable,
-    prefix: *const c_char
+    prefix: *const c_char,
+    target_file_size_bytes: i64,
+    compression_codec: i32
 );
 
 // Write Arrow IPC data to the writer
