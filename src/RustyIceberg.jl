@@ -302,6 +302,9 @@ include("schema.jl")
 # Include catalog module
 include("catalog.jl")
 
+# Include data file module
+include("data_file.jl")
+
 # Include transaction module
 include("transaction.jl")
 
