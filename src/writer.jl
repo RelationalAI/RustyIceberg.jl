@@ -14,11 +14,16 @@ Opaque handle representing an Iceberg data file writer.
 Create a writer using `DataFileWriter(table)` and free it with `free_writer!`
 when done. Writers should be closed using `close_writer` to get the written
 data files.
+
+The writer tracks any `DataFiles` produced by `close_writer` and automatically
+frees them when `free_writer!` is called, unless they have already been freed
+or consumed.
 """
 mutable struct DataFileWriter
     ptr::Ptr{Cvoid}
     table::Table  # Keep reference to table to prevent GC
     colmeta::Dict{Symbol, Vector{Pair{String, String}}}  # Column metadata with Iceberg field IDs
+    data_files::Union{DataFiles, Nothing}  # Track DataFiles for automatic cleanup
 end
 
 # Response type for writer creation
@@ -78,7 +83,7 @@ function DataFileWriter(table::Table; prefix::String="data")
         end
     end
 
-    return DataFileWriter(response.value, table, colmeta)
+    return DataFileWriter(response.value, table, colmeta, nothing)
 end
 """
     DataFileWriter(f::Function, table::Table; prefix::String="data") -> DataFiles
@@ -86,7 +91,9 @@ end
 Create a writer, pass it to `f` for writing, then close and free it.
 
 This provides a convenient way to write data with automatic cleanup,
-ensuring the writer is closed and freed even if an error occurs.
+ensuring the writer is closed and freed even if an error occurs. The
+returned `DataFiles` handle is detached from the writer and must be
+used in a transaction via `add_data_files`.
 
 # Arguments
 - `f`: A function that takes a `DataFileWriter` and writes data to it
@@ -94,7 +101,8 @@ ensuring the writer is closed and freed even if an error occurs.
 - `prefix::String`: Prefix for generated file names (default: "data")
 
 # Returns
-A `DataFiles` handle containing the written files.
+A `DataFiles` handle containing the written files. This handle will be
+automatically freed when passed to `add_data_files`.
 
 # Example
 ```julia
@@ -102,13 +110,24 @@ data_files = DataFileWriter(table) do writer
     write(writer, batch1)
     write(writer, batch2)
 end
+
+# Use the data files in a transaction
+transaction(table, catalog) do tx
+    with_fast_append(tx) do action
+        add_data_files(action, data_files)
+    end
+end
 ```
 """
 function DataFileWriter(f::Function, table::Table; prefix::String="data")
     writer = DataFileWriter(table; prefix=prefix)
     try
         f(writer)
-        return close_writer(writer)
+        data_files = close_writer(writer)
+        # Detach data_files from writer so they won't be freed when writer is freed
+        # The caller is responsible for these data_files now
+        writer.data_files = nothing
+        return data_files
     finally
         free_writer!(writer)
     end
@@ -119,10 +138,19 @@ end
 
 Free the memory associated with a data file writer.
 
+This also frees any `DataFiles` produced by `close_writer` that haven't been
+freed yet. This ensures that data files are always cleaned up, even if the
+user forgets to add them to a transaction.
+
 This should be called after the writer has been closed or if
 the writer is no longer needed.
 """
 function free_writer!(writer::DataFileWriter)
+    # Free any associated DataFiles first
+    if writer.data_files !== nothing
+        _free_data_files!(writer.data_files)
+        writer.data_files = nothing
+    end
     if writer.ptr == C_NULL
         return nothing
     end
@@ -219,8 +247,7 @@ with_fast_append(tx) do action
 end
 updated_table = commit(tx, catalog)
 
-free_data_files!(data_files)
-free_writer!(writer)
+free_writer!(writer)  # Also frees data_files
 ```
 """
 function close_writer(writer::DataFileWriter)
@@ -240,5 +267,7 @@ function close_writer(writer::DataFileWriter)
 
     @throw_on_error(response, "close_writer", IcebergException)
 
-    return DataFiles(response.value)
+    data_files = DataFiles(response.value)
+    writer.data_files = data_files  # Track for automatic cleanup
+    return data_files
 end

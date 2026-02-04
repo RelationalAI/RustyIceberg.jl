@@ -144,10 +144,7 @@ using Tables
 
     finally
         # Clean up all resources in reverse order
-        if data_files !== nothing && data_files.ptr != C_NULL
-            RustyIceberg.free_data_files!(data_files)
-            println("✅ DataFiles cleaned up")
-        end
+        # Note: data_files are automatically freed when the writer is freed
         if table != C_NULL
             RustyIceberg.free_table(table)
             println("✅ Table cleaned up")
@@ -305,12 +302,7 @@ end
 
     finally
         # Clean up all resources in reverse order
-        if data_files1 !== nothing && data_files1.ptr != C_NULL
-            RustyIceberg.free_data_files!(data_files1)
-        end
-        if data_files2 !== nothing && data_files2.ptr != C_NULL
-            RustyIceberg.free_data_files!(data_files2)
-        end
+        # Note: data_files are automatically freed when the writers are freed
         if table != C_NULL
             RustyIceberg.free_table(table)
             println("✅ Table cleaned up")
@@ -382,7 +374,7 @@ end
         write(writer, (id = Int64[1], name = ["test"]))
         data_files = RustyIceberg.close_writer(writer)
         @test data_files !== nothing
-        RustyIceberg.free_data_files!(data_files)
+        # Note: data_files will be freed when writer is freed
 
         error_caught = false
         try

@@ -156,11 +156,12 @@ end
 Add data files to a fast append action.
 
 This can be called multiple times to accumulate data files from multiple writers.
-The `data_files` handle is consumed by this operation.
+The `data_files` handle is consumed by this operation and marked as such
+(`data_files.ptr` is set to `C_NULL`).
 
 # Arguments
 - `action::FastAppendAction`: The action to add files to
-- `data_files::DataFiles`: The data files to add
+- `data_files::DataFiles`: The data files to add (consumed by this operation)
 
 # Throws
 - `IcebergException` if the operation fails
@@ -189,6 +190,11 @@ function add_data_files(action::FastAppendAction, data_files::DataFiles)
         end
         throw(IcebergException(error_msg))
     end
+
+    # Free the now-empty DataFiles container and mark as consumed
+    # The Rust side took the Vec<DataFile> contents via std::mem::take,
+    # but we still need to free the IcebergDataFiles struct itself
+    _free_data_files!(data_files)
 
     return nothing
 end
