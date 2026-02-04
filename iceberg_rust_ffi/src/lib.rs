@@ -25,6 +25,9 @@ mod table;
 // Transaction module
 mod transaction;
 
+// Writer module
+mod writer;
+
 // Response types module
 mod response;
 
@@ -44,6 +47,9 @@ pub use table::{
     IcebergTableResponse,
 };
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
+pub use writer::{
+    IcebergDataFileWriter, IcebergDataFileWriterResponse, IcebergWriterCloseResponse,
+};
 
 // We use `jl_adopt_thread` to ensure Rust can call into Julia when notifying
 // the Base.Event that is waiting for the Rust result.

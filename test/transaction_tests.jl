@@ -4,23 +4,15 @@ using Test
 @testset "Transaction API" begin
     println("Testing transaction API...")
 
-    catalog_uri = "http://localhost:8181/api/catalog"
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
 
     catalog = nothing
     table = C_NULL
     tx = nothing
 
     try
-        # Create catalog connection with MinIO S3 configuration
-        props = Dict(
-            "credential" => "root:s3cr3t",
-            "scope" => "PRINCIPAL_ROLE:ALL",
-            "warehouse" => "warehouse",
-            "s3.endpoint" => "http://localhost:9000",
-            "s3.access-key-id" => "root",
-            "s3.secret-access-key" => "password",
-            "s3.region" => "us-east-1"
-        )
+        # Create catalog connection
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         @test catalog !== nothing
         println("✅ Catalog created successfully")
@@ -90,7 +82,8 @@ end
 @testset "Transaction Error Handling" begin
     println("Testing transaction error handling...")
 
-    catalog_uri = "http://localhost:8181/api/catalog"
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
 
     catalog = nothing
     table = C_NULL
@@ -98,15 +91,6 @@ end
 
     try
         # Create catalog and load table
-        props = Dict(
-            "credential" => "root:s3cr3t",
-            "scope" => "PRINCIPAL_ROLE:ALL",
-            "warehouse" => "warehouse",
-            "s3.endpoint" => "http://localhost:9000",
-            "s3.access-key-id" => "root",
-            "s3.secret-access-key" => "password",
-            "s3.region" => "us-east-1"
-        )
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer")
 

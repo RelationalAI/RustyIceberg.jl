@@ -7,6 +7,9 @@ using HTTP
 using JSON
 using Base64
 
+# Include test configuration helper (provides get_catalog_uri, get_catalog_properties, etc.)
+include("test_config.jl")
+
 @testset "RustyIceberg.jl" begin
 
 # Include schema tests
@@ -31,6 +34,9 @@ include("scan_tests.jl")
 
 # Include transaction tests
 include("transaction_tests.jl")
+
+# Include writer tests
+include("writer_tests.jl")
 
 end # End of testset
 

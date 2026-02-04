@@ -10,18 +10,14 @@ using RustyIceberg: Field, Schema, PartitionSpec, SortOrder, PartitionField
 @testset "Catalog API" begin
     println("Testing catalog API...")
 
-    # Test connecting to Polaris REST catalog running at localhost:8181
+    # Test connecting to Polaris REST catalog
     # This requires the catalog to be running via docker-compose
-    catalog_uri = "http://localhost:8181/api/catalog"
+    catalog_uri = get_catalog_uri()
 
     catalog = nothing
     try
         # Test catalog creation with REST API and Polaris credentials
-        props = Dict(
-            "credential" => "root:s3cr3t",
-            "scope" => "PRINCIPAL_ROLE:ALL",
-            "warehouse" => "warehouse"
-        )
+        props = get_catalog_properties_minimal()
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         @test catalog !== nothing
         println("✅ Catalog created successfully at $catalog_uri with authentication")
@@ -85,16 +81,15 @@ end
     println("Testing catalog API with token-based authentication...")
 
     # Token endpoint
-    token_endpoint = "http://localhost:8181/api/catalog/v1/oauth/tokens"
-    catalog_uri = "http://localhost:8181/api/catalog"
+    catalog_uri = get_catalog_uri()
+    token_endpoint = get_token_endpoint()
 
     catalog = nothing
     try
         # Step 1: Fetch access token using client credentials
         println("Fetching access token...")
 
-        client_id = "root"
-        client_secret = "s3cr3t"
+        client_id, client_secret = get_polaris_credentials()
         realm = "POLARIS"
 
         # Make HTTP request to token endpoint with basic auth
@@ -174,12 +169,11 @@ end
     println("Testing catalog API with custom authenticator function...")
 
     # Token endpoint
-    token_endpoint = "http://localhost:8181/api/catalog/v1/oauth/tokens"
-    catalog_uri = "http://localhost:8181/api/catalog"
+    catalog_uri = get_catalog_uri()
+    token_endpoint = get_token_endpoint()
 
     # Client credentials
-    client_id = "root"
-    client_secret = "s3cr3t"
+    client_id, client_secret = get_polaris_credentials()
     realm = "POLARIS"
 
     # Create a custom authenticator function that fetches tokens on demand
@@ -335,7 +329,7 @@ end
 @testset "Catalog Table Loading" begin
     println("Testing catalog table loading...")
 
-    catalog_uri = "http://localhost:8181/api/catalog"
+    catalog_uri = get_catalog_uri()
 
     catalog = nothing
     table = C_NULL
@@ -346,15 +340,7 @@ end
     try
         # Create catalog connection with MinIO S3 configuration
         # Note: Use localhost since we're running from the host, not from within the Docker network
-        props = Dict(
-            "credential" => "root:s3cr3t",
-            "scope" => "PRINCIPAL_ROLE:ALL",
-            "warehouse" => "warehouse",
-            "s3.endpoint" => "http://localhost:9000",
-            "s3.access-key-id" => "root",
-            "s3.secret-access-key" => "password",
-            "s3.region" => "us-east-1"
-        )
+        props = get_catalog_properties()
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         @test catalog !== nothing
         println("✅ Catalog created successfully")
@@ -422,7 +408,7 @@ end
 @testset "Catalog Table Loading with Credentials" begin
     println("Testing catalog table loading with vended credentials...")
 
-    catalog_uri = "http://localhost:8181/api/catalog"
+    catalog_uri = get_catalog_uri()
 
     catalog = nothing
     table = C_NULL
@@ -433,14 +419,11 @@ end
     try
         # Create catalog connection WITHOUT S3 credentials
         # When using load_credentials=true, the catalog will provide vended credentials
-        props = Dict(
-            "credential" => "root:s3cr3t",
-            "scope" => "PRINCIPAL_ROLE:ALL",
-            "warehouse" => "warehouse",
-            # Note: We include s3.endpoint as we would get the domain name `minio` otherwise.
-            "s3.endpoint" => "http://localhost:9000",
-            "s3.region" => "us-east-1"
-        )
+        s3_config = get_s3_config()
+        props = get_catalog_properties_minimal()
+        # Note: We include s3.endpoint as we would get the domain name `minio` otherwise.
+        props["s3.endpoint"] = s3_config["endpoint"]
+        props["s3.region"] = s3_config["region"]
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         @test catalog !== nothing
         println("✅ Catalog created successfully")
@@ -509,7 +492,7 @@ end
 @testset "Catalog Incremental Scan" begin
     println("Testing catalog incremental scan...")
 
-    catalog_uri = "http://localhost:8181/api/catalog"
+    catalog_uri = get_catalog_uri()
 
     catalog = nothing
     table = C_NULL
@@ -519,15 +502,7 @@ end
 
     try
         # Create catalog connection with MinIO S3 configuration
-        props = Dict(
-            "credential" => "root:s3cr3t",
-            "scope" => "PRINCIPAL_ROLE:ALL",
-            "warehouse" => "warehouse",
-            "s3.endpoint" => "http://localhost:9000",
-            "s3.access-key-id" => "root",
-            "s3.secret-access-key" => "password",
-            "s3.region" => "us-east-1"
-        )
+        props = get_catalog_properties()
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         @test catalog !== nothing
         println("✅ Catalog created successfully")
@@ -640,21 +615,13 @@ end
 @testset "Catalog Table Creation" begin
     println("Testing catalog table creation...")
 
-    catalog_uri = "http://localhost:8181/api/catalog"
+    catalog_uri = get_catalog_uri()
 
     catalog = nothing
 
     try
         # Create catalog connection
-        props = Dict(
-            "credential" => "root:s3cr3t",
-            "scope" => "PRINCIPAL_ROLE:ALL",
-            "warehouse" => "warehouse",
-            "s3.endpoint" => "http://localhost:9000",
-            "s3.access-key-id" => "root",
-            "s3.secret-access-key" => "password",
-            "s3.region" => "us-east-1"
-        )
+        props = get_catalog_properties()
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         @test catalog !== nothing
         println("✅ Catalog created successfully")

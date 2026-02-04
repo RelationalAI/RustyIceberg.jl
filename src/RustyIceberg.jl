@@ -23,6 +23,7 @@ export Field, Schema, PartitionField, PartitionSpec, SortField, SortOrder
 export SchemaBuilder, add_field, with_identifier, build
 export schema_to_json, partition_spec_to_json, sort_order_to_json
 export Transaction, DataFiles, free_transaction!, free_data_files!, fast_append!, commit!
+export DataFileWriter, free_writer!, close_writer!
 
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:
@@ -307,6 +308,9 @@ include("data_file.jl")
 
 # Include transaction module
 include("transaction.jl")
+
+# Include writer module
+include("writer.jl")
 
 """
     IcebergException <: Exception
