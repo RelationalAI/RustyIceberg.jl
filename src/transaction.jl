@@ -16,8 +16,6 @@ mutable struct Transaction
     table::Table  # Keep reference to table to prevent GC
 end
 
-Base.unsafe_convert(::Type{Ptr{Cvoid}}, tx::Transaction) = tx.ptr
-
 """
     Transaction(table::Table) -> Transaction
 
