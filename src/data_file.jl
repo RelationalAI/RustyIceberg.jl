@@ -15,8 +15,6 @@ mutable struct DataFiles
     ptr::Ptr{Cvoid}
 end
 
-Base.unsafe_convert(::Type{Ptr{Cvoid}}, df::DataFiles) = df.ptr
-
 """
     free_data_files!(df::DataFiles)
 

@@ -21,8 +21,6 @@ mutable struct DataFileWriter
     colmeta::Dict{Symbol, Vector{Pair{String, String}}}  # Column metadata with Iceberg field IDs
 end
 
-Base.unsafe_convert(::Type{Ptr{Cvoid}}, w::DataFileWriter) = w.ptr
-
 # Response type for writer creation
 const DataFileWriterResponse = Response{Ptr{Cvoid}}
 
