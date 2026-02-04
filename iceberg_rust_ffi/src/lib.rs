@@ -22,6 +22,9 @@ mod catalog;
 // Table and streaming module
 mod table;
 
+// Transaction module
+mod transaction;
+
 // Response types module
 mod response;
 
@@ -40,6 +43,7 @@ pub use table::{
     ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse, IcebergTable,
     IcebergTableResponse,
 };
+pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
 
 // We use `jl_adopt_thread` to ensure Rust can call into Julia when notifying
 // the Base.Event that is waiting for the Rust result.

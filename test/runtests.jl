@@ -29,6 +29,9 @@ include("catalog_tests.jl")
 # Include scan tests after runtime initialization
 include("scan_tests.jl")
 
+# Include transaction tests
+include("transaction_tests.jl")
+
 end # End of testset
 
 println("\n🎉 All tests completed!")

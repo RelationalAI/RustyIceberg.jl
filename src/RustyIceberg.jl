@@ -22,6 +22,7 @@ export load_table, list_tables, list_namespaces, table_exists, create_table, dro
 export Field, Schema, PartitionField, PartitionSpec, SortField, SortOrder
 export SchemaBuilder, add_field, with_identifier, build
 export schema_to_json, partition_spec_to_json, sort_order_to_json
+export Transaction, DataFiles, free_transaction!, free_data_files!, fast_append!, commit!
 
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:
@@ -300,6 +301,9 @@ include("schema.jl")
 
 # Include catalog module
 include("catalog.jl")
+
+# Include transaction module
+include("transaction.jl")
 
 """
     IcebergException <: Exception
