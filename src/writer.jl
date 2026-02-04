@@ -84,7 +84,7 @@ const WriterCloseResponse = Response{Ptr{Cvoid}}
 
 """
     DataFileWriter(table::Table, config::WriterConfig) -> DataFileWriter
-    DataFileWriter(table::Table; prefix="data", target_file_size_bytes=512MB, compression=SNAPPY) -> DataFileWriter
+    DataFileWriter(table::Table; prefix="data", target_file_size_bytes=512MB, compression=UNCOMPRESSED) -> DataFileWriter
 
 Create a new data file writer for the given table.
 
@@ -98,7 +98,7 @@ Files are named using the prefix (e.g., "data-xxx.parquet").
 Or use keyword arguments:
 - `prefix::String`: Prefix for output file names (default: "data")
 - `target_file_size_bytes::Int`: Target file size before rolling (default: 512 MB)
-- `compression::CompressionCodec`: Compression codec (default: SNAPPY)
+- `compression::CompressionCodec`: Compression codec (default: UNCOMPRESSED)
 
 # Returns
 A new `DataFileWriter` handle that must be freed with `free_writer!`.
@@ -153,7 +153,7 @@ end
 function DataFileWriter(table::Table;
     prefix::String="data",
     target_file_size_bytes::Int=DEFAULT_TARGET_FILE_SIZE_BYTES,
-    compression::CompressionCodec=SNAPPY
+    compression::CompressionCodec=UNCOMPRESSED
 )
     config = WriterConfig(prefix=prefix, target_file_size_bytes=target_file_size_bytes, compression=compression)
     return DataFileWriter(table, config)
@@ -177,7 +177,7 @@ used in a transaction via `add_data_files`.
 Or use keyword arguments:
 - `prefix::String`: Prefix for generated file names (default: "data")
 - `target_file_size_bytes::Int`: Target file size before rolling (default: 512 MB)
-- `compression::CompressionCodec`: Compression codec (default: SNAPPY)
+- `compression::CompressionCodec`: Compression codec (default: UNCOMPRESSED)
 
 # Returns
 A `DataFiles` handle containing the written files. This handle will be
@@ -223,7 +223,7 @@ end
 function DataFileWriter(f::Function, table::Table;
     prefix::String="data",
     target_file_size_bytes::Int=DEFAULT_TARGET_FILE_SIZE_BYTES,
-    compression::CompressionCodec=SNAPPY
+    compression::CompressionCodec=UNCOMPRESSED
 )
     config = WriterConfig(prefix=prefix, target_file_size_bytes=target_file_size_bytes, compression=compression)
     return DataFileWriter(f, table, config)
