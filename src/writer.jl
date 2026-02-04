@@ -37,7 +37,7 @@ Configuration options for the DataFileWriter.
 # Fields
 - `prefix::String`: Prefix for output file names (default: "data")
 - `target_file_size_bytes::Int`: Target size for rolling to a new file (default: 512 MB)
-- `compression::CompressionCodec`: Compression codec for Parquet files (default: SNAPPY)
+- `compression::CompressionCodec`: Compression codec for Parquet files (default: UNCOMPRESSED)
 
 # Example
 ```julia
@@ -53,7 +53,7 @@ writer = DataFileWriter(table, config)
 @kwdef struct WriterConfig
     prefix::String = "data"
     target_file_size_bytes::Int = DEFAULT_TARGET_FILE_SIZE_BYTES
-    compression::CompressionCodec = SNAPPY
+    compression::CompressionCodec = UNCOMPRESSED
 end
 
 """
