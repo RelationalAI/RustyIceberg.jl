@@ -472,11 +472,13 @@ end
 
         # Create an Arrow.Table and write it
         println("\nTest: Writing Arrow.Table...")
-        arrow_table = Arrow.Table(
+        # Create Arrow.Table by serializing a NamedTuple to Arrow IPC and reading it back
+        test_data = (
             id = Int64[10, 20, 30],
             name = ["Arrow", "Table", "Test"],
             value = [10.1, 20.2, 30.3]
         )
+        arrow_table = Arrow.Table(Arrow.tobuffer(test_data))
         @test arrow_table isa Arrow.Table
         println("✅ Arrow.Table created")
 
