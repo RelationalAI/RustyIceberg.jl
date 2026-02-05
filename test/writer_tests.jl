@@ -472,15 +472,22 @@ end
 
         # Create an Arrow.Table and write it
         println("\nTest: Writing Arrow.Table...")
-        # Create Arrow.Table by serializing a NamedTuple to Arrow IPC and reading it back
+        # Create Arrow.Table with proper Iceberg field ID metadata
+        # This simulates an Arrow table that was created with correct metadata
         test_data = (
             id = Int64[10, 20, 30],
             name = ["Arrow", "Table", "Test"],
             value = [10.1, 20.2, 30.3]
         )
-        arrow_table = Arrow.Table(Arrow.tobuffer(test_data))
+        # Include field ID metadata matching the Iceberg schema (id=1, name=2, value=3)
+        colmeta = Dict(
+            :id => ["PARQUET:field_id" => "1"],
+            :name => ["PARQUET:field_id" => "2"],
+            :value => ["PARQUET:field_id" => "3"]
+        )
+        arrow_table = Arrow.Table(Arrow.tobuffer(test_data; colmetadata=colmeta))
         @test arrow_table isa Arrow.Table
-        println("✅ Arrow.Table created")
+        println("✅ Arrow.Table created with field ID metadata")
 
         data_files = RustyIceberg.DataFileWriter(table) do writer
             # Write the Arrow.Table directly
