@@ -258,14 +258,14 @@ end
 """
     write(writer::DataFileWriter, data)
 
-Write Arrow data to the writer.
+Write data to the writer.
 
 The data is serialized to Arrow IPC format and written to Parquet files.
-Multiple calls to `write` accumulate data until `close_writer!` is called.
+Multiple calls to `write` accumulate data until `close_writer` is called.
 
 # Arguments
 - `writer::DataFileWriter`: The writer to write to
-- `data`: Arrow-compatible data (anything that Arrow.tobuffer can serialize)
+- `data`: Arrow-compatible data (anything that Arrow.write can serialize, e.g. NamedTuple, DataFrame)
 
 # Throws
 - `IcebergException` if the write fails
@@ -291,6 +291,51 @@ function Base.write(writer::DataFileWriter, data)
     io = IOBuffer()
     Arrow.write(io, data; colmetadata=writer.colmeta)
     ipc_bytes = take!(io)
+
+    _write_ipc_bytes(writer, ipc_bytes)
+end
+
+"""
+    write(writer::DataFileWriter, table::Arrow.Table)
+
+Write an Arrow.Table to the writer.
+
+This method accepts an already-constructed Arrow.Table and serializes it to IPC format
+for writing. Field ID metadata is added automatically to match the Iceberg schema.
+
+# Arguments
+- `writer::DataFileWriter`: The writer to write to
+- `table::Arrow.Table`: An Arrow table to write
+
+# Throws
+- `IcebergException` if the write fails
+
+# Example
+```julia
+# Write an Arrow.Table directly
+arrow_table = Arrow.Table(id=[1, 2, 3], name=["a", "b", "c"])
+write(writer, arrow_table)
+
+# Or from reading an Arrow file
+arrow_table = Arrow.Table(read("data.arrow"))
+write(writer, arrow_table)
+```
+"""
+function Base.write(writer::DataFileWriter, table::Arrow.Table)
+    if writer.ptr == C_NULL
+        throw(IcebergException("Writer has been freed"))
+    end
+
+    # Serialize Arrow.Table to IPC format with field ID metadata
+    io = IOBuffer()
+    Arrow.write(io, table; colmetadata=writer.colmeta)
+    ipc_bytes = take!(io)
+
+    _write_ipc_bytes(writer, ipc_bytes)
+end
+
+# Internal helper to write raw IPC bytes to the Rust writer
+function _write_ipc_bytes(writer::DataFileWriter, ipc_bytes::Vector{UInt8})
     ipc_data = pointer(ipc_bytes)
     ipc_len = length(ipc_bytes)
 
