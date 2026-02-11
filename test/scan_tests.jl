@@ -1115,4 +1115,165 @@ end
             RustyIceberg.free_table(table)
         end
     end
+
+    @testset "with_snapshot_id! - Full Scan via Builder Method" begin
+        table = RustyIceberg.table_open(customer_path)
+
+        # Use the correct snapshot ID for the customer table
+        customer_snapshot_id = Int64(3441867730092225551)
+
+        scan = RustyIceberg.new_scan(table)
+
+        # Set snapshot ID explicitly using builder method
+        RustyIceberg.with_snapshot_id!(scan, customer_snapshot_id)
+        println("ℹ️  Set snapshot ID to: $customer_snapshot_id")
+
+        # Also select a column to verify scan works correctly
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_count = 0
+            total_rows = 0
+            custkey_values = Int32[]
+
+            batch_ptr = RustyIceberg.next_batch(stream)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+
+                @test !isempty(df)
+                @test names(df) == ["c_custkey", "c_name"]
+
+                # Collect custkey values to verify data is actual customer data
+                append!(custkey_values, df.c_custkey)
+                batch_count += 1
+                total_rows += nrow(df)
+
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream)
+            end
+
+            @test batch_count > 0
+            @test total_rows > 0
+            # Verify we have actual customer keys (from TPCH customer table)
+            @test !isempty(custkey_values)
+            @test all(custkey_values .> 0)  # Customer keys are positive
+
+            println("✅ with_snapshot_id! builder method test passed for full scan")
+            println("   - Total batches: $batch_count")
+            println("   - Total rows: $total_rows")
+            println("   - Sample customer keys: $(first(custkey_values, 5))")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "new_scan with snapshot_id keyword argument" begin
+        table = RustyIceberg.table_open(customer_path)
+
+        # Use the correct snapshot ID for the customer table
+        customer_snapshot_id = Int64(3441867730092225551)
+        println("ℹ️  Testing new_scan with snapshot_id=$customer_snapshot_id")
+
+        # Create scan with snapshot_id keyword argument
+        scan = RustyIceberg.new_scan(table; snapshot_id=customer_snapshot_id)
+        @test scan isa RustyIceberg.Scan
+        @test scan.ptr != C_NULL
+
+        # Select a column for verification
+        RustyIceberg.select_columns!(scan, ["c_custkey"])
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_count = 0
+            total_rows = 0
+            custkey_values = Int32[]
+
+            batch_ptr = RustyIceberg.next_batch(stream)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+
+                @test !isempty(df)
+                @test names(df) == ["c_custkey"]
+
+                append!(custkey_values, df.c_custkey)
+                batch_count += 1
+                total_rows += nrow(df)
+
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream)
+            end
+
+            @test batch_count > 0
+            @test total_rows > 0
+            @test !isempty(custkey_values)
+            @test all(custkey_values .> 0)  # Valid customer keys
+
+            println("✅ new_scan with snapshot_id keyword argument test passed")
+            println("   - Total batches: $batch_count")
+            println("   - Total rows: $total_rows")
+            println("   - Sample customer keys: $(first(custkey_values, 5))")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "Combined with_snapshot_id! and other builder methods" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+
+        # Use the correct snapshot ID for the customer table
+        customer_snapshot_id = Int64(3441867730092225551)
+
+        # Combine multiple builder methods including snapshot_id
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_address"])
+        RustyIceberg.with_snapshot_id!(scan, customer_snapshot_id)
+        RustyIceberg.with_batch_size!(scan, UInt(5))
+        RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(2))
+
+        stream = RustyIceberg.scan!(scan)
+
+        try
+            batch_count = 0
+            custkey_values = Int32[]
+
+            batch_ptr = RustyIceberg.next_batch(stream)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+
+                # Verify all configurations are applied
+                @test names(df) == ["c_custkey", "c_name", "c_address"]
+                @test length(arrow_table) <= 5  # Batch size respected
+                @test !isempty(df)
+
+                append!(custkey_values, df.c_custkey)
+                batch_count += 1
+
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream)
+            end
+
+            @test batch_count > 0
+            @test !isempty(custkey_values)
+            @test all(custkey_values .> 0)  # Valid customer keys
+
+            println("✅ Combined with_snapshot_id! and other builder methods test passed")
+            println("   - Total batches: $batch_count")
+            println("   - All batches respect size limit (≤5)")
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
 end

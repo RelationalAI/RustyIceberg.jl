@@ -73,6 +73,13 @@ impl_with_serialization_concurrency_limit!(
     IcebergScan
 );
 
+impl_scan_builder_method!(
+    iceberg_scan_with_snapshot_id,
+    IcebergScan,
+    snapshot_id,
+    snapshot_id: i64
+);
+
 // Async function to initialize stream from a table scan
 export_runtime_op!(
     iceberg_arrow_stream,

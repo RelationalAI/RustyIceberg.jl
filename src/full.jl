@@ -27,13 +27,33 @@ mutable struct Scan
 end
 
 """
-    new_scan(table::Table) -> Scan
+    new_scan(table::Table; snapshot_id::Union{Int64, Nothing} = nothing) -> Scan
 
 Create a scan for the given table.
+
+# Arguments
+- `table::Table`: The table to scan
+- `snapshot_id::Union{Int64, Nothing}`: Optional snapshot ID to scan. If not specified, scans the current snapshot.
+
+# Example
+```julia
+table = table_open("s3://path/to/table/metadata.json")
+# Scan the current snapshot
+scan = new_scan(table)
+# Or scan a specific snapshot by ID
+scan = new_scan(table; snapshot_id=Int64(123))
+```
 """
-function new_scan(table::Table)
+function new_scan(table::Table; snapshot_id::Union{Int64, Nothing} = nothing)
     scan_ptr = @ccall rust_lib.iceberg_new_scan(table::Table)::Ptr{Cvoid}
-    return Scan(scan_ptr)
+    scan = Scan(scan_ptr)
+
+    # If snapshot_id is specified, set it on the scan
+    if snapshot_id !== nothing
+        with_snapshot_id!(scan, snapshot_id)
+    end
+
+    return scan
 end
 
 """
@@ -202,6 +222,36 @@ function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
 
     if result != 0
         throw(IcebergException("Failed to set serialization concurrency limit", result))
+    end
+    return nothing
+end
+
+"""
+    with_snapshot_id!(scan::Scan, snapshot_id::Int64)
+
+Set the snapshot ID for the scan.
+
+By default, a scan uses the current (latest) snapshot of the table. This method allows
+you to scan a specific snapshot by ID, which is useful for reading historical data or
+comparing data across different points in time.
+
+# Example
+```julia
+table = table_open("s3://path/to/table/metadata.json")
+# List available snapshots (if method is available)
+scan = new_scan(table)
+with_snapshot_id!(scan, Int64(123))  # Scan snapshot with ID 123
+stream = scan!(scan)
+```
+"""
+function with_snapshot_id!(scan::Scan, snapshot_id::Int64)
+    result = @ccall rust_lib.iceberg_scan_with_snapshot_id(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        snapshot_id::Int64
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set snapshot ID", result))
     end
     return nothing
 end
