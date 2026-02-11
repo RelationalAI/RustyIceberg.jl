@@ -207,6 +207,36 @@ function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
 end
 
 """
+    with_snapshot_id!(scan::Scan, snapshot_id::Int64)
+
+Set the snapshot ID for the scan.
+
+By default, a scan uses the current (latest) snapshot of the table. This method allows
+you to scan a specific snapshot by ID, which is useful for reading historical data or
+comparing data across different points in time.
+
+# Example
+```julia
+table = table_open("s3://path/to/table/metadata.json")
+# List available snapshots (if method is available)
+scan = new_scan(table)
+with_snapshot_id!(scan, Int64(123))  # Scan snapshot with ID 123
+stream = scan!(scan)
+```
+"""
+function with_snapshot_id!(scan::Scan, snapshot_id::Int64)
+    result = @ccall rust_lib.iceberg_scan_with_snapshot_id(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        snapshot_id::Int64
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set snapshot ID", result))
+    end
+    return nothing
+end
+
+"""
     build!(scan::Scan)
 
 Build the provided table scan object.
