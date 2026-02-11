@@ -31,6 +31,18 @@ jobs:
       AWS_SECRET_ACCESS_KEY: password
       AWS_ENDPOINT_URL: http://localhost:9000
       AWS_REGION: us-east-1
+      # Polaris catalog configuration for tests
+      POLARIS_CATALOG_URI: http://localhost:8181/api/catalog
+      POLARIS_TOKEN_ENDPOINT: http://localhost:8181/api/catalog/v1/oauth/tokens
+      POLARIS_CLIENT_ID: root
+      POLARIS_CLIENT_SECRET: s3cr3t
+      POLARIS_REALM: POLARIS
+      ICEBERG_WAREHOUSE: warehouse
+      # S3/MinIO configuration for tests
+      S3_ENDPOINT: http://localhost:9000
+      S3_ACCESS_KEY_ID: root
+      S3_SECRET_ACCESS_KEY: password
+      S3_REGION: us-east-1
     runs-on: ${{ inputs.os }}
     steps:
       - uses: actions/checkout@v3.5.0

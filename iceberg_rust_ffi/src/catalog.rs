@@ -206,6 +206,13 @@ impl IcebergCatalog {
             .expect("catalog should be initialized")
     }
 
+    /// Get a reference to the underlying RestCatalog for transaction commit.
+    ///
+    /// Returns Some(&RestCatalog) if initialized, None otherwise.
+    pub fn get_catalog(&self) -> Option<&RestCatalog> {
+        self.catalog.as_ref().map(|c| c.as_ref())
+    }
+
     /// Load a table by namespace and name
     pub async fn load_table(
         &self,
