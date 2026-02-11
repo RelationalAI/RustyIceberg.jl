@@ -83,6 +83,44 @@ const DataFileWriterResponse = Response{Ptr{Cvoid}}
 const WriterCloseResponse = Response{Ptr{Cvoid}}
 
 """
+    get_column_metadata(table::Table) -> Dict{Symbol, Vector{Pair{String, String}}}
+
+Extract column metadata with Iceberg field IDs from a table's schema.
+
+This function retrieves the table's schema and builds a metadata dictionary
+that maps column names (as symbols) to their Iceberg field IDs. This metadata
+is essential for writing Arrow tables with proper field ID information.
+
+# Arguments
+- `table::Table`: The Iceberg table to extract the schema from
+
+# Returns
+A dictionary mapping column names (Symbol) to metadata pairs containing
+the PARQUET field ID for each column.
+
+# Example
+```julia
+table = load_table(catalog, ["db"], "users")
+colmeta = get_column_metadata(table)
+# Use colmeta with Arrow.Table creation
+arrow_table = Arrow.Table(Arrow.tobuffer(data; colmetadata=colmeta))
+```
+"""
+function get_column_metadata(table::Table)::Dict{Symbol, Vector{Pair{String, String}}}
+    schema_json = table_schema(table)
+    schema = JSON.parse(schema_json)
+    colmeta = Dict{Symbol, Vector{Pair{String, String}}}()
+    if haskey(schema, "fields")
+        for field in schema["fields"]
+            if haskey(field, "name") && haskey(field, "id")
+                colmeta[Symbol(field["name"])] = [PARQUET_FIELD_ID_META_KEY => string(field["id"])]
+            end
+        end
+    end
+    return colmeta
+end
+
+"""
     DataFileWriter(table::Table, config::WriterConfig) -> DataFileWriter
     DataFileWriter(table::Table; prefix="data", target_file_size_bytes=512MB, compression=UNCOMPRESSED) -> DataFileWriter
 
@@ -135,16 +173,7 @@ function DataFileWriter(table::Table, config::WriterConfig)
 
     # Get the table schema and build column metadata with Iceberg field IDs
     # This metadata is added to Arrow IPC data so iceberg-rust can match fields
-    schema_json = table_schema(table)
-    schema = JSON.parse(schema_json)
-    colmeta = Dict{Symbol, Vector{Pair{String, String}}}()
-    if haskey(schema, "fields")
-        for field in schema["fields"]
-            if haskey(field, "name") && haskey(field, "id")
-                colmeta[Symbol(field["name"])] = [PARQUET_FIELD_ID_META_KEY => string(field["id"])]
-            end
-        end
-    end
+    colmeta = get_column_metadata(table)
 
     return DataFileWriter(response.value, table, colmeta, nothing)
 end
@@ -159,8 +188,8 @@ function DataFileWriter(table::Table;
     return DataFileWriter(table, config)
 end
 """
-    DataFileWriter(f::Function, table::Table, config::WriterConfig) -> DataFiles
-    DataFileWriter(f::Function, table::Table; prefix="data", ...) -> DataFiles
+    with_data_file_writer(f::Function, table::Table, config::WriterConfig) -> DataFiles
+    with_data_file_writer(f::Function, table::Table; prefix="data", ...) -> DataFiles
 
 Create a writer, pass it to `f` for writing, then close and free it.
 
@@ -186,26 +215,26 @@ automatically freed when passed to `add_data_files`.
 # Example
 ```julia
 # Using keyword arguments
-data_files = DataFileWriter(table; compression=ZSTD) do writer
+data_files = with_data_file_writer(table; compression=ZSTD) do writer
     write(writer, batch1)
     write(writer, batch2)
 end
 
 # Using WriterConfig
 config = WriterConfig(compression=ZSTD)
-data_files = DataFileWriter(table, config) do writer
+data_files = with_data_file_writer(table, config) do writer
     write(writer, batch1)
 end
 
 # Use the data files in a transaction
-transaction(table, catalog) do tx
+with_transaction(table, catalog) do tx
     with_fast_append(tx) do action
         add_data_files(action, data_files)
     end
 end
 ```
 """
-function DataFileWriter(f::Function, table::Table, config::WriterConfig)
+function with_data_file_writer(f::Function, table::Table, config::WriterConfig)
     writer = DataFileWriter(table, config)
     try
         f(writer)
@@ -220,13 +249,13 @@ function DataFileWriter(f::Function, table::Table, config::WriterConfig)
 end
 
 # Convenience do-block constructor with keyword arguments
-function DataFileWriter(f::Function, table::Table;
+function with_data_file_writer(f::Function, table::Table;
     prefix::String="data",
     target_file_size_bytes::Int=DEFAULT_TARGET_FILE_SIZE_BYTES,
     compression::CompressionCodec=UNCOMPRESSED
 )
     config = WriterConfig(prefix=prefix, target_file_size_bytes=target_file_size_bytes, compression=compression)
-    return DataFileWriter(f, table, config)
+    return with_data_file_writer(f, table, config)
 end
 
 """

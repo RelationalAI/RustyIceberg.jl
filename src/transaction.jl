@@ -45,7 +45,60 @@ function Transaction(table::Table)
 end
 
 """
-    transaction(f::Function, table::Table, catalog::Catalog) -> Table
+    commit(tx::Transaction, catalog::Catalog) -> Table
+
+Commit a transaction to the catalog.
+
+This consumes the transaction and returns the updated table. After calling this,
+the transaction handle should be freed with `free_transaction!` but the
+transaction itself has been consumed and cannot be used again.
+
+# Arguments
+- `tx::Transaction`: The transaction to commit
+- `catalog::Catalog`: The catalog to commit the transaction to
+
+# Returns
+The updated `Table` after the transaction has been committed.
+
+# Throws
+- `IcebergException` if the commit fails
+
+# Example
+```julia
+tx = Transaction(table)
+fast_append(tx, data_files)
+updated_table = commit(tx, catalog)
+free_transaction!(tx)
+# Now use updated_table for subsequent operations
+```
+"""
+function commit(tx::Transaction, catalog::Catalog)
+    if tx.ptr == C_NULL
+        throw(IcebergException("Transaction has been freed or consumed"))
+    end
+    if catalog.ptr == C_NULL
+        throw(IcebergException("Catalog has been freed"))
+    end
+
+    response = TableResponse()
+
+    async_ccall(response, tx, catalog) do handle
+        @ccall rust_lib.iceberg_transaction_commit(
+            tx.ptr::Ptr{Cvoid},
+            catalog.ptr::Ptr{Cvoid},
+            response::Ref{TableResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "commit", IcebergException)
+
+    return response.value
+end
+
+
+"""
+    with_transaction(f::Function, table::Table, catalog::Catalog) -> Table
 
 Create a transaction, pass it to `f`, then commit and return the updated table.
 
@@ -62,14 +115,14 @@ The updated `Table` after the transaction has been committed.
 
 # Example
 ```julia
-updated_table = transaction(table, catalog) do tx
+updated_table = with_transaction(table, catalog) do tx
     with_fast_append(tx) do action
         add_data_files(action, data_files)
     end
 end
 ```
 """
-function transaction(f::Function, table::Table, catalog::Catalog)
+function with_transaction(f::Function, table::Table, catalog::Catalog)
     tx = Transaction(table)
     try
         f(tx)
@@ -172,27 +225,29 @@ function add_data_files(action::FastAppendAction, data_files::DataFiles)
         throw(IcebergException("DataFiles has been freed or consumed"))
     end
 
-    error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    try
+        error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
 
-    result = @ccall rust_lib.iceberg_fast_append_action_add_data_files(
-        action.ptr::Ptr{Cvoid},
-        data_files.ptr::Ptr{Cvoid},
-        error_message_ptr::Ref{Ptr{Cchar}}
-    )::Cint
+        result = @ccall rust_lib.iceberg_fast_append_action_add_data_files(
+            action.ptr::Ptr{Cvoid},
+            data_files.ptr::Ptr{Cvoid},
+            error_message_ptr::Ref{Ptr{Cchar}}
+        )::Cint
 
-    if result != 0
-        error_msg = "add_data_files failed"
-        if error_message_ptr[] != C_NULL
-            error_msg = unsafe_string(error_message_ptr[])
-            @ccall rust_lib.iceberg_destroy_cstring(error_message_ptr[]::Ptr{Cchar})::Cint
+        if result != 0
+            error_msg = "add_data_files failed"
+            if error_message_ptr[] != C_NULL
+                error_msg = unsafe_string(error_message_ptr[])
+                @ccall rust_lib.iceberg_destroy_cstring(error_message_ptr[]::Ptr{Cchar})::Cint
+            end
+            throw(IcebergException(error_msg))
         end
-        throw(IcebergException(error_msg))
+    finally
+        # Free the now-empty DataFiles container and mark as consumed
+        # The Rust side took the Vec<DataFile> contents via std::mem::take,
+        # but we still need to free the IcebergDataFiles struct itself
+        free_data_files!(data_files)
     end
-
-    # Free the now-empty DataFiles container and mark as consumed
-    # The Rust side took the Vec<DataFile> contents via std::mem::take,
-    # but we still need to free the IcebergDataFiles struct itself
-    free_data_files!(data_files)
 
     return nothing
 end
@@ -272,56 +327,4 @@ function with_fast_append(f::Function, tx::Transaction)
         free_fast_append_action!(action)
     end
     return nothing
-end
-
-"""
-    commit(tx::Transaction, catalog::Catalog) -> Table
-
-Commit a transaction to the catalog.
-
-This consumes the transaction and returns the updated table. After calling this,
-the transaction handle should be freed with `free_transaction!` but the
-transaction itself has been consumed and cannot be used again.
-
-# Arguments
-- `tx::Transaction`: The transaction to commit
-- `catalog::Catalog`: The catalog to commit the transaction to
-
-# Returns
-The updated `Table` after the transaction has been committed.
-
-# Throws
-- `IcebergException` if the commit fails
-
-# Example
-```julia
-tx = Transaction(table)
-fast_append(tx, data_files)
-updated_table = commit(tx, catalog)
-free_transaction!(tx)
-# Now use updated_table for subsequent operations
-```
-"""
-function commit(tx::Transaction, catalog::Catalog)
-    if tx.ptr == C_NULL
-        throw(IcebergException("Transaction has been freed or consumed"))
-    end
-    if catalog.ptr == C_NULL
-        throw(IcebergException("Catalog has been freed"))
-    end
-
-    response = TableResponse()
-
-    async_ccall(response, tx, catalog) do handle
-        @ccall rust_lib.iceberg_transaction_commit(
-            tx.ptr::Ptr{Cvoid},
-            catalog.ptr::Ptr{Cvoid},
-            response::Ref{TableResponse},
-            handle::Ptr{Cvoid}
-        )::Cint
-    end
-
-    @throw_on_error(response, "commit", IcebergException)
-
-    return response.value
 end

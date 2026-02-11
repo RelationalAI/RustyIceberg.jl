@@ -45,7 +45,7 @@ using Tables
 
         # Test 1-4: Create writer, write data, close writer using do-block
         println("\nTest 1-4: Creating writer, writing data, closing writer...")
-        data_files = RustyIceberg.DataFileWriter(table) do writer
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
             @test writer !== nothing
             @test writer.ptr != C_NULL
             println("✅ Writer created successfully")
@@ -74,7 +74,7 @@ using Tables
 
         # Test 5: Create transaction and append data files
         println("\nTest 5: Committing data files via transaction...")
-        updated_table = RustyIceberg.transaction(table, catalog) do tx
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
             RustyIceberg.with_fast_append(tx) do action
                 RustyIceberg.add_data_files(action, data_files)
             end
@@ -215,7 +215,7 @@ end
         # Test: Create two writers and write different data using do-blocks
         # Use different prefixes to ensure each writer writes to a different file
         println("\nCreating writer1 and writing data...")
-        data_files1 = RustyIceberg.DataFileWriter(table; prefix="data1") do writer
+        data_files1 = RustyIceberg.with_data_file_writer(table; prefix="data1") do writer
             data1 = (
                 id = Int64[1, 2, 3],
                 name = ["Alice", "Bob", "Charlie"],
@@ -227,7 +227,7 @@ end
         println("✅ Writer1 closed, got DataFiles handle")
 
         println("\nCreating writer2 and writing data...")
-        data_files2 = RustyIceberg.DataFileWriter(table; prefix="data2") do writer
+        data_files2 = RustyIceberg.with_data_file_writer(table; prefix="data2") do writer
             data2 = (
                 id = Int64[4, 5, 6],
                 name = ["Diana", "Eve", "Frank"],
@@ -240,7 +240,7 @@ end
 
         # Create ONE transaction and use with_fast_append to add both data file sets
         println("\nCreating transaction with with_fast_append...")
-        updated_table = RustyIceberg.transaction(table, catalog) do tx
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
             RustyIceberg.with_fast_append(tx) do action
                 RustyIceberg.add_data_files(action, data_files1)
                 println("✅ First data files added to action")
@@ -472,24 +472,19 @@ end
 
         # Create an Arrow.Table and write it
         println("\nTest: Writing Arrow.Table...")
-        # Create Arrow.Table with proper Iceberg field ID metadata
-        # This simulates an Arrow table that was created with correct metadata
+        # Create Arrow.Table with proper Iceberg field ID metadata from the table schema
         test_data = (
             id = Int64[10, 20, 30],
             name = ["Arrow", "Table", "Test"],
             value = [10.1, 20.2, 30.3]
         )
-        # Include field ID metadata matching the Iceberg schema (id=1, name=2, value=3)
-        colmeta = Dict(
-            :id => ["PARQUET:field_id" => "1"],
-            :name => ["PARQUET:field_id" => "2"],
-            :value => ["PARQUET:field_id" => "3"]
-        )
+        # Get field ID metadata directly from the table schema
+        colmeta = RustyIceberg.get_column_metadata(table)
         arrow_table = Arrow.Table(Arrow.tobuffer(test_data; colmetadata=colmeta))
         @test arrow_table isa Arrow.Table
-        println("✅ Arrow.Table created with field ID metadata")
+        println("✅ Arrow.Table created with field ID metadata from table schema")
 
-        data_files = RustyIceberg.DataFileWriter(table) do writer
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
             # Write the Arrow.Table directly
             write(writer, arrow_table)
             println("✅ Arrow.Table written successfully")
@@ -500,7 +495,7 @@ end
 
         # Commit the data
         println("\nCommitting data files via transaction...")
-        updated_table = RustyIceberg.transaction(table, catalog) do tx
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
             RustyIceberg.with_fast_append(tx) do action
                 RustyIceberg.add_data_files(action, data_files)
             end
