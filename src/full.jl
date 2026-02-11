@@ -27,33 +27,13 @@ mutable struct Scan
 end
 
 """
-    new_scan(table::Table; snapshot_id::Union{Int64, Nothing} = nothing) -> Scan
+    new_scan(table::Table) -> Scan
 
 Create a scan for the given table.
-
-# Arguments
-- `table::Table`: The table to scan
-- `snapshot_id::Union{Int64, Nothing}`: Optional snapshot ID to scan. If not specified, scans the current snapshot.
-
-# Example
-```julia
-table = table_open("s3://path/to/table/metadata.json")
-# Scan the current snapshot
-scan = new_scan(table)
-# Or scan a specific snapshot by ID
-scan = new_scan(table; snapshot_id=Int64(123))
-```
 """
-function new_scan(table::Table; snapshot_id::Union{Int64, Nothing} = nothing)
+function new_scan(table::Table)
     scan_ptr = @ccall rust_lib.iceberg_new_scan(table::Table)::Ptr{Cvoid}
-    scan = Scan(scan_ptr)
-
-    # If snapshot_id is specified, set it on the scan
-    if snapshot_id !== nothing
-        with_snapshot_id!(scan, snapshot_id)
-    end
-
-    return scan
+    return Scan(scan_ptr)
 end
 
 """

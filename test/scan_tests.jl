@@ -1172,60 +1172,6 @@ end
         end
     end
 
-    @testset "new_scan with snapshot_id keyword argument" begin
-        table = RustyIceberg.table_open(customer_path)
-
-        # Use the correct snapshot ID for the customer table
-        customer_snapshot_id = Int64(3441867730092225551)
-        println("ℹ️  Testing new_scan with snapshot_id=$customer_snapshot_id")
-
-        # Create scan with snapshot_id keyword argument
-        scan = RustyIceberg.new_scan(table; snapshot_id=customer_snapshot_id)
-        @test scan isa RustyIceberg.Scan
-        @test scan.ptr != C_NULL
-
-        # Select a column for verification
-        RustyIceberg.select_columns!(scan, ["c_custkey"])
-        stream = RustyIceberg.scan!(scan)
-
-        try
-            batch_count = 0
-            total_rows = 0
-            custkey_values = Int32[]
-
-            batch_ptr = RustyIceberg.next_batch(stream)
-            while batch_ptr != C_NULL
-                batch = unsafe_load(batch_ptr)
-                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
-                df = DataFrame(arrow_table)
-
-                @test !isempty(df)
-                @test names(df) == ["c_custkey"]
-
-                append!(custkey_values, df.c_custkey)
-                batch_count += 1
-                total_rows += nrow(df)
-
-                RustyIceberg.free_batch(batch_ptr)
-                batch_ptr = RustyIceberg.next_batch(stream)
-            end
-
-            @test batch_count > 0
-            @test total_rows > 0
-            @test !isempty(custkey_values)
-            @test all(custkey_values .> 0)  # Valid customer keys
-
-            println("✅ new_scan with snapshot_id keyword argument test passed")
-            println("   - Total batches: $batch_count")
-            println("   - Total rows: $total_rows")
-            println("   - Sample customer keys: $(first(custkey_values, 5))")
-        finally
-            RustyIceberg.free_stream(stream)
-            RustyIceberg.free_scan!(scan)
-            RustyIceberg.free_table(table)
-        end
-    end
-
     @testset "Combined with_snapshot_id! and other builder methods" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
