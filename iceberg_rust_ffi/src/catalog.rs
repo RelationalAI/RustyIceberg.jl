@@ -714,3 +714,24 @@ export_runtime_op!(
     namespace_parts_ptr: *const *const c_char,
     namespace_parts_len: usize
 );
+
+export_runtime_op!(
+    iceberg_catalog_invalidate_token,
+    IcebergBoolResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+        // SAFETY: catalog was checked to be non-null above and came from FFI
+        let catalog_ref = unsafe { &*catalog };
+        Ok(catalog_ref)
+    },
+    catalog_ref,
+    async {
+        if let Some(cat) = &catalog_ref.catalog {
+            cat.invalidate_token().await?;
+        }
+        Ok::<bool, anyhow::Error>(true)
+    },
+    catalog: *mut IcebergCatalog
+);

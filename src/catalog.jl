@@ -785,3 +785,45 @@ function drop_namespace(catalog::Catalog, namespace::Vector{String})
     @throw_on_error(response, "drop_namespace", IcebergException)
     return nothing
 end
+
+"""
+    invalidate_catalog_token!(catalog::Catalog)::Nothing
+
+Invalidate the cached authentication token for a catalog.
+
+This is useful for testing or when you want to force the custom authenticator to be called on the next request.
+When a catalog has a custom authenticator, it caches the token to avoid unnecessary authenticator calls.
+This function clears that cached token.
+
+# Arguments
+- `catalog::Catalog`: The catalog handle
+
+# Returns
+- `nothing` on success
+
+# Throws
+- `IcebergException` if the operation fails
+
+# Example
+```julia
+# Force the authenticator to be called on the next request
+invalidate_catalog_token!(catalog)
+
+# Next catalog operation will trigger the custom authenticator
+tables = list_tables(catalog, ["warehouse"])
+```
+"""
+function invalidate_catalog_token!(catalog::Catalog)
+    response = BoolResponse()
+
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_catalog_invalidate_token(
+            catalog.ptr::Ptr{Cvoid},
+            response::Ref{BoolResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "invalidate_catalog_token", IcebergException)
+    return nothing
+end
