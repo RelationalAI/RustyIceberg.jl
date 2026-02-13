@@ -10,6 +10,7 @@ using RustyIceberg: Field, Schema, PartitionSpec, SortOrder, PartitionField
 @testset "Catalog API" begin
     println("Testing catalog API...")
 
+    without_aws_env() do
     # Test connecting to Polaris REST catalog
     # This requires the catalog to be running via docker-compose
     catalog_uri = get_catalog_uri()
@@ -74,12 +75,15 @@ using RustyIceberg: Field, Schema, PartitionSpec, SortOrder, PartitionField
         end
     end
 
+    end # without_aws_env
+
     println("✅ Catalog API tests completed!")
 end
 
 @testset "Catalog API with Token Authentication" begin
     println("Testing catalog API with token-based authentication...")
 
+    without_aws_env() do
     # Token endpoint
     catalog_uri = get_catalog_uri()
     token_endpoint = get_token_endpoint()
@@ -162,12 +166,15 @@ end
         end
     end
 
+    end # without_aws_env
+
     println("✅ Catalog API with token authentication tests completed!")
 end
 
 @testset "Catalog API with Custom Authenticator Function" begin
     println("Testing catalog API with custom authenticator function...")
 
+    without_aws_env() do
     # Token endpoint
     catalog_uri = get_catalog_uri()
     token_endpoint = get_token_endpoint()
@@ -300,12 +307,15 @@ end
         end
     end
 
+    end # without_aws_env
+
     println("✅ Catalog API with custom authenticator function tests completed!")
 end
 
 @testset "Catalog Table Loading" begin
     println("Testing catalog table loading...")
 
+    without_aws_env() do
     catalog_uri = get_catalog_uri()
 
     catalog = nothing
@@ -379,12 +389,15 @@ end
         println("✅ All resources cleaned up successfully")
     end
 
+    end # without_aws_env
+
     println("✅ Catalog table loading tests completed!")
 end
 
 @testset "Catalog Table Loading with Credentials" begin
     println("Testing catalog table loading with vended credentials...")
 
+    without_aws_env() do
     catalog_uri = get_catalog_uri()
 
     catalog = nothing
@@ -462,6 +475,8 @@ end
         end
         println("✅ All resources cleaned up successfully")
     end
+
+    end # without_aws_env
 
     println("✅ Catalog table loading with credentials tests completed!")
 end
@@ -606,6 +621,7 @@ end
 @testset "Catalog Incremental Scan" begin
     println("Testing catalog incremental scan...")
 
+    without_aws_env() do
     catalog_uri = get_catalog_uri()
 
     catalog = nothing
@@ -723,12 +739,15 @@ end
         println("✅ All resources cleaned up successfully")
     end
 
+    end # without_aws_env
+
     println("✅ Catalog incremental scan tests completed!")
 end
 
 @testset "Catalog Table Creation" begin
     println("Testing catalog table creation...")
 
+    without_aws_env() do
     catalog_uri = get_catalog_uri()
 
     catalog = nothing
@@ -935,6 +954,8 @@ end
             println("✅ Catalog cleaned up successfully")
         end
     end
+
+    end # without_aws_env
 
     println("✅ Catalog table creation and drop tests completed!")
 end
