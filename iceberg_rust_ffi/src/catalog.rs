@@ -153,10 +153,7 @@ impl StorageCredentialsLoader for RestCredentialsLoader {
             .get()
             .and_then(|w| w.upgrade())
             .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    "Catalog reference is not available",
-                )
+                Error::new(ErrorKind::Unexpected, "Catalog reference is not available")
             })?;
         let response = catalog.load_table_credentials(table_ident).await?;
         response
@@ -164,12 +161,7 @@ impl StorageCredentialsLoader for RestCredentialsLoader {
             .into_iter()
             .filter(|c| location.starts_with(&c.prefix))
             .max_by_key(|c| c.prefix.len())
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    "No matching credential for location",
-                )
-            })
+            .ok_or_else(|| Error::new(ErrorKind::Unexpected, "No matching credential for location"))
     }
 }
 
