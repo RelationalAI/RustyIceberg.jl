@@ -180,19 +180,12 @@ end
     function authenticator()
         # Track number of actual token fetches
         fetch_count = Threads.Atomic{Int}(0)
-        # Cache the token - use Ref to store it safely
-        cached_token = Ref{Union{Nothing, String}}(nothing)
         token_lock = Threads.ReentrantLock()
 
         function get_token_impl()
             # Spawn on a Julia thread to avoid FFI thread issues
             task = Threads.@spawn begin
                 lock(token_lock) do
-                    # Check if we have a cached token
-                    if cached_token[] !== nothing
-                        return cached_token[]::String
-                    end
-
                     # Fetch access token using client credentials
                     credentials = base64encode("$client_id:$client_secret")
                     auth_header = "Basic $credentials"
@@ -219,19 +212,16 @@ end
                     # Increment fetch count ONLY when actually fetching from server
                     Threads.atomic_add!(fetch_count, 1)
 
-                    # Cache the token for future use
-                    cached_token[] = token
-
                     return token
                 end
             end
             return fetch(task)
         end
 
-        return get_token_impl, fetch_count, cached_token
+        return get_token_impl, fetch_count
     end
 
-    auth_fn, fetch_counter, cached_token_ref = authenticator()
+    auth_fn, fetch_counter = authenticator()
 
     catalog = nothing
     try
@@ -285,36 +275,23 @@ end
         # Test token invalidation and re-fetch
         println("\nTesting token invalidation and re-fetch...")
 
-        # Invalidate the cached token by setting it to an invalid value
-        cached_token_ref[] = "invalid_token_foo"
-        println("✅ Invalidated cached token")
+        # Invalidate the cached token using the FFI function
+        RustyIceberg.invalidate_catalog_token!(catalog)
+        println("✅ Invalidated cached token using FFI")
 
-        # Attempt to list namespaces with invalid token - should fail with 401
-        println("Attempting to list namespaces with invalid token...")
-        error_occurred = false
-        error_msg = ""
-        try
-            root_namespaces = RustyIceberg.list_namespaces(catalog)
-            # If we get here, the test should fail
-        catch err
-            error_occurred = true
-            error_msg = string(err)
-            println("✅ Got expected error with invalid token: $(typeof(err))")
-            println("   Error message: $error_msg")
-        end
+        # The next request should call the authenticator again to get a fresh token
+        # Since we're using a valid authenticator, it should succeed
+        println("Attempting to list namespaces after token invalidation...")
+        root_namespaces = RustyIceberg.list_namespaces(catalog)
+        println("✅ Successfully listed namespaces after token invalidation")
 
-        # Verify that an error occurred when using invalid token
-        @test error_occurred
+        # Verify the authenticator was called again
+        post_invalidate_fetch_count = fetch_counter[]
+        println("✅ Authenticator fetched token $post_invalidate_fetch_count time(s) total")
+        # Should be 2 now (1 initial + 1 after invalidation)
+        @test post_invalidate_fetch_count == 2
 
-        # Check if error message contains indication of 401 or authentication failure
-        has_401 = contains(error_msg, "401")
-        has_unauthorized = contains(error_msg, "Unauthorized") || contains(error_msg, "unauthorized")
-        has_unexpected = contains(error_msg, "unexpected status code")
-        has_auth_error = has_401 || has_unauthorized || has_unexpected
-
-        @test has_auth_error
-
-        println("✅ Token invalidation test passed")
+        println("✅ Token invalidation and re-fetch test passed")
     finally
         # Clean up
         if catalog !== nothing
