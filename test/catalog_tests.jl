@@ -10,6 +10,7 @@ using RustyIceberg: Field, Schema, PartitionSpec, SortOrder, PartitionField
 @testset "Catalog API" begin
     println("Testing catalog API...")
 
+    without_aws_env() do
     # Test connecting to Polaris REST catalog
     # This requires the catalog to be running via docker-compose
     catalog_uri = get_catalog_uri()
@@ -74,12 +75,15 @@ using RustyIceberg: Field, Schema, PartitionSpec, SortOrder, PartitionField
         end
     end
 
+    end # without_aws_env
+
     println("✅ Catalog API tests completed!")
 end
 
 @testset "Catalog API with Token Authentication" begin
     println("Testing catalog API with token-based authentication...")
 
+    without_aws_env() do
     # Token endpoint
     catalog_uri = get_catalog_uri()
     token_endpoint = get_token_endpoint()
@@ -162,12 +166,15 @@ end
         end
     end
 
+    end # without_aws_env
+
     println("✅ Catalog API with token authentication tests completed!")
 end
 
 @testset "Catalog API with Custom Authenticator Function" begin
     println("Testing catalog API with custom authenticator function...")
 
+    without_aws_env() do
     # Token endpoint
     catalog_uri = get_catalog_uri()
     token_endpoint = get_token_endpoint()
@@ -300,12 +307,15 @@ end
         end
     end
 
+    end # without_aws_env
+
     println("✅ Catalog API with custom authenticator function tests completed!")
 end
 
 @testset "Catalog Table Loading" begin
     println("Testing catalog table loading...")
 
+    without_aws_env() do
     catalog_uri = get_catalog_uri()
 
     catalog = nothing
@@ -379,12 +389,15 @@ end
         println("✅ All resources cleaned up successfully")
     end
 
+    end # without_aws_env
+
     println("✅ Catalog table loading tests completed!")
 end
 
 @testset "Catalog Table Loading with Credentials" begin
     println("Testing catalog table loading with vended credentials...")
 
+    without_aws_env() do
     catalog_uri = get_catalog_uri()
 
     catalog = nothing
@@ -463,12 +476,158 @@ end
         println("✅ All resources cleaned up successfully")
     end
 
+    end # without_aws_env
+
     println("✅ Catalog table loading with credentials tests completed!")
+end
+
+@testset "Catalog Table Loading fails without credentials" begin
+    println("Testing that table loading fails without S3 credentials or credentials loader...")
+
+    catalog_uri = get_catalog_uri()
+
+    without_aws_env() do
+        catalog = nothing
+        table = C_NULL
+        scan = C_NULL
+        stream = C_NULL
+
+        try
+            # Create catalog WITHOUT S3 credentials and WITHOUT credentials loader
+            s3_config = get_s3_config()
+            props = get_catalog_properties_minimal()
+            props["s3.endpoint"] = s3_config["endpoint"]
+            props["s3.region"] = s3_config["region"]
+            catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props, use_credentials_loader=false)
+            @test catalog !== nothing
+            println("✅ Catalog created (no credentials loader)")
+
+            # Without S3 credentials, one of the following steps should fail:
+            # load_table, new_scan, scan!, or next_batch
+            credential_error_caught = false
+            try
+                table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer"; load_credentials=false)
+                scan = RustyIceberg.new_scan(table)
+                RustyIceberg.select_columns!(scan, ["c_custkey"])
+                stream = RustyIceberg.scan!(scan)
+                RustyIceberg.next_batch(stream)
+                error("Expected a credential/access error but none was thrown")
+            catch e
+                @test e isa RustyIceberg.IcebergException
+                msg = lowercase(e.msg)
+                @test occursin("credential", msg) || occursin("access", msg) || occursin("forbidden", msg) || occursin("permission", msg)
+                credential_error_caught = true
+                println("✅ Correctly failed without credentials: $(e.msg)")
+            end
+            @test credential_error_caught
+        finally
+            if stream != C_NULL
+                RustyIceberg.free_stream(stream)
+            end
+            if scan != C_NULL
+                RustyIceberg.free_scan!(scan)
+            end
+            if table != C_NULL
+                RustyIceberg.free_table(table)
+            end
+            if catalog !== nothing
+                RustyIceberg.free_catalog!(catalog)
+            end
+            println("✅ All resources cleaned up successfully")
+        end
+    end
+
+    println("✅ Catalog table loading failure test completed!")
+end
+
+@testset "Catalog Table Loading with Storage Credentials Loader" begin
+    println("Testing catalog table loading with storage credentials loader...")
+
+    catalog_uri = get_catalog_uri()
+
+    without_aws_env() do
+        catalog = nothing
+        table = C_NULL
+        scan = C_NULL
+        stream = C_NULL
+        batch = nothing
+
+        try
+            # Create catalog WITHOUT S3 credentials but WITH credentials loader
+            # The loader will call load_table_credentials when a PermissionDenied error occurs
+            s3_config = get_s3_config()
+            props = get_catalog_properties_minimal()
+            props["s3.endpoint"] = s3_config["endpoint"]
+            props["s3.region"] = s3_config["region"]
+            catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props, use_credentials_loader=true)
+            @test catalog !== nothing
+            println("✅ Catalog created successfully with storage credentials loader")
+
+            # Load the customer table WITHOUT load_credentials=true
+            # No vended credentials are fetched during load.
+            # When the scan tries to access S3, it will get PermissionDenied,
+            # triggering the credentials loader to call load_table_credentials.
+            println("Attempting to load customer table from tpch.sf01 (no vended credentials)...")
+            table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer"; load_credentials=false)
+            @test table != C_NULL
+            println("✅ Customer table loaded successfully")
+
+            # Create a scan on the loaded table
+            println("Creating scan on loaded customer table...")
+            scan = RustyIceberg.new_scan(table)
+            @test scan != C_NULL
+            println("✅ Scan created successfully on loaded table")
+
+            # Select specific columns
+            println("Selecting specific columns from customer table...")
+            RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
+            println("✅ Column selection completed")
+
+            # Execute the scan - this is where the credentials loader should kick in
+            println("Executing scan (credentials loader should be invoked on PermissionDenied)...")
+            stream = RustyIceberg.scan!(scan)
+            @test stream != C_NULL
+            println("✅ Scan executed successfully")
+
+            # Read the first batch to verify data was accessible via loaded credentials
+            println("Reading first batch from loaded customer table...")
+            batch_ptr = RustyIceberg.next_batch(stream)
+
+            if batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                if batch.data != C_NULL && batch.length > 0
+                    println("✅ Successfully read first batch with $(batch.length) bytes of Arrow IPC data")
+
+                    @test batch.length > 0
+                    println("✅ Batch contains valid Arrow data - storage credentials loader worked!")
+
+                    RustyIceberg.free_batch(batch_ptr)
+                end
+            end
+        finally
+            if stream != C_NULL
+                RustyIceberg.free_stream(stream)
+            end
+            if scan != C_NULL
+                RustyIceberg.free_scan!(scan)
+            end
+            if table != C_NULL
+                RustyIceberg.free_table(table)
+            end
+            if catalog !== nothing
+                RustyIceberg.free_catalog!(catalog)
+            end
+            println("✅ All resources cleaned up successfully")
+        end
+    end
+
+    println("✅ Catalog table loading with storage credentials loader tests completed!")
 end
 
 @testset "Catalog Incremental Scan" begin
     println("Testing catalog incremental scan...")
 
+    without_aws_env() do
     catalog_uri = get_catalog_uri()
 
     catalog = nothing
@@ -586,12 +745,15 @@ end
         println("✅ All resources cleaned up successfully")
     end
 
+    end # without_aws_env
+
     println("✅ Catalog incremental scan tests completed!")
 end
 
 @testset "Catalog Table Creation" begin
     println("Testing catalog table creation...")
 
+    without_aws_env() do
     catalog_uri = get_catalog_uri()
 
     catalog = nothing
@@ -798,6 +960,8 @@ end
             println("✅ Catalog cleaned up successfully")
         end
     end
+
+    end # without_aws_env
 
     println("✅ Catalog table creation and drop tests completed!")
 end

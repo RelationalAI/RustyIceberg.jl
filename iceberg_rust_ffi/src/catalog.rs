@@ -6,11 +6,12 @@ use crate::response::{
 use crate::IcebergTable;
 use anyhow::Result;
 use async_trait::async_trait;
+use iceberg::io::{StorageCredential, StorageCredentialsLoader};
 use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableIdent};
 use iceberg_catalog_rest::{CustomAuthenticator, RestCatalog, RestCatalogBuilder};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 // FFI exports
 use object_store_ffi::{
@@ -130,13 +131,49 @@ impl CustomAuthenticator for FFITokenAuthenticator {
     }
 }
 
+/// Credential loader that calls the REST catalog's load_table_credentials endpoint
+/// to obtain storage credentials for table data access.
+///
+/// Uses a `Weak` reference to break the circular dependency:
+/// `Arc<RestCatalog>` → (owns) `Arc<RestCredentialsLoader>` → (weak) `RestCatalog`
+#[derive(Debug)]
+struct RestCredentialsLoader {
+    catalog: OnceLock<Weak<RestCatalog>>,
+}
+
+#[async_trait]
+impl StorageCredentialsLoader for RestCredentialsLoader {
+    async fn load_credentials(
+        &self,
+        table_ident: &TableIdent,
+        location: &str,
+    ) -> iceberg::Result<StorageCredential> {
+        let catalog = self
+            .catalog
+            .get()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Unexpected, "Catalog reference is not available")
+            })?;
+        let response = catalog.load_table_credentials(table_ident).await?;
+        response
+            .storage_credentials
+            .into_iter()
+            .filter(|c| location.starts_with(&c.prefix))
+            .max_by_key(|c| c.prefix.len())
+            .ok_or_else(|| Error::new(ErrorKind::Unexpected, "No matching credential for location"))
+    }
+}
+
 /// Opaque catalog handle for FFI
-/// Stores a RestCatalog instance wrapped in a Box for safe memory management.
+/// Stores a RestCatalog instance wrapped in an Arc for safe memory management.
 /// Also stores the authenticator to allow setting it before catalog creation.
 pub struct IcebergCatalog {
-    catalog: Option<Box<RestCatalog>>,
+    catalog: Option<Arc<RestCatalog>>,
     /// Stores a pending authenticator to be applied before first use
     authenticator: Option<Arc<FFITokenAuthenticator>>,
+    /// Whether to attach a storage credentials loader after catalog creation
+    use_credentials_loader: bool,
 }
 
 // SAFETY: Send and Sync are safe because:
@@ -152,6 +189,7 @@ impl Default for IcebergCatalog {
         IcebergCatalog {
             catalog: None,
             authenticator: None,
+            use_credentials_loader: false,
         }
     }
 }
@@ -172,8 +210,28 @@ impl IcebergCatalog {
             builder = builder.with_token_authenticator(authenticator.clone());
         }
 
-        let catalog = builder.load("rest", catalog_props).await?;
-        self.catalog = Some(Box::new(catalog));
+        let mut catalog = builder.load("rest", catalog_props).await?;
+
+        if self.use_credentials_loader {
+            // Create loader with empty catalog reference
+            let loader = Arc::new(RestCredentialsLoader {
+                catalog: OnceLock::new(),
+            });
+            let loader_ref = Arc::clone(&loader);
+
+            // Attach loader to catalog while we still have &mut access
+            catalog.set_storage_credentials_loader(loader);
+
+            // Wrap catalog in Arc
+            let catalog_arc = Arc::new(catalog);
+
+            // Fill the loader's weak reference to the catalog
+            let _ = loader_ref.catalog.set(Arc::downgrade(&catalog_arc));
+
+            self.catalog = Some(catalog_arc);
+        } else {
+            self.catalog = Some(Arc::new(catalog));
+        }
 
         Ok(self)
     }
@@ -210,7 +268,7 @@ impl IcebergCatalog {
     ///
     /// Returns Some(&RestCatalog) if initialized, None otherwise.
     pub fn get_catalog(&self) -> Option<&RestCatalog> {
-        self.catalog.as_ref().map(|c| c.as_ref())
+        self.catalog.as_deref()
     }
 
     /// Load a table by namespace and name
@@ -564,6 +622,24 @@ pub extern "C" fn iceberg_catalog_set_token_authenticator(
             CResult::Error
         }
     }
+}
+
+/// Enable the storage credentials loader for the catalog.
+/// Must be called before iceberg_rest_catalog_create.
+/// When enabled, the catalog will use a loader that calls load_table_credentials
+/// to obtain storage credentials for table data access.
+#[no_mangle]
+pub extern "C" fn iceberg_catalog_set_storage_credentials_loader(
+    catalog: *mut IcebergCatalog,
+) -> CResult {
+    if catalog.is_null() {
+        return CResult::Error;
+    }
+
+    let catalog_ref = unsafe { &mut *catalog };
+    catalog_ref.use_credentials_loader = true;
+
+    CResult::Ok
 }
 
 // Create a new table in the catalog

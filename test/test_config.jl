@@ -105,3 +105,30 @@ function get_catalog_properties_minimal()
         "warehouse" => get_warehouse_name()
     )
 end
+
+const AWS_ENV_VARS = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION",
+                      "AWS_REGION", "AWS_ENDPOINT_URL", "AWS_SESSION_TOKEN"]
+
+"""
+    without_aws_env(f)
+
+Run `f()` with all AWS environment variables unset, then restore them.
+Useful for tests that need to verify credentials are obtained through
+the catalog rather than from ambient environment.
+"""
+function without_aws_env(f)
+    saved = Dict{String,String}()
+    for var in AWS_ENV_VARS
+        if haskey(ENV, var)
+            saved[var] = ENV[var]
+            delete!(ENV, var)
+        end
+    end
+    try
+        f()
+    finally
+        for (var, val) in saved
+            ENV[var] = val
+        end
+    end
+end

@@ -129,7 +129,11 @@ mutable struct NestedStringListResponse
 end
 
 """
-    catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{String,String}())::Catalog
+    catalog_create_rest(
+        uri::String;
+        properties::Dict{String,String}=Dict{String,String}(),
+        use_credentials_loader::Bool=false,
+    )::Catalog
 
 Create a REST catalog connection.
 
@@ -137,6 +141,10 @@ Create a REST catalog connection.
 - `uri::String`: URI of the Iceberg REST catalog server (e.g., "http://localhost:8181")
 - `properties::Dict{String,String}`: Optional key-value properties for catalog configuration.
   By default (empty dict), no additional properties are passed.
+- `use_credentials_loader::Bool=false`: If true, enables a storage credentials loader that
+  calls the catalog's `load_table_credentials` endpoint to obtain storage credentials.
+  When a PermissionDenied error occurs during data access, the loader automatically
+  refreshes credentials.
 
 # Returns
 - A `Catalog` handle for use in other catalog operations
@@ -144,13 +152,27 @@ Create a REST catalog connection.
 # Example
 ```julia
 catalog = catalog_create_rest("http://polaris:8181")
+catalog = catalog_create_rest("http://polaris:8181"; use_credentials_loader=true)
 ```
 """
-function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{String,String}())
+function catalog_create_rest(
+    uri::String; properties::Dict{String,String}=Dict{String,String}(),
+    use_credentials_loader::Bool=false,
+)
     # Create an empty catalog (no authenticator)
     catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
     if catalog_ptr == C_NULL
         throw(IcebergException("Failed to create empty catalog"))
+    end
+
+    # Enable storage credentials loader if requested
+    if use_credentials_loader
+        result = @ccall rust_lib.iceberg_catalog_set_storage_credentials_loader(
+            catalog_ptr::Ptr{Cvoid}
+        )::Cint
+        if result != 0
+            throw(IcebergException("Failed to set storage credentials loader"))
+        end
     end
 
     # Initialize the catalog with REST connection
@@ -177,7 +199,12 @@ function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{S
 end
 
 """
-    catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}())::Catalog
+    catalog_create_rest(
+        authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}},
+        uri::String;
+        properties::Dict{String,String}=Dict{String,String}(),
+        use_credentials_loader::Bool=false,
+    )::Catalog
 
 Create a REST catalog connection with custom token authentication and token caching support.
 
@@ -211,11 +238,25 @@ end
 catalog = catalog_create_rest(FunctionWrapper{Union{String,Nothing},Tuple{}}(get_token), "http://polaris:8181")
 ```
 """
-function catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}())
+function catalog_create_rest(
+    authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}},
+    uri::String; properties::Dict{String,String}=Dict{String,String}(),
+    use_credentials_loader::Bool=false,
+)
     # Step 1: Create an empty catalog
     catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
     if catalog_ptr == C_NULL
         throw(IcebergException("Failed to create empty catalog"))
+    end
+
+    # Step 1b: Enable storage credentials loader if requested
+    if use_credentials_loader
+        result = @ccall rust_lib.iceberg_catalog_set_storage_credentials_loader(
+            catalog_ptr::Ptr{Cvoid}
+        )::Cint
+        if result != 0
+            throw(IcebergException("Failed to set storage credentials loader"))
+        end
     end
 
     # Step 2: Wrap the authenticator in a Ref for stable memory address
