@@ -156,7 +156,8 @@ catalog = catalog_create_rest("http://polaris:8181"; use_credentials_loader=true
 ```
 """
 function catalog_create_rest(
-    uri::String; properties::Dict{String,String}=Dict{String,String}(),
+    uri::String;
+    properties::Dict{String,String}=Dict{String,String}(),
     use_credentials_loader::Bool=false,
 )
     # Create an empty catalog (no authenticator)
@@ -240,7 +241,8 @@ catalog = catalog_create_rest(FunctionWrapper{Union{String,Nothing},Tuple{}}(get
 """
 function catalog_create_rest(
     authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}},
-    uri::String; properties::Dict{String,String}=Dict{String,String}(),
+    uri::String;
+    properties::Dict{String,String}=Dict{String,String}(),
     use_credentials_loader::Bool=false,
 )
     # Step 1: Create an empty catalog
