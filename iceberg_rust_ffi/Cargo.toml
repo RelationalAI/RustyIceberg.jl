@@ -1,6 +1,6 @@
 [package]
 name = "iceberg_rust_ffi"
-version = "0.7.4"
+version = "0.7.5"
 edition = "2021"
 
 [lib]
@@ -12,8 +12,8 @@ default = ["julia"]
 julia = []
 
 [dependencies]
-iceberg = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "0a4ba318d2d8d157d4322f168d00a535398674f1", features = ["storage-azdls"] }
-iceberg-catalog-rest = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "0a4ba318d2d8d157d4322f168d00a535398674f1" }
+iceberg = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "e468b2ee9035a27871bf9cfde1b2c9e427839f77", features = ["storage-azdls"] }
+iceberg-catalog-rest = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "e468b2ee9035a27871bf9cfde1b2c9e427839f77" }
 object_store_ffi = { git = "https://github.com/RelationalAI/object_store_ffi", rev = "79b08071c7a1642532b5891253280861eca9e44e", default-features = false }
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
