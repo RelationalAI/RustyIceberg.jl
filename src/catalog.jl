@@ -129,7 +129,11 @@ mutable struct NestedStringListResponse
 end
 
 """
-    catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{String,String}(), use_credentials_loader::Bool=false)::Catalog
+    catalog_create_rest(
+        uri::String;
+        properties::Dict{String,String}=Dict{String,String}(),
+        use_credentials_loader::Bool=false,
+    )::Catalog
 
 Create a REST catalog connection.
 
@@ -151,7 +155,10 @@ catalog = catalog_create_rest("http://polaris:8181")
 catalog = catalog_create_rest("http://polaris:8181"; use_credentials_loader=true)
 ```
 """
-function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{String,String}(), use_credentials_loader::Bool=false)
+function catalog_create_rest(
+    uri::String; properties::Dict{String,String}=Dict{String,String}(),
+    use_credentials_loader::Bool=false,
+)
     # Create an empty catalog (no authenticator)
     catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
     if catalog_ptr == C_NULL
@@ -192,7 +199,12 @@ function catalog_create_rest(uri::String; properties::Dict{String,String}=Dict{S
 end
 
 """
-    catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}())::Catalog
+    catalog_create_rest(
+        authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}},
+        uri::String;
+        properties::Dict{String,String}=Dict{String,String}(),
+        use_credentials_loader::Bool=false,
+    )::Catalog
 
 Create a REST catalog connection with custom token authentication and token caching support.
 
@@ -226,7 +238,11 @@ end
 catalog = catalog_create_rest(FunctionWrapper{Union{String,Nothing},Tuple{}}(get_token), "http://polaris:8181")
 ```
 """
-function catalog_create_rest(authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}}, uri::String; properties::Dict{String,String}=Dict{String,String}(), use_credentials_loader::Bool=false)
+function catalog_create_rest(
+    authenticator::FunctionWrapper{Union{String,Nothing},Tuple{}},
+    uri::String; properties::Dict{String,String}=Dict{String,String}(),
+    use_credentials_loader::Bool=false,
+)
     # Step 1: Create an empty catalog
     catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
     if catalog_ptr == C_NULL
