@@ -502,18 +502,24 @@ end
             @test catalog !== nothing
             println("✅ Catalog created (no credentials loader)")
 
-            # Load table without vended credentials
-            table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer"; load_credentials=false)
-            @test table != C_NULL
-
-            # Create and execute scan - should fail when accessing S3
-            scan = RustyIceberg.new_scan(table)
-            RustyIceberg.select_columns!(scan, ["c_custkey"])
-            stream = RustyIceberg.scan!(scan)
-
-            # Reading data should fail since there are no S3 credentials
-            @test_throws RustyIceberg.IcebergException RustyIceberg.next_batch(stream)
-            println("✅ Correctly failed to read data without credentials")
+            # Without S3 credentials, one of the following steps should fail:
+            # load_table, new_scan, scan!, or next_batch
+            credential_error_caught = false
+            try
+                table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer"; load_credentials=false)
+                scan = RustyIceberg.new_scan(table)
+                RustyIceberg.select_columns!(scan, ["c_custkey"])
+                stream = RustyIceberg.scan!(scan)
+                RustyIceberg.next_batch(stream)
+                error("Expected a credential/access error but none was thrown")
+            catch e
+                @test e isa RustyIceberg.IcebergException
+                msg = lowercase(e.msg)
+                @test occursin("credential", msg) || occursin("access", msg) || occursin("forbidden", msg) || occursin("permission", msg)
+                credential_error_caught = true
+                println("✅ Correctly failed without credentials: $(e.msg)")
+            end
+            @test credential_error_caught
         finally
             if stream != C_NULL
                 RustyIceberg.free_stream(stream)
