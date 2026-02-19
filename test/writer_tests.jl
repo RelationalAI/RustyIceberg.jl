@@ -602,6 +602,12 @@ end
     # Run without AWS env vars to ensure credentials come from catalog
     without_aws_env() do
         try
+            # Verify S3 environment variables are not present
+            @test !haskey(ENV, "AWS_ACCESS_KEY_ID")
+            @test !haskey(ENV, "AWS_SECRET_ACCESS_KEY")
+            @test !haskey(ENV, "AWS_SESSION_TOKEN")
+            println("✅ Verified S3 environment variables are not set")
+
             # Create catalog connection
             catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
             @test catalog !== nothing
