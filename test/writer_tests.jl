@@ -580,3 +580,175 @@ end
 
     println("\n✅ Writer with Arrow.Table tests completed!")
 end
+
+@testset "Writer with Vended Credentials" begin
+    println("Testing writer with vended credentials from create_table...")
+
+    catalog_uri = get_catalog_uri()
+
+    # Use minimal properties without S3 credentials - they will be vended
+    # But include endpoint and region so the client knows where to connect
+    s3_config = get_s3_config()
+    props = get_catalog_properties_minimal()
+    props["s3.endpoint"] = s3_config["endpoint"]
+    props["s3.region"] = s3_config["region"]
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    # Run without AWS env vars to ensure credentials come from catalog
+    without_aws_env() do
+        try
+            # Verify S3 environment variables are not present
+            @test !haskey(ENV, "AWS_ACCESS_KEY_ID")
+            @test !haskey(ENV, "AWS_SECRET_ACCESS_KEY")
+            @test !haskey(ENV, "AWS_SESSION_TOKEN")
+            println("✅ Verified S3 environment variables are not set")
+
+            # Create catalog connection
+            catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+            @test catalog !== nothing
+            println("✅ Catalog created successfully (without S3 credentials)")
+
+            # Create a test namespace for table creation
+            test_namespace = ["test_writer_vended_$(round(Int, time() * 1000))"]
+            RustyIceberg.create_namespace(catalog, test_namespace)
+            println("✅ Test namespace created: $test_namespace")
+
+            # Create a schema for test table
+            schema = Schema([
+                Field(Int32(1), "id", "long"; required=true),
+                Field(Int32(2), "name", "string"; required=false),
+                Field(Int32(3), "value", "double"; required=false),
+            ])
+
+            # Create test table with load_credentials=true to get vended credentials
+            table_name = "writer_vended_$(round(Int, time() * 1000))"
+            table = RustyIceberg.create_table(
+                catalog,
+                test_namespace,
+                table_name,
+                schema;
+                load_credentials=true
+            )
+            @test table != C_NULL
+            println("✅ Test table created with vended credentials: $table_name")
+
+            # Test: Create writer and write data
+            println("\nCreating writer and writing data...")
+            data_files = RustyIceberg.with_data_file_writer(table) do writer
+                @test writer !== nothing
+                @test writer.ptr != C_NULL
+                println("✅ Writer created successfully")
+
+                # Write test data
+                test_data = (
+                    id = Int64[1, 2, 3, 4, 5],
+                    name = ["Alice", "Bob", "Charlie", "Diana", "Eve"],
+                    value = [1.1, 2.2, 3.3, 4.4, 5.5]
+                )
+                write(writer, test_data)
+                println("✅ Data written successfully using vended credentials")
+            end
+            @test data_files !== nothing
+            @test data_files.ptr != C_NULL
+            println("✅ Writer closed successfully, got DataFiles handle")
+
+            # Commit data files via transaction
+            println("\nCommitting data files via transaction...")
+            updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+                RustyIceberg.with_fast_append(tx) do action
+                    RustyIceberg.add_data_files(action, data_files)
+                end
+            end
+            @test updated_table != C_NULL
+            println("✅ Transaction committed successfully")
+
+            # Free the updated table and reload with fresh credentials for reading
+            println("\nReloading table with fresh vended credentials for reading...")
+            RustyIceberg.free_table(updated_table)
+            updated_table = RustyIceberg.load_table(catalog, test_namespace, table_name; load_credentials=true)
+            @test updated_table != C_NULL
+            println("✅ Table reloaded with fresh credentials")
+
+            # Verify data was written by scanning the table
+            println("\nVerifying written data...")
+            scan = RustyIceberg.new_scan(updated_table)
+            stream = RustyIceberg.scan!(scan)
+
+            # Collect all data from the scan
+            all_ids = Int64[]
+            all_names = String[]
+            all_values = Float64[]
+
+            batch_ptr = RustyIceberg.next_batch(stream)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                data = batch.data
+                len = batch.length
+                if len > 0
+                    arrow_data = unsafe_wrap(Array, data, len)
+                    tbl = Arrow.Table(arrow_data)
+                    cols = Tables.columns(tbl)
+                    append!(all_ids, cols.id)
+                    append!(all_names, cols.name)
+                    append!(all_values, cols.value)
+                end
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream)
+            end
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+
+            # Verify row count and data
+            @test length(all_ids) == 5
+            println("✅ Verified $(length(all_ids)) rows in table")
+
+            # Sort by id for consistent comparison
+            perm = sortperm(all_ids)
+            all_ids = all_ids[perm]
+            all_names = all_names[perm]
+            all_values = all_values[perm]
+
+            # Verify data matches
+            @test all_ids == [1, 2, 3, 4, 5]
+            @test all_names == ["Alice", "Bob", "Charlie", "Diana", "Eve"]
+            @test all_values == [1.1, 2.2, 3.3, 4.4, 5.5]
+            println("✅ Data verified successfully")
+
+        finally
+            # Cleanup
+            if table != C_NULL
+                RustyIceberg.free_table(table)
+                println("✅ Table freed")
+            end
+            if data_files !== nothing && data_files.ptr != C_NULL
+                RustyIceberg.free_data_files(data_files)
+                println("✅ DataFiles freed")
+            end
+            if test_namespace !== nothing && catalog !== nothing
+                try
+                    RustyIceberg.drop_table(catalog, test_namespace, table_name)
+                    println("✅ Test table dropped")
+                catch e
+                    println("⚠️  Could not drop table: $e")
+                end
+                try
+                    RustyIceberg.drop_namespace(catalog, test_namespace)
+                    println("✅ Test namespace dropped")
+                catch e
+                    println("⚠️  Could not drop namespace: $e")
+                end
+            end
+            if catalog !== nothing
+                RustyIceberg.free_catalog!(catalog)
+                println("✅ Catalog cleaned up")
+            end
+        end
+    end # without_aws_env
+
+    println("\n✅ Writer with vended credentials tests completed!")
+end

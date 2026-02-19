@@ -341,7 +341,8 @@ impl IcebergCatalog {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    /// Create a new table in the catalog
+    /// Internal method to create a table with optional credential vending
+    /// Create a new table in the catalog with optional credential vending
     pub async fn create_table(
         &self,
         namespace_parts: Vec<String>,
@@ -350,6 +351,7 @@ impl IcebergCatalog {
         partition_spec: Option<iceberg::spec::PartitionSpec>,
         sort_order: Option<iceberg::spec::SortOrder>,
         properties: HashMap<String, String>,
+        load_credentials: bool,
     ) -> Result<IcebergTable> {
         // Convert namespace parts to NamespaceIdent
         let namespace_ident = iceberg::NamespaceIdent::from_vec(namespace_parts)?;
@@ -366,11 +368,16 @@ impl IcebergCatalog {
             .properties(properties)
             .build();
 
-        // Call the catalog to create the table
-        let table = self
-            .as_ref()
-            .create_table(&namespace_ident, table_creation)
-            .await?;
+        // Call the appropriate catalog method based on load_credentials flag
+        let table = if load_credentials {
+            self.as_ref()
+                .create_table_with_credentials(&namespace_ident, table_creation)
+                .await?
+        } else {
+            self.as_ref()
+                .create_table(&namespace_ident, table_creation)
+                .await?
+        };
 
         Ok(IcebergTable { table })
     }
@@ -642,7 +649,7 @@ pub extern "C" fn iceberg_catalog_set_storage_credentials_loader(
     CResult::Ok
 }
 
-// Create a new table in the catalog
+// Create a new table in the catalog with optional credential vending
 export_runtime_op!(
     iceberg_catalog_create_table,
     crate::IcebergTableResponse,
@@ -681,12 +688,12 @@ export_runtime_op!(
             None
         };
 
-        Ok((catalog_ref, namespace_parts, table_name, schema, partition_spec, sort_order, props))
+        Ok((catalog_ref, namespace_parts, table_name, schema, partition_spec, sort_order, props, load_credentials != 0))
     },
     result_tuple,
     async {
-        let (catalog_ref, namespace_parts, table_name, schema, partition_spec, sort_order, props) = result_tuple;
-        catalog_ref.create_table(namespace_parts, table_name, schema, partition_spec, sort_order, props).await
+        let (catalog_ref, namespace_parts, table_name, schema, partition_spec, sort_order, props, load_credentials) = result_tuple;
+        catalog_ref.create_table(namespace_parts, table_name, schema, partition_spec, sort_order, props, load_credentials).await
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -696,7 +703,8 @@ export_runtime_op!(
     partition_spec_json: *const c_char,
     sort_order_json: *const c_char,
     properties: *const PropertyEntry,
-    properties_len: usize
+    properties_len: usize,
+    load_credentials: u8
 );
 
 // Create a new namespace in the catalog
