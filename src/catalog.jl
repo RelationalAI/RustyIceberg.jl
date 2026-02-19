@@ -702,7 +702,8 @@ function create_table(
     schema::Schema;
     partition_spec::Union{PartitionSpec, Nothing}=nothing,
     sort_order::Union{SortOrder, Nothing}=nothing,
-    properties::Dict{String,String}=Dict{String,String}()
+    properties::Dict{String,String}=Dict{String,String}(),
+    load_credentials::Bool=false
 )
     response = TableResponse()
 
@@ -735,6 +736,7 @@ function create_table(
             sort_order_json::Cstring,
             (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
             properties_len::Csize_t,
+            load_credentials::UInt8,
             response::Ref{TableResponse},
             handle::Ptr{Cvoid}
         )::Cint
