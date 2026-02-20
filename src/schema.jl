@@ -104,12 +104,12 @@ According to the Iceberg specification:
 - `"long"` → `Int64`
 - `"float"` → `Float32`
 - `"double"` → `Float64`
-- `"date"` → `Date` (from Dates module) - physically written as Int32 days since epoch
-- `"time"` → `Int64` - microseconds since midnight
-- `"timestamp"` → `Int64` - microseconds since epoch
-- `"timestamptz"` → `Int64` - microseconds since epoch UTC
-- `"timestamp_ns"` → `Int64` - nanoseconds since epoch
-- `"timestamptz_ns"` → `Int64` - nanoseconds since epoch UTC
+- `"date"` → `Date` (from Dates module) - Arrow converts to Date32, physically written as Int32 days since epoch
+- `"time"` → `Int64` - microseconds since midnight (Arrow doesn't have a native Time type)
+- `"timestamp"` → `Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}` - microseconds since epoch (no timezone)
+- `"timestamptz"` → `Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, :UTC}` - microseconds since epoch UTC (with timezone)
+- `"timestamp_ns"` → `Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, nothing}` - nanoseconds since epoch (no timezone)
+- `"timestamptz_ns"` → `Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, :UTC}` - nanoseconds since epoch UTC (with timezone)
 - `"string"` → `String`
 - `"uuid"` → `NTuple{16, UInt8}` - 16-byte UUID representation
 - `"binary"` → `Vector{UInt8}` - variable-length byte array
@@ -127,7 +127,7 @@ arrow_type = iceberg_type_to_arrow_type("date")
 
 # For an Iceberg field with type "timestamp"
 arrow_type = iceberg_type_to_arrow_type("timestamp")
-# Returns Int64 type - users should provide Int64 values (microseconds since epoch)
+# Returns Arrow.Timestamp type - users should provide Arrow.Timestamp arrays
 
 # For an Iceberg field with type "decimal(38,18)"
 arrow_type = iceberg_type_to_arrow_type("decimal(38,18)")
@@ -166,20 +166,21 @@ function iceberg_type_to_arrow_type(iceberg_type::String)
         # Date objects in Julia - Arrow converts to Date32 (physically Int32)
         return Dates.Date
     elseif type_str == "time"
-        # Time in microseconds since midnight (Int64)
+        # Time in microseconds since midnight - Arrow doesn't have a native Time type
+        # Users should provide Int64 values representing microseconds since midnight
         return Int64
     elseif type_str == "timestamp"
-        # Timestamp in microseconds since epoch (Int64)
-        return Int64
+        # Timestamp in microseconds since epoch as Arrow Timestamp with microsecond precision
+        return Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
     elseif type_str == "timestamptz"
-        # Timestamptz in microseconds since epoch UTC (Int64)
-        return Int64
+        # Timestamptz in microseconds since epoch UTC as Arrow Timestamp with microsecond precision and UTC timezone
+        return Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, :UTC}
     elseif type_str == "timestamp_ns"
-        # Timestamp in nanoseconds since epoch (Int64)
-        return Int64
+        # Timestamp in nanoseconds since epoch as Arrow Timestamp with nanosecond precision
+        return Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, nothing}
     elseif type_str == "timestamptz_ns"
-        # Timestamptz in nanoseconds since epoch UTC (Int64)
-        return Int64
+        # Timestamptz in nanoseconds since epoch UTC as Arrow Timestamp with nanosecond precision and UTC timezone
+        return Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, :UTC}
     elseif type_str == "string"
         return String
     elseif type_str == "uuid"
