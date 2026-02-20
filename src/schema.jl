@@ -203,9 +203,9 @@ function iceberg_type_to_arrow_type(iceberg_type::String)
         # - P <= 18: int64
         # - P > 18: fixed-length byte array
         # Extract precision from "decimal(P,S)" format
-        match = match(r"decimal\((\d+)", type_str)
-        if match !== nothing
-            precision = parse(Int, match.captures[1])
+        m = Base.match(r"decimal\((\d+)", type_str)
+        if m !== nothing
+            precision = parse(Int, m.captures[1])
             if precision <= 9
                 return Int32
             elseif precision <= 18
