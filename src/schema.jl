@@ -113,7 +113,7 @@ According to the Iceberg specification:
 - `"string"` → `String`
 - `"uuid"` → `NTuple{16, UInt8}` - 16-byte UUID representation
 - `"binary"` → `Vector{UInt8}` - variable-length byte array
-- `"decimal(p,s)"` → `NTuple{16, UInt8}` - fixed-size byte array for decimal
+- `"decimal(p,s)"` → `Int32` (if p ≤ 9), `Int64` (if p ≤ 18), or `NTuple{16, UInt8}` (if p > 18)
 
 # Example
 
@@ -128,6 +128,14 @@ arrow_type = iceberg_type_to_arrow_type("date")
 # For an Iceberg field with type "timestamp"
 arrow_type = iceberg_type_to_arrow_type("timestamp")
 # Returns Arrow.Timestamp type - users should provide Arrow.Timestamp arrays
+
+# For an Iceberg field with type "decimal(5,2)"
+arrow_type = iceberg_type_to_arrow_type("decimal(5,2)")
+# Returns Int32 - users should provide Int32 values
+
+# For an Iceberg field with type "decimal(15,4)"
+arrow_type = iceberg_type_to_arrow_type("decimal(15,4)")
+# Returns Int64 - users should provide Int64 values
 
 # For an Iceberg field with type "decimal(38,18)"
 arrow_type = iceberg_type_to_arrow_type("decimal(38,18)")
@@ -190,12 +198,28 @@ function iceberg_type_to_arrow_type(iceberg_type::String)
         # Binary as byte vector
         return Vector{UInt8}
     elseif startswith(type_str, "decimal(")
-        # Decimal types like "decimal(38, 18)" are stored as fixed-length byte arrays
-        # Decimals are stored as 2's complement big-endian signed integers
-        # Byte length needed = ceil((precision * log2(10)) / 8) ≈ ceil(precision * 0.415)
-        # For typical cases, 16 bytes is sufficient (handles up to 128-bit numbers)
-        # The exact size should be calculated from precision if needed
-        return NTuple{16, UInt8}
+        # Decimal types like "decimal(38, 18)" use different physical types based on precision:
+        # - P <= 9: int32
+        # - P <= 18: int64
+        # - P > 18: fixed-length byte array
+        # Extract precision from "decimal(P,S)" format
+        match = match(r"decimal\((\d+)", type_str)
+        if match !== nothing
+            precision = parse(Int, match.captures[1])
+            if precision <= 9
+                return Int32
+            elseif precision <= 18
+                return Int64
+            else
+                # For precision > 18, use fixed-length byte array
+                # Byte length needed = ceil((precision * log2(10)) / 8) ≈ ceil(precision * 0.415)
+                # For typical cases (P <= 38), 16 bytes is sufficient
+                return NTuple{16, UInt8}
+            end
+        else
+            # Fallback if parsing fails
+            return NTuple{16, UInt8}
+        end
     else
         throw(ArgumentError("Unknown Iceberg type: $type_str"))
     end
