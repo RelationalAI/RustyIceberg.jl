@@ -526,19 +526,89 @@ mutable struct ColumnBatch
 end
 
 """
-    push!(batch::ColumnBatch, data::Vector{T}; validity=nothing) where T
+    push!(batch::ColumnBatch, data::Vector{String}; validity=nothing, length=nothing, column_type=nothing)
 
-Add a column to the batch. The column type is inferred from the element type.
+Add a string column to the batch. Strings are passed as concatenated UTF-8 bytes
+with an offsets array.
+
+# Arguments
+- `data`: The string column data array
+- `validity`: Optional validity mask (BitVector where false=null, true=valid)
+- `length`: Optional number of rows to use from the array. If not specified,
+  uses the full array length.
+- `column_type`: Optional explicit column type (defaults to COLUMN_TYPE_STRING)
+"""
+function Base.push!(batch::ColumnBatch, data::Vector{String}; validity::Union{Nothing, BitVector}=nothing, length::Union{Nothing, Int}=nothing, column_type::Union{Nothing, ColumnType}=nothing)
+    num_rows = length === nothing ? Base.length(data) : length
+    is_nullable = validity !== nothing
+    col_type = column_type === nothing ? COLUMN_TYPE_STRING : column_type
+
+    # Build concatenated bytes and offsets
+    # Offsets array has length num_rows + 1
+    offsets = Vector{Int64}(undef, num_rows + 1)
+    offsets[1] = 0
+
+    # First pass: compute total size and offsets
+    total_size = 0
+    for i in 1:num_rows
+        str_len = sizeof(data[i])
+        total_size += str_len
+        offsets[i + 1] = total_size
+    end
+
+    # Second pass: concatenate all string bytes
+    bytes = Vector{UInt8}(undef, total_size)
+    pos = 1
+    for i in 1:num_rows
+        str_bytes = codeunits(data[i])
+        str_len = Base.length(str_bytes)
+        copyto!(bytes, pos, str_bytes, 1, str_len)
+        pos += str_len
+    end
+
+    # Preserve both arrays
+    push!(batch.arrays_to_preserve, bytes)
+    push!(batch.arrays_to_preserve, offsets)
+
+    validity_ptr = if is_nullable
+        push!(batch.arrays_to_preserve, validity)
+        Ptr{UInt8}(pointer(validity.chunks))
+    else
+        Ptr{UInt8}(C_NULL)
+    end
+
+    desc = ColumnDescriptor(
+        Ptr{Cvoid}(pointer(bytes)),
+        pointer(offsets),
+        validity_ptr,
+        Csize_t(num_rows),
+        Int32(col_type),
+        is_nullable
+    )
+    push!(batch.descriptors, desc)
+    return batch
+end
+
+"""
+    push!(batch::ColumnBatch, data::Vector{T}; validity=nothing, length=nothing, column_type=nothing) where T
+
+Add a column to the batch. The column type is inferred from the element type unless
+explicitly specified.
 
 # Arguments
 - `data`: The column data array
 - `validity`: Optional validity mask (BitVector where false=null, true=valid)
+- `length`: Optional number of rows to use from the array. If not specified,
+  uses the full array length. This allows writing only a prefix of the array.
+- `column_type`: Optional explicit column type (ColumnType enum). If not specified,
+  inferred from the element type T. Use this when the physical storage type differs
+  from the logical type (e.g., Int32 data that represents Date32).
 """
-function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing, BitVector}=nothing) where T
+function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing, BitVector}=nothing, length::Union{Nothing, Int}=nothing, column_type::Union{Nothing, ColumnType}=nothing) where T
     push!(batch.arrays_to_preserve, data)
 
-    col_type = julia_type_to_column_type(T)
-    num_rows = length(data)
+    col_type = column_type === nothing ? julia_type_to_column_type(T) : column_type
+    num_rows = length === nothing ? Base.length(data) : length
     is_nullable = validity !== nothing
 
     validity_ptr = if is_nullable
@@ -627,11 +697,21 @@ Write columns from a ColumnBatch to the Parquet writer.
 This is the recommended way to use write_columns - the ColumnBatch automatically
 tracks all arrays that need to be preserved during the FFI call.
 
+# Arguments
+- `writer::DataFileWriter`: The writer to write to
+- `batch::ColumnBatch`: The column batch to write
+
 # Example
 ```julia
 batch = ColumnBatch()
 push!(batch, ids)
 push!(batch, values; validity=validity_vec)
+write_columns(writer, batch)
+
+# To write only first 100 rows, use the length parameter on push!:
+batch = ColumnBatch()
+push!(batch, ids; length=100)
+push!(batch, values; validity=validity_vec, length=100)
 write_columns(writer, batch)
 ```
 """
