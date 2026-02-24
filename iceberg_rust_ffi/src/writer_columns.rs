@@ -46,8 +46,6 @@ pub struct ColumnDescriptor {
     /// Pointer to validity bitmap (only if is_nullable is true)
     /// Each byte is 0 (null) or 1 (valid) - we convert to Arrow's bit-packed format
     pub validity_ptr: *const u8,
-    /// Number of bytes in the validity bitmap (equals num_rows for Julia Bool vectors)
-    pub validity_len: usize,
 }
 
 unsafe impl Send for ColumnDescriptor {}

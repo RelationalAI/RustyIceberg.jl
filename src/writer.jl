@@ -476,16 +476,24 @@ This struct must match the Rust `ColumnDescriptor` layout exactly.
 - `column_type::Int32`: Type of the column (see `ColumnType` enum)
 - `is_nullable::Bool`: Whether this column can contain null values
 - `validity_ptr::Ptr{UInt8}`: Pointer to validity bitmap (Julia Bool vector, 0=null, 1=valid)
-- `validity_len::Csize_t`: Length of validity array (equals num_rows)
+
+Note: The struct layout must match Rust's #[repr(C)] layout, including padding.
+Layout: data_ptr(0-7), offsets_ptr(8-15), num_rows(16-23), column_type(24-27),
+        is_nullable(28), padding(29-31), validity_ptr(32-39). Total: 40 bytes.
 """
 struct ColumnDescriptor
-    data_ptr::Ptr{Cvoid}
-    offsets_ptr::Ptr{Int64}
-    num_rows::Csize_t
-    column_type::Int32
-    is_nullable::Bool
-    validity_ptr::Ptr{UInt8}
-    validity_len::Csize_t
+    data_ptr::Ptr{Cvoid}        # 8 bytes, offset 0
+    offsets_ptr::Ptr{Int64}     # 8 bytes, offset 8
+    num_rows::Csize_t           # 8 bytes, offset 16
+    column_type::Int32          # 4 bytes, offset 24
+    is_nullable::Bool           # 1 byte,  offset 28
+    _pad1::UInt8                # 1 byte,  offset 29 (padding)
+    _pad2::UInt16               # 2 bytes, offset 30 (padding)
+    validity_ptr::Ptr{UInt8}    # 8 bytes, offset 32
+
+    # Inner constructor that fills padding fields automatically
+    ColumnDescriptor(data_ptr, offsets_ptr, num_rows, column_type, is_nullable, validity_ptr) =
+        new(data_ptr, offsets_ptr, num_rows, column_type, is_nullable, UInt8(0), UInt16(0), validity_ptr)
 end
 
 """
@@ -502,6 +510,62 @@ julia_type_to_column_type(::Type{Dates.Date}) = COLUMN_TYPE_DATE
 julia_type_to_column_type(::Type{Dates.DateTime}) = COLUMN_TYPE_TIMESTAMP
 julia_type_to_column_type(::Type{Bool}) = COLUMN_TYPE_BOOLEAN
 julia_type_to_column_type(::Type{UInt128}) = COLUMN_TYPE_UUID  # UUID stored as UInt128
+
+"""
+    ColumnBatch
+
+A builder for collecting column descriptors and their underlying arrays.
+Automatically tracks arrays that need to be preserved during FFI calls.
+
+# Example
+```julia
+batch = ColumnBatch()
+push!(batch, ids)                           # non-nullable column
+push!(batch, values; validity=validity_vec) # nullable column
+write_columns(writer, batch)
+```
+"""
+mutable struct ColumnBatch
+    descriptors::Vector{ColumnDescriptor}
+    arrays_to_preserve::Vector{Any}
+
+    ColumnBatch() = new(ColumnDescriptor[], Any[])
+end
+
+"""
+    push!(batch::ColumnBatch, data::Vector{T}; validity=nothing) where T
+
+Add a column to the batch. The column type is inferred from the element type.
+
+# Arguments
+- `data`: The column data array
+- `validity`: Optional validity array (UInt8 vector where 0=null, 1=valid)
+"""
+function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing, Vector{UInt8}}=nothing) where T
+    push!(batch.arrays_to_preserve, data)
+
+    col_type = julia_type_to_column_type(T)
+    num_rows = length(data)
+    is_nullable = validity !== nothing
+
+    validity_ptr = if is_nullable
+        push!(batch.arrays_to_preserve, validity)
+        pointer(validity)
+    else
+        Ptr{UInt8}(C_NULL)
+    end
+
+    desc = ColumnDescriptor(
+        Ptr{Cvoid}(pointer(data)),
+        Ptr{Int64}(C_NULL),  # offsets_ptr not used for non-string types
+        Csize_t(num_rows),
+        Int32(col_type),
+        is_nullable,
+        validity_ptr
+    )
+    push!(batch.descriptors, desc)
+    return batch
+end
 
 """
     write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}, arrays_to_preserve)
@@ -559,4 +623,24 @@ function write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}
     @throw_on_error(response, "write_columns", IcebergException)
 
     return nothing
+end
+
+"""
+    write_columns(writer::DataFileWriter, batch::ColumnBatch)
+
+Write columns from a ColumnBatch to the Parquet writer.
+
+This is the recommended way to use write_columns - the ColumnBatch automatically
+tracks all arrays that need to be preserved during the FFI call.
+
+# Example
+```julia
+batch = ColumnBatch()
+push!(batch, ids)
+push!(batch, values; validity=validity_vec)
+write_columns(writer, batch)
+```
+"""
+function write_columns(writer::DataFileWriter, batch::ColumnBatch)
+    write_columns(writer, batch.descriptors, batch.arrays_to_preserve)
 end

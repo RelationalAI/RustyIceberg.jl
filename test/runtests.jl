@@ -10,6 +10,9 @@ using Base64
 # Include test configuration helper (provides get_catalog_uri, get_catalog_properties, etc.)
 include("test_config.jl")
 
+# Include test helper functions (provides read_table_data, etc.)
+include("test_helpers.jl")
+
 @testset "RustyIceberg.jl" begin
 
 # Include schema tests

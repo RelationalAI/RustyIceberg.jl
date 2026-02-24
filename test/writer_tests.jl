@@ -91,43 +91,18 @@ using Tables
 
         # Test 7: Verify data was written by scanning the table
         println("\nTest 7: Verifying written data...")
-        scan = RustyIceberg.new_scan(updated_table)
-        stream = RustyIceberg.scan!(scan)
-
-        # Collect all data from the scan
-        all_ids = Int64[]
-        all_names = String[]
-        all_values = Float64[]
-
-        batch_ptr = RustyIceberg.next_batch(stream)
-        while batch_ptr != C_NULL
-            batch = unsafe_load(batch_ptr)
-            # Convert batch to Arrow table
-            data = batch.data
-            len = batch.length
-            if len > 0
-                arrow_data = unsafe_wrap(Array, data, len)
-                tbl = Arrow.Table(arrow_data)
-                cols = Tables.columns(tbl)
-                append!(all_ids, cols.id)
-                append!(all_names, cols.name)
-                append!(all_values, cols.value)
-            end
-            RustyIceberg.free_batch(batch_ptr)
-            batch_ptr = RustyIceberg.next_batch(stream)
-        end
-        RustyIceberg.free_stream(stream)
-        RustyIceberg.free_scan!(scan)
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
 
         # Verify row count
-        @test length(all_ids) == 8  # 5 + 3 rows written
-        println("✅ Verified $(length(all_ids)) rows in table")
+        @test length(tbl.id) == 8  # 5 + 3 rows written
+        println("✅ Verified $(length(tbl.id)) rows in table")
 
         # Sort by id for consistent comparison
-        perm = sortperm(all_ids)
-        sorted_ids = all_ids[perm]
-        sorted_names = all_names[perm]
-        sorted_values = all_values[perm]
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_names = tbl.name[perm]
+        sorted_values = tbl.value[perm]
 
         # Verify exact data matches what we wrote
         expected_ids = Int64[1, 2, 3, 4, 5, 6, 7, 8]
@@ -253,42 +228,18 @@ end
 
         # Verify all data was written by scanning the table
         println("\nVerifying all data from both writers...")
-        scan = RustyIceberg.new_scan(updated_table)
-        stream = RustyIceberg.scan!(scan)
-
-        # Collect all data from the scan
-        all_ids = Int64[]
-        all_names = String[]
-        all_values = Float64[]
-
-        batch_ptr = RustyIceberg.next_batch(stream)
-        while batch_ptr != C_NULL
-            batch = unsafe_load(batch_ptr)
-            data = batch.data
-            len = batch.length
-            if len > 0
-                arrow_data = unsafe_wrap(Array, data, len)
-                tbl = Arrow.Table(arrow_data)
-                cols = Tables.columns(tbl)
-                append!(all_ids, cols.id)
-                append!(all_names, cols.name)
-                append!(all_values, cols.value)
-            end
-            RustyIceberg.free_batch(batch_ptr)
-            batch_ptr = RustyIceberg.next_batch(stream)
-        end
-        RustyIceberg.free_stream(stream)
-        RustyIceberg.free_scan!(scan)
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
 
         # Verify row count - should have all 6 rows (3 from each writer)
-        @test length(all_ids) == 6
-        println("✅ Verified $(length(all_ids)) rows in table")
+        @test length(tbl.id) == 6
+        println("✅ Verified $(length(tbl.id)) rows in table")
 
         # Sort by id for consistent comparison
-        perm = sortperm(all_ids)
-        sorted_ids = all_ids[perm]
-        sorted_names = all_names[perm]
-        sorted_values = all_values[perm]
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_names = tbl.name[perm]
+        sorted_values = tbl.value[perm]
 
         # Verify exact data matches what we wrote from both writers
         expected_ids = Int64[1, 2, 3, 4, 5, 6]
@@ -505,42 +456,18 @@ end
 
         # Verify data was written by scanning the table
         println("\nVerifying written data...")
-        scan = RustyIceberg.new_scan(updated_table)
-        stream = RustyIceberg.scan!(scan)
-
-        # Collect all data from the scan
-        all_ids = Int64[]
-        all_names = String[]
-        all_values = Float64[]
-
-        batch_ptr = RustyIceberg.next_batch(stream)
-        while batch_ptr != C_NULL
-            batch = unsafe_load(batch_ptr)
-            data = batch.data
-            len = batch.length
-            if len > 0
-                arrow_data = unsafe_wrap(Array, data, len)
-                tbl = Arrow.Table(arrow_data)
-                cols = Tables.columns(tbl)
-                append!(all_ids, cols.id)
-                append!(all_names, cols.name)
-                append!(all_values, cols.value)
-            end
-            RustyIceberg.free_batch(batch_ptr)
-            batch_ptr = RustyIceberg.next_batch(stream)
-        end
-        RustyIceberg.free_stream(stream)
-        RustyIceberg.free_scan!(scan)
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
 
         # Verify row count
-        @test length(all_ids) == 3
-        println("✅ Verified $(length(all_ids)) rows in table")
+        @test length(tbl.id) == 3
+        println("✅ Verified $(length(tbl.id)) rows in table")
 
         # Sort by id for consistent comparison
-        perm = sortperm(all_ids)
-        sorted_ids = all_ids[perm]
-        sorted_names = all_names[perm]
-        sorted_values = all_values[perm]
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_names = tbl.name[perm]
+        sorted_values = tbl.value[perm]
 
         # Verify exact data matches what we wrote
         expected_ids = Int64[10, 20, 30]
@@ -676,47 +603,23 @@ end
 
             # Verify data was written by scanning the table
             println("\nVerifying written data...")
-            scan = RustyIceberg.new_scan(updated_table)
-            stream = RustyIceberg.scan!(scan)
-
-            # Collect all data from the scan
-            all_ids = Int64[]
-            all_names = String[]
-            all_values = Float64[]
-
-            batch_ptr = RustyIceberg.next_batch(stream)
-            while batch_ptr != C_NULL
-                batch = unsafe_load(batch_ptr)
-                data = batch.data
-                len = batch.length
-                if len > 0
-                    arrow_data = unsafe_wrap(Array, data, len)
-                    tbl = Arrow.Table(arrow_data)
-                    cols = Tables.columns(tbl)
-                    append!(all_ids, cols.id)
-                    append!(all_names, cols.name)
-                    append!(all_values, cols.value)
-                end
-                RustyIceberg.free_batch(batch_ptr)
-                batch_ptr = RustyIceberg.next_batch(stream)
-            end
-            RustyIceberg.free_stream(stream)
-            RustyIceberg.free_scan!(scan)
+            tbl = read_table_data(updated_table)
+            @test tbl !== nothing
 
             # Verify row count and data
-            @test length(all_ids) == 5
-            println("✅ Verified $(length(all_ids)) rows in table")
+            @test length(tbl.id) == 5
+            println("✅ Verified $(length(tbl.id)) rows in table")
 
             # Sort by id for consistent comparison
-            perm = sortperm(all_ids)
-            all_ids = all_ids[perm]
-            all_names = all_names[perm]
-            all_values = all_values[perm]
+            perm = sortperm(tbl.id)
+            sorted_ids = tbl.id[perm]
+            sorted_names = tbl.name[perm]
+            sorted_values = tbl.value[perm]
 
             # Verify data matches
-            @test all_ids == [1, 2, 3, 4, 5]
-            @test all_names == ["Alice", "Bob", "Charlie", "Diana", "Eve"]
-            @test all_values == [1.1, 2.2, 3.3, 4.4, 5.5]
+            @test sorted_ids == [1, 2, 3, 4, 5]
+            @test sorted_names == ["Alice", "Bob", "Charlie", "Diana", "Eve"]
+            @test sorted_values == [1.1, 2.2, 3.3, 4.4, 5.5]
             println("✅ Data verified successfully")
 
         finally
@@ -824,8 +727,7 @@ end
                     Csize_t(num_rows),              # num_rows
                     Int32(RustyIceberg.COLUMN_TYPE_INT64),  # column_type
                     false,                          # is_nullable
-                    Ptr{UInt8}(C_NULL),             # validity_ptr (not nullable)
-                    Csize_t(0)                      # validity_len
+                    Ptr{UInt8}(C_NULL)              # validity_ptr (not nullable)
                 ),
                 RustyIceberg.ColumnDescriptor(
                     Ptr{Cvoid}(pointer(counts)),
@@ -833,8 +735,7 @@ end
                     Csize_t(num_rows),
                     Int32(RustyIceberg.COLUMN_TYPE_INT32),
                     true,                           # nullable
-                    pointer(validity_counts),
-                    Csize_t(num_rows)
+                    pointer(validity_counts)
                 ),
                 RustyIceberg.ColumnDescriptor(
                     Ptr{Cvoid}(pointer(values)),
@@ -842,8 +743,7 @@ end
                     Csize_t(num_rows),
                     Int32(RustyIceberg.COLUMN_TYPE_FLOAT64),
                     true,
-                    pointer(validity_values),
-                    Csize_t(num_rows)
+                    pointer(validity_values)
                 ),
                 RustyIceberg.ColumnDescriptor(
                     Ptr{Cvoid}(pointer(flags)),
@@ -851,8 +751,7 @@ end
                     Csize_t(num_rows),
                     Int32(RustyIceberg.COLUMN_TYPE_BOOLEAN),
                     true,
-                    pointer(validity_flags),
-                    Csize_t(num_rows)
+                    pointer(validity_flags)
                 ),
             ]
 
@@ -877,45 +776,19 @@ end
 
         # Verify data was written by scanning the table
         println("\nVerifying written data...")
-        scan = RustyIceberg.new_scan(updated_table)
-        stream = RustyIceberg.scan!(scan)
-
-        # Collect all data from the scan
-        all_ids = Int64[]
-        all_counts = Int32[]
-        all_values = Float64[]
-        all_flags = Bool[]
-
-        batch_ptr = RustyIceberg.next_batch(stream)
-        while batch_ptr != C_NULL
-            batch = unsafe_load(batch_ptr)
-            data = batch.data
-            len = batch.length
-            if len > 0
-                arrow_data = unsafe_wrap(Array, data, len)
-                tbl = Arrow.Table(arrow_data)
-                cols = Tables.columns(tbl)
-                append!(all_ids, cols.id)
-                append!(all_counts, cols.count)
-                append!(all_values, cols.value)
-                append!(all_flags, cols.flag)
-            end
-            RustyIceberg.free_batch(batch_ptr)
-            batch_ptr = RustyIceberg.next_batch(stream)
-        end
-        RustyIceberg.free_stream(stream)
-        RustyIceberg.free_scan!(scan)
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
 
         # Verify row count
-        @test length(all_ids) == 5
-        println("✅ Verified $(length(all_ids)) rows in table")
+        @test length(tbl.id) == 5
+        println("✅ Verified $(length(tbl.id)) rows in table")
 
         # Sort by id for consistent comparison
-        perm = sortperm(all_ids)
-        sorted_ids = all_ids[perm]
-        sorted_counts = all_counts[perm]
-        sorted_values = all_values[perm]
-        sorted_flags = all_flags[perm]
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_counts = tbl.count[perm]
+        sorted_values = tbl.value[perm]
+        sorted_flags = tbl.flag[perm]
 
         # Verify exact data matches what we wrote
         @test sorted_ids == Int64[1, 2, 3, 4, 5]
@@ -1008,8 +881,7 @@ end
                     Csize_t(num_rows),
                     Int32(RustyIceberg.COLUMN_TYPE_INT64),
                     false,
-                    Ptr{UInt8}(C_NULL),
-                    Csize_t(0)
+                    Ptr{UInt8}(C_NULL)
                 ),
                 RustyIceberg.ColumnDescriptor(
                     Ptr{Cvoid}(pointer(values)),
@@ -1017,8 +889,7 @@ end
                     Csize_t(num_rows),
                     Int32(RustyIceberg.COLUMN_TYPE_FLOAT64),
                     true,
-                    pointer(validity_values),
-                    Csize_t(num_rows)
+                    pointer(validity_values)
                 ),
             ]
 
@@ -1040,34 +911,13 @@ end
 
         # Verify data including nulls
         println("\nVerifying written data with nulls...")
-        scan = RustyIceberg.new_scan(updated_table)
-        stream = RustyIceberg.scan!(scan)
-
-        all_ids = Int64[]
-        all_values = Union{Float64, Missing}[]
-
-        batch_ptr = RustyIceberg.next_batch(stream)
-        while batch_ptr != C_NULL
-            batch = unsafe_load(batch_ptr)
-            data = batch.data
-            len = batch.length
-            if len > 0
-                arrow_data = unsafe_wrap(Array, data, len)
-                tbl = Arrow.Table(arrow_data)
-                cols = Tables.columns(tbl)
-                append!(all_ids, cols.id)
-                append!(all_values, cols.value)
-            end
-            RustyIceberg.free_batch(batch_ptr)
-            batch_ptr = RustyIceberg.next_batch(stream)
-        end
-        RustyIceberg.free_stream(stream)
-        RustyIceberg.free_scan!(scan)
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
 
         # Sort by id
-        perm = sortperm(all_ids)
-        sorted_ids = all_ids[perm]
-        sorted_values = all_values[perm]
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_values = tbl.value[perm]
 
         # Verify data including null positions
         @test sorted_ids == Int64[1, 2, 3, 4, 5]
