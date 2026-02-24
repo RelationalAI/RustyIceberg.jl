@@ -4,6 +4,8 @@ using RustyIceberg: SortDirection, ASC, DESC
 using RustyIceberg: NullOrder, NULLS_FIRST, NULLS_LAST
 using Test
 using JSON
+using Arrow
+using Dates
 
 @testset "Schema Types" begin
     @testset "Field Creation" begin
@@ -253,6 +255,78 @@ end
         json_str = schema_to_json(Schema([field]))
         parsed = JSON.parse(json_str)
         @test parsed["fields"][1]["type"] == str_val
+    end
+end
+
+@testset "Arrow Type Mappings" begin
+    @testset "iceberg_type_to_arrow_type" begin
+        # Basic types
+        @test iceberg_type_to_arrow_type("boolean") == Bool
+        @test iceberg_type_to_arrow_type("int") == Int32
+        @test iceberg_type_to_arrow_type("long") == Int64
+        @test iceberg_type_to_arrow_type("float") == Float32
+        @test iceberg_type_to_arrow_type("double") == Float64
+        @test iceberg_type_to_arrow_type("string") == String
+
+        # Temporal types
+        @test iceberg_type_to_arrow_type("date") == Dates.Date
+        @test iceberg_type_to_arrow_type("time") == Int64
+        @test iceberg_type_to_arrow_type("timestamp") == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
+        @test iceberg_type_to_arrow_type("timestamptz") == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, :UTC}
+        @test iceberg_type_to_arrow_type("timestamp_ns") == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, nothing}
+        @test iceberg_type_to_arrow_type("timestamptz_ns") == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, :UTC}
+
+        # Complex types
+        @test iceberg_type_to_arrow_type("uuid") == NTuple{16, UInt8}
+        @test iceberg_type_to_arrow_type("binary") == Vector{UInt8}
+
+        # Decimal types with different precisions
+        @test iceberg_type_to_arrow_type("decimal(5,2)") == Int32
+        @test iceberg_type_to_arrow_type("decimal(9,0)") == Int32
+        @test iceberg_type_to_arrow_type("decimal(15,4)") == Int64
+        @test iceberg_type_to_arrow_type("decimal(18,6)") == Int64
+        @test iceberg_type_to_arrow_type("decimal(25,10)") == NTuple{16, UInt8}
+        @test iceberg_type_to_arrow_type("decimal(38,18)") == NTuple{16, UInt8}
+    end
+
+    @testset "arrow_type with nullable fields" begin
+        # Required field should return base type
+        field_required = Field(Int32(1), "id", "long"; required=true)
+        @test arrow_type(field_required) == Int64
+
+        # Nullable field should return Union{Missing, T}
+        field_nullable = Field(Int32(2), "name", "string"; required=false)
+        @test arrow_type(field_nullable) == Union{Missing, String}
+
+        # Test with date field
+        field_date_required = Field(Int32(3), "birth_date", "date"; required=true)
+        @test arrow_type(field_date_required) == Dates.Date
+
+        field_date_nullable = Field(Int32(4), "death_date", "date"; required=false)
+        @test arrow_type(field_date_nullable) == Union{Missing, Dates.Date}
+
+        # Test with timestamp field
+        field_ts_nullable = Field(Int32(5), "created_at", "timestamp"; required=false)
+        @test arrow_type(field_ts_nullable) == Union{Missing, Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}}
+    end
+
+    @testset "arrow_types for schema" begin
+        schema = Schema([
+            Field(Int32(1), "id", "long"; required=true),
+            Field(Int32(2), "name", "string"; required=false),
+            Field(Int32(3), "event_date", "date"; required=false),
+            Field(Int32(4), "created_at", "timestamp"; required=true),
+        ])
+
+        types = arrow_types(schema)
+
+        # Required fields should have base types
+        @test types["id"] == Int64
+        @test types["created_at"] == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
+
+        # Nullable fields should have Union{Missing, T}
+        @test types["name"] == Union{Missing, String}
+        @test types["event_date"] == Union{Missing, Dates.Date}
     end
 end
 
