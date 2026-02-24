@@ -472,28 +472,21 @@ This struct must match the Rust `ColumnDescriptor` layout exactly.
 # Fields
 - `data_ptr::Ptr{Cvoid}`: Pointer to the raw column data
 - `offsets_ptr::Ptr{Int64}`: For string columns, pointer to offsets array (length = num_rows + 1)
+- `validity_ptr::Ptr{UInt8}`: Pointer to validity bitmap (BitVector.chunks, bit-packed)
 - `num_rows::Csize_t`: Number of rows in the column
 - `column_type::Int32`: Type of the column (see `ColumnType` enum)
 - `is_nullable::Bool`: Whether this column can contain null values
-- `validity_ptr::Ptr{UInt8}`: Pointer to validity bitmap (BitVector.chunks, bit-packed)
 
-Note: The struct layout must match Rust's #[repr(C)] layout, including padding.
-Layout: data_ptr(0-7), offsets_ptr(8-15), num_rows(16-23), column_type(24-27),
-        is_nullable(28), padding(29-31), validity_ptr(32-39). Total: 40 bytes.
+Note: Fields are ordered to avoid padding (8-byte fields first, then 4-byte, then 1-byte).
 """
 struct ColumnDescriptor
     data_ptr::Ptr{Cvoid}        # 8 bytes, offset 0
     offsets_ptr::Ptr{Int64}     # 8 bytes, offset 8
-    num_rows::Csize_t           # 8 bytes, offset 16
-    column_type::Int32          # 4 bytes, offset 24
-    is_nullable::Bool           # 1 byte,  offset 28
-    _pad1::UInt8                # 1 byte,  offset 29 (padding)
-    _pad2::UInt16               # 2 bytes, offset 30 (padding)
-    validity_ptr::Ptr{UInt8}    # 8 bytes, offset 32
-
-    # Inner constructor that fills padding fields automatically
-    ColumnDescriptor(data_ptr, offsets_ptr, num_rows, column_type, is_nullable, validity_ptr) =
-        new(data_ptr, offsets_ptr, num_rows, column_type, is_nullable, UInt8(0), UInt16(0), validity_ptr)
+    validity_ptr::Ptr{UInt8}    # 8 bytes, offset 16
+    num_rows::Csize_t           # 8 bytes, offset 24
+    column_type::Int32          # 4 bytes, offset 32
+    is_nullable::Bool           # 1 byte,  offset 36
+    # (3 bytes trailing padding added by compiler, total 40 bytes)
 end
 
 """
@@ -559,10 +552,10 @@ function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing
     desc = ColumnDescriptor(
         Ptr{Cvoid}(pointer(data)),
         Ptr{Int64}(C_NULL),  # offsets_ptr not used for non-string types
+        validity_ptr,
         Csize_t(num_rows),
         Int32(col_type),
-        is_nullable,
-        validity_ptr
+        is_nullable
     )
     push!(batch.descriptors, desc)
     return batch

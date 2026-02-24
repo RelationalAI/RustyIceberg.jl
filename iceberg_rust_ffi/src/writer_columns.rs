@@ -37,16 +37,16 @@ pub struct ColumnDescriptor {
     pub data_ptr: *const c_void,
     /// For string columns: pointer to offsets array (Int64)
     pub offsets_ptr: *const i64,
+    /// Pointer to validity bitmap (only if is_nullable is true)
+    /// Points to bit-packed data from Julia's BitVector.chunks (UInt64 array)
+    /// Bit i is 1 if row i is valid, 0 if null
+    pub validity_ptr: *const u8,
     /// Number of rows
     pub num_rows: usize,
     /// Column type (see COLUMN_TYPE_* constants)
     pub column_type: i32,
     /// Whether this column is nullable
     pub is_nullable: bool,
-    /// Pointer to validity bitmap (only if is_nullable is true)
-    /// Points to bit-packed data from Julia's BitVector.chunks (UInt64 array)
-    /// Bit i is 1 if row i is valid, 0 if null
-    pub validity_ptr: *const u8,
 }
 
 unsafe impl Send for ColumnDescriptor {}
