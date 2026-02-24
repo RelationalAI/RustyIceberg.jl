@@ -28,6 +28,7 @@ pub const COLUMN_TYPE_DATE: i32 = 5;
 pub const COLUMN_TYPE_TIMESTAMP: i32 = 6;
 pub const COLUMN_TYPE_BOOLEAN: i32 = 7;
 pub const COLUMN_TYPE_UUID: i32 = 8;
+pub const COLUMN_TYPE_TIMESTAMPTZ: i32 = 9;
 
 /// Descriptor for a single column passed from Julia
 #[repr(C)]
@@ -97,13 +98,21 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
             Arc::new(PrimitiveArray::<Date32Type>::new(buffer, null_buffer))
         }
         COLUMN_TYPE_TIMESTAMP => {
-            // Timestamp is stored as Int64 (microseconds since epoch)
-            // Note: We don't set timezone here - the Arrow schema from the table
-            // determines whether this is timestamp (no tz) or timestamptz (UTC).
-            // RecordBatch::try_new will cast if needed.
+            // Timestamp without timezone (Iceberg `timestamp`)
+            // Stored as Int64 microseconds since epoch
             let data = std::slice::from_raw_parts(desc.data_ptr as *const i64, desc.num_rows);
             let buffer = ScalarBuffer::from(data.to_vec());
             Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(buffer, null_buffer))
+        }
+        COLUMN_TYPE_TIMESTAMPTZ => {
+            // Timestamp with UTC timezone (Iceberg `timestamptz`)
+            // Stored as Int64 microseconds since epoch, with timezone metadata
+            let data = std::slice::from_raw_parts(desc.data_ptr as *const i64, desc.num_rows);
+            let buffer = ScalarBuffer::from(data.to_vec());
+            Arc::new(
+                PrimitiveArray::<TimestampMicrosecondType>::new(buffer, null_buffer)
+                    .with_timezone("UTC"),
+            )
         }
         COLUMN_TYPE_BOOLEAN => {
             let data = std::slice::from_raw_parts(desc.data_ptr as *const u8, desc.num_rows);

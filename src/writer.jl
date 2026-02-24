@@ -458,9 +458,10 @@ Enum for column data types, matching the Rust FFI constants.
     COLUMN_TYPE_FLOAT64 = 3
     COLUMN_TYPE_STRING = 4
     COLUMN_TYPE_DATE = 5
-    COLUMN_TYPE_TIMESTAMP = 6
+    COLUMN_TYPE_TIMESTAMP = 6      # Timestamp without timezone (Iceberg `timestamp`)
     COLUMN_TYPE_BOOLEAN = 7
     COLUMN_TYPE_UUID = 8
+    COLUMN_TYPE_TIMESTAMPTZ = 9    # Timestamp with UTC timezone (Iceberg `timestamptz`)
 end
 
 """
