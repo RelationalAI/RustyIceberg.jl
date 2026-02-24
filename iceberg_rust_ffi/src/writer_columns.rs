@@ -3,7 +3,6 @@
 /// This module provides FFI bindings for writing raw column data directly to Parquet,
 /// avoiding the overhead of Arrow IPC serialization. Julia passes raw column pointers
 /// and metadata, and Rust builds Arrow arrays directly from them.
-
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -15,7 +14,9 @@ use arrow_buffer::{BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
 
 use crate::writer::IcebergDataFileWriter;
 use iceberg::writer::IcebergWriter;
-use object_store_ffi::{export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT};
+use object_store_ffi::{
+    export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
+};
 
 /// Column type codes (must match Julia's ColumnType enum)
 pub const COLUMN_TYPE_INT32: i32 = 0;
@@ -64,7 +65,11 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
                 bits[i / 8] |= 1 << (i % 8);
             }
         }
-        Some(NullBuffer::new(BooleanBuffer::new(Buffer::from(bits), 0, desc.num_rows)))
+        Some(NullBuffer::new(BooleanBuffer::new(
+            Buffer::from(bits),
+            0,
+            desc.num_rows,
+        )))
     } else {
         None
     };
@@ -102,7 +107,7 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
             let buffer = ScalarBuffer::from(data.to_vec());
             Arc::new(
                 PrimitiveArray::<TimestampMicrosecondType>::new(buffer, null_buffer)
-                    .with_timezone("UTC")
+                    .with_timezone("UTC"),
             )
         }
         COLUMN_TYPE_BOOLEAN => {
@@ -157,7 +162,7 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
             let values: Vec<&[u8]> = data.chunks(16).collect();
             Arc::new(
                 arrow_array::FixedSizeBinaryArray::try_from_iter(values.into_iter())
-                    .map_err(|e| anyhow::anyhow!("Failed to create UUID array: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to create UUID array: {}", e))?,
             )
         }
         _ => {
