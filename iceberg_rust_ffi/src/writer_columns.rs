@@ -98,12 +98,12 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
         }
         COLUMN_TYPE_TIMESTAMP => {
             // Timestamp is stored as Int64 (microseconds since epoch)
+            // Note: We don't set timezone here - the Arrow schema from the table
+            // determines whether this is timestamp (no tz) or timestamptz (UTC).
+            // RecordBatch::try_new will cast if needed.
             let data = std::slice::from_raw_parts(desc.data_ptr as *const i64, desc.num_rows);
             let buffer = ScalarBuffer::from(data.to_vec());
-            Arc::new(
-                PrimitiveArray::<TimestampMicrosecondType>::new(buffer, null_buffer)
-                    .with_timezone("UTC"),
-            )
+            Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(buffer, null_buffer))
         }
         COLUMN_TYPE_BOOLEAN => {
             let data = std::slice::from_raw_parts(desc.data_ptr as *const u8, desc.num_rows);
