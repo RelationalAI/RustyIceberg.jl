@@ -712,52 +712,19 @@ end
         validity_values = UInt8[1, 1, 1, 1, 1]
         validity_flags = UInt8[1, 1, 1, 1, 1]
 
-        num_rows = length(ids)
-
         data_files = RustyIceberg.with_data_file_writer(table) do writer
             @test writer !== nothing
             @test writer.ptr != C_NULL
             println("✅ Writer created successfully")
 
-            # Build column descriptors
-            columns = RustyIceberg.ColumnDescriptor[
-                RustyIceberg.ColumnDescriptor(
-                    Ptr{Cvoid}(pointer(ids)),       # data_ptr
-                    Ptr{Int64}(C_NULL),             # offsets_ptr (not used for non-string)
-                    Csize_t(num_rows),              # num_rows
-                    Int32(RustyIceberg.COLUMN_TYPE_INT64),  # column_type
-                    false,                          # is_nullable
-                    Ptr{UInt8}(C_NULL)              # validity_ptr (not nullable)
-                ),
-                RustyIceberg.ColumnDescriptor(
-                    Ptr{Cvoid}(pointer(counts)),
-                    Ptr{Int64}(C_NULL),
-                    Csize_t(num_rows),
-                    Int32(RustyIceberg.COLUMN_TYPE_INT32),
-                    true,                           # nullable
-                    pointer(validity_counts)
-                ),
-                RustyIceberg.ColumnDescriptor(
-                    Ptr{Cvoid}(pointer(values)),
-                    Ptr{Int64}(C_NULL),
-                    Csize_t(num_rows),
-                    Int32(RustyIceberg.COLUMN_TYPE_FLOAT64),
-                    true,
-                    pointer(validity_values)
-                ),
-                RustyIceberg.ColumnDescriptor(
-                    Ptr{Cvoid}(pointer(flags)),
-                    Ptr{Int64}(C_NULL),
-                    Csize_t(num_rows),
-                    Int32(RustyIceberg.COLUMN_TYPE_BOOLEAN),
-                    true,
-                    pointer(validity_flags)
-                ),
-            ]
+            # Build column batch using the helper
+            batch = RustyIceberg.ColumnBatch()
+            push!(batch, ids)
+            push!(batch, counts; validity=validity_counts)
+            push!(batch, values; validity=validity_values)
+            push!(batch, flags; validity=validity_flags)
 
-            # Pass all arrays to preserve during FFI call
-            arrays_to_preserve = (ids, counts, values, flags, validity_counts, validity_values, validity_flags)
-            RustyIceberg.write_columns(writer, columns, arrays_to_preserve)
+            RustyIceberg.write_columns(writer, batch)
             println("✅ Data written via write_columns")
         end
         @test data_files !== nothing
@@ -871,30 +838,12 @@ end
         values = Float64[1.1, 0.0, 3.3, 0.0, 5.5]  # 0.0 will be null based on validity
         validity_values = UInt8[1, 0, 1, 0, 1]  # positions 2 and 4 are null
 
-        num_rows = length(ids)
-
         data_files = RustyIceberg.with_data_file_writer(table) do writer
-            columns = RustyIceberg.ColumnDescriptor[
-                RustyIceberg.ColumnDescriptor(
-                    Ptr{Cvoid}(pointer(ids)),
-                    Ptr{Int64}(C_NULL),
-                    Csize_t(num_rows),
-                    Int32(RustyIceberg.COLUMN_TYPE_INT64),
-                    false,
-                    Ptr{UInt8}(C_NULL)
-                ),
-                RustyIceberg.ColumnDescriptor(
-                    Ptr{Cvoid}(pointer(values)),
-                    Ptr{Int64}(C_NULL),
-                    Csize_t(num_rows),
-                    Int32(RustyIceberg.COLUMN_TYPE_FLOAT64),
-                    true,
-                    pointer(validity_values)
-                ),
-            ]
+            batch = RustyIceberg.ColumnBatch()
+            push!(batch, ids)
+            push!(batch, values; validity=validity_values)
 
-            arrays_to_preserve = (ids, values, validity_values)
-            RustyIceberg.write_columns(writer, columns, arrays_to_preserve)
+            RustyIceberg.write_columns(writer, batch)
             println("✅ Data with nulls written via write_columns")
         end
         @test data_files !== nothing
