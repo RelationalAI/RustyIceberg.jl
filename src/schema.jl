@@ -259,18 +259,29 @@ end
 
 Get the Arrow/Julia type that should be used for data corresponding to this field.
 
-This is a convenience method that calls `iceberg_type_to_arrow_type()` with the field's type.
+This function returns the Arrow/Julia type for the field's type, and accounts for nullability:
+- If the field is required, returns the type as-is
+- If the field is not required (nullable), returns `Union{Missing, T}` where T is the base type
 
 # Example
 
 ```julia
-field = Field(Int32(1), "event_date", "date"; required=true)
-arrow_t = arrow_type(field)
+field_required = Field(Int32(1), "event_date", "date"; required=true)
+arrow_t = arrow_type(field_required)
 # Returns Date type - users should provide Date objects
+
+field_nullable = Field(Int32(2), "description", "string"; required=false)
+arrow_t = arrow_type(field_nullable)
+# Returns Union{Missing, String} - users can provide String or missing values
 ```
 """
 function arrow_type(field::Field)
-    iceberg_type_to_arrow_type(field.type)
+    base_type = iceberg_type_to_arrow_type(field.type)
+    if field.required
+        return base_type
+    else
+        return Union{Missing, base_type}
+    end
 end
 
 """
@@ -310,22 +321,22 @@ end
 Get a dictionary mapping field names to their Arrow/Julia types for the schema.
 
 This helps users understand what data types they need to provide when writing to
-an Iceberg table with this schema.
+an Iceberg table with this schema. For nullable fields, the type will be `Union{Missing, T}`.
 
 # Example
 
 ```julia
 schema = Schema([
     Field(Int32(1), "id", "long"; required=true),
-    Field(Int32(2), "event_date", "date"),
-    Field(Int32(3), "event_time", "timestamp"),
+    Field(Int32(2), "event_date", "date"; required=false),
+    Field(Int32(3), "event_time", "timestamp"; required=true),
 ])
 
 types = arrow_types(schema)
 # Returns Dict{String, Type}:
 #   "id" => Int64
-#   "event_date" => Date
-#   "event_time" => Int64
+#   "event_date" => Union{Missing, Date}
+#   "event_time" => Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
 ```
 """
 function arrow_types(schema::Schema)::Dict{String, Type}
