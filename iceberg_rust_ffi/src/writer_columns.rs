@@ -104,7 +104,10 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
             // Stored as Int64 microseconds since epoch
             let data = std::slice::from_raw_parts(desc.data_ptr as *const i64, desc.num_rows);
             let buffer = ScalarBuffer::from(data.to_vec());
-            Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(buffer, null_buffer))
+            Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(
+                buffer,
+                null_buffer,
+            ))
         }
         COLUMN_TYPE_TIMESTAMPTZ => {
             // Timestamp with UTC timezone (Iceberg `timestamptz`)
