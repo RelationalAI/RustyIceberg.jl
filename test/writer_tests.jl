@@ -752,3 +752,355 @@ end
 
     println("\n✅ Writer with vended credentials tests completed!")
 end
+
+@testset "Writer write_columns API" begin
+    println("Testing write_columns (raw column) API...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        # Create catalog connection
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+        println("✅ Catalog created successfully")
+
+        # Create a test namespace for table creation
+        test_namespace = ["test_write_columns_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+        println("✅ Test namespace created: $test_namespace")
+
+        # Create a schema for test table with various types
+        schema = Schema([
+            Field(Int32(1), "id", "long"; required=true),
+            Field(Int32(2), "count", "int"; required=false),
+            Field(Int32(3), "value", "double"; required=false),
+            Field(Int32(4), "flag", "boolean"; required=false),
+        ])
+
+        # Create test table
+        table_name = "write_columns_test_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(
+            catalog,
+            test_namespace,
+            table_name,
+            schema
+        )
+        @test table != C_NULL
+        println("✅ Test table created: $table_name")
+
+        # Test: Write raw column data using write_columns
+        println("\nTest: Writing data via write_columns...")
+
+        # Prepare raw column data
+        ids = Int64[1, 2, 3, 4, 5]
+        counts = Int32[10, 20, 30, 40, 50]
+        values = Float64[1.1, 2.2, 3.3, 4.4, 5.5]
+        flags = UInt8[1, 0, 1, 0, 1]  # Booleans as bytes (1=true, 0=false)
+
+        # Validity masks (all valid for this test)
+        validity_counts = UInt8[1, 1, 1, 1, 1]
+        validity_values = UInt8[1, 1, 1, 1, 1]
+        validity_flags = UInt8[1, 1, 1, 1, 1]
+
+        num_rows = length(ids)
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            @test writer !== nothing
+            @test writer.ptr != C_NULL
+            println("✅ Writer created successfully")
+
+            # Build column descriptors
+            columns = RustyIceberg.ColumnDescriptor[
+                RustyIceberg.ColumnDescriptor(
+                    Ptr{Cvoid}(pointer(ids)),       # data_ptr
+                    Ptr{Int64}(C_NULL),             # offsets_ptr (not used for non-string)
+                    Csize_t(num_rows),              # num_rows
+                    Int32(RustyIceberg.COLUMN_TYPE_INT64),  # column_type
+                    false,                          # is_nullable
+                    Ptr{UInt8}(C_NULL),             # validity_ptr (not nullable)
+                    Csize_t(0)                      # validity_len
+                ),
+                RustyIceberg.ColumnDescriptor(
+                    Ptr{Cvoid}(pointer(counts)),
+                    Ptr{Int64}(C_NULL),
+                    Csize_t(num_rows),
+                    Int32(RustyIceberg.COLUMN_TYPE_INT32),
+                    true,                           # nullable
+                    pointer(validity_counts),
+                    Csize_t(num_rows)
+                ),
+                RustyIceberg.ColumnDescriptor(
+                    Ptr{Cvoid}(pointer(values)),
+                    Ptr{Int64}(C_NULL),
+                    Csize_t(num_rows),
+                    Int32(RustyIceberg.COLUMN_TYPE_FLOAT64),
+                    true,
+                    pointer(validity_values),
+                    Csize_t(num_rows)
+                ),
+                RustyIceberg.ColumnDescriptor(
+                    Ptr{Cvoid}(pointer(flags)),
+                    Ptr{Int64}(C_NULL),
+                    Csize_t(num_rows),
+                    Int32(RustyIceberg.COLUMN_TYPE_BOOLEAN),
+                    true,
+                    pointer(validity_flags),
+                    Csize_t(num_rows)
+                ),
+            ]
+
+            # Pass all arrays to preserve during FFI call
+            arrays_to_preserve = (ids, counts, values, flags, validity_counts, validity_values, validity_flags)
+            RustyIceberg.write_columns(writer, columns, arrays_to_preserve)
+            println("✅ Data written via write_columns")
+        end
+        @test data_files !== nothing
+        @test data_files.ptr != C_NULL
+        println("✅ Writer closed successfully, got DataFiles handle")
+
+        # Commit the data
+        println("\nCommitting data files via transaction...")
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+        println("✅ Transaction committed successfully")
+
+        # Verify data was written by scanning the table
+        println("\nVerifying written data...")
+        scan = RustyIceberg.new_scan(updated_table)
+        stream = RustyIceberg.scan!(scan)
+
+        # Collect all data from the scan
+        all_ids = Int64[]
+        all_counts = Int32[]
+        all_values = Float64[]
+        all_flags = Bool[]
+
+        batch_ptr = RustyIceberg.next_batch(stream)
+        while batch_ptr != C_NULL
+            batch = unsafe_load(batch_ptr)
+            data = batch.data
+            len = batch.length
+            if len > 0
+                arrow_data = unsafe_wrap(Array, data, len)
+                tbl = Arrow.Table(arrow_data)
+                cols = Tables.columns(tbl)
+                append!(all_ids, cols.id)
+                append!(all_counts, cols.count)
+                append!(all_values, cols.value)
+                append!(all_flags, cols.flag)
+            end
+            RustyIceberg.free_batch(batch_ptr)
+            batch_ptr = RustyIceberg.next_batch(stream)
+        end
+        RustyIceberg.free_stream(stream)
+        RustyIceberg.free_scan!(scan)
+
+        # Verify row count
+        @test length(all_ids) == 5
+        println("✅ Verified $(length(all_ids)) rows in table")
+
+        # Sort by id for consistent comparison
+        perm = sortperm(all_ids)
+        sorted_ids = all_ids[perm]
+        sorted_counts = all_counts[perm]
+        sorted_values = all_values[perm]
+        sorted_flags = all_flags[perm]
+
+        # Verify exact data matches what we wrote
+        @test sorted_ids == Int64[1, 2, 3, 4, 5]
+        @test sorted_counts == Int32[10, 20, 30, 40, 50]
+        @test sorted_values == Float64[1.1, 2.2, 3.3, 4.4, 5.5]
+        @test sorted_flags == Bool[true, false, true, false, true]
+        println("✅ Verified write_columns data content matches exactly")
+
+        # Clean up updated table
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        # Clean up all resources in reverse order
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+            println("✅ Table cleaned up")
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+            println("✅ Test table dropped")
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+            println("✅ Test namespace dropped")
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+            println("✅ Catalog cleaned up")
+        end
+    end
+
+    println("\n✅ write_columns API tests completed!")
+end
+
+@testset "Writer write_columns with nulls" begin
+    println("Testing write_columns with null values...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        # Create catalog connection
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+        println("✅ Catalog created successfully")
+
+        # Create a test namespace
+        test_namespace = ["test_write_cols_nulls_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+        println("✅ Test namespace created: $test_namespace")
+
+        # Create a schema for test table
+        schema = Schema([
+            Field(Int32(1), "id", "long"; required=true),
+            Field(Int32(2), "value", "double"; required=false),
+        ])
+
+        # Create test table
+        table_name = "write_cols_nulls_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(
+            catalog,
+            test_namespace,
+            table_name,
+            schema
+        )
+        @test table != C_NULL
+        println("✅ Test table created: $table_name")
+
+        # Prepare data with some nulls
+        ids = Int64[1, 2, 3, 4, 5]
+        values = Float64[1.1, 0.0, 3.3, 0.0, 5.5]  # 0.0 will be null based on validity
+        validity_values = UInt8[1, 0, 1, 0, 1]  # positions 2 and 4 are null
+
+        num_rows = length(ids)
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            columns = RustyIceberg.ColumnDescriptor[
+                RustyIceberg.ColumnDescriptor(
+                    Ptr{Cvoid}(pointer(ids)),
+                    Ptr{Int64}(C_NULL),
+                    Csize_t(num_rows),
+                    Int32(RustyIceberg.COLUMN_TYPE_INT64),
+                    false,
+                    Ptr{UInt8}(C_NULL),
+                    Csize_t(0)
+                ),
+                RustyIceberg.ColumnDescriptor(
+                    Ptr{Cvoid}(pointer(values)),
+                    Ptr{Int64}(C_NULL),
+                    Csize_t(num_rows),
+                    Int32(RustyIceberg.COLUMN_TYPE_FLOAT64),
+                    true,
+                    pointer(validity_values),
+                    Csize_t(num_rows)
+                ),
+            ]
+
+            arrays_to_preserve = (ids, values, validity_values)
+            RustyIceberg.write_columns(writer, columns, arrays_to_preserve)
+            println("✅ Data with nulls written via write_columns")
+        end
+        @test data_files !== nothing
+        println("✅ Writer closed successfully")
+
+        # Commit the data
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+        println("✅ Transaction committed successfully")
+
+        # Verify data including nulls
+        println("\nVerifying written data with nulls...")
+        scan = RustyIceberg.new_scan(updated_table)
+        stream = RustyIceberg.scan!(scan)
+
+        all_ids = Int64[]
+        all_values = Union{Float64, Missing}[]
+
+        batch_ptr = RustyIceberg.next_batch(stream)
+        while batch_ptr != C_NULL
+            batch = unsafe_load(batch_ptr)
+            data = batch.data
+            len = batch.length
+            if len > 0
+                arrow_data = unsafe_wrap(Array, data, len)
+                tbl = Arrow.Table(arrow_data)
+                cols = Tables.columns(tbl)
+                append!(all_ids, cols.id)
+                append!(all_values, cols.value)
+            end
+            RustyIceberg.free_batch(batch_ptr)
+            batch_ptr = RustyIceberg.next_batch(stream)
+        end
+        RustyIceberg.free_stream(stream)
+        RustyIceberg.free_scan!(scan)
+
+        # Sort by id
+        perm = sortperm(all_ids)
+        sorted_ids = all_ids[perm]
+        sorted_values = all_values[perm]
+
+        # Verify data including null positions
+        @test sorted_ids == Int64[1, 2, 3, 4, 5]
+        @test !ismissing(sorted_values[1]) && sorted_values[1] ≈ 1.1
+        @test ismissing(sorted_values[2])  # null
+        @test !ismissing(sorted_values[3]) && sorted_values[3] ≈ 3.3
+        @test ismissing(sorted_values[4])  # null
+        @test !ismissing(sorted_values[5]) && sorted_values[5] ≈ 5.5
+        println("✅ Verified null values are correctly written and read")
+
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+            println("✅ Table cleaned up")
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+            println("✅ Test table dropped")
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+            println("✅ Test namespace dropped")
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+            println("✅ Catalog cleaned up")
+        end
+    end
+
+    println("\n✅ write_columns with nulls tests completed!")
+end

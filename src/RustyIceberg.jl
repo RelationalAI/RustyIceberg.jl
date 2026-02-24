@@ -26,8 +26,12 @@ export schema_to_json, partition_spec_to_json, sort_order_to_json
 export iceberg_type_to_arrow_type, arrow_type, arrow_types
 export Transaction, DataFiles, free_transaction!, free_data_files!, commit, transaction
 export FastAppendAction, free_fast_append_action!, add_data_files, apply, with_fast_append
-export DataFileWriter, free_writer!, close_writer
+export DataFileWriter, free_writer!, close_writer, write_columns
 export WriterConfig, CompressionCodec, UNCOMPRESSED, SNAPPY, GZIP, LZ4, ZSTD
+export ColumnDescriptor, ColumnType
+export COLUMN_TYPE_INT32, COLUMN_TYPE_INT64, COLUMN_TYPE_FLOAT32, COLUMN_TYPE_FLOAT64
+export COLUMN_TYPE_STRING, COLUMN_TYPE_DATE, COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_BOOLEAN, COLUMN_TYPE_UUID
+export julia_type_to_column_type
 
 # Always use the JLL library - override via Preferences if needed for local development
 # To use a local build, set the preference:
