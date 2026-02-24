@@ -605,7 +605,13 @@ explicitly specified.
   inferred from the element type T. Use this when the physical storage type differs
   from the logical type (e.g., Int32 data that represents Date32).
 """
-function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing, BitVector}=nothing, length::Union{Nothing, Int}=nothing, column_type::Union{Nothing, ColumnType}=nothing) where T
+function Base.push!(
+    batch::ColumnBatch,
+    data::Vector{T};
+    validity::Union{Nothing, BitVector}=nothing,
+    length::Union{Nothing, Int}=nothing,
+    column_type::Union{Nothing, ColumnType}=nothing
+) where T
     push!(batch.arrays_to_preserve, data)
 
     col_type = column_type === nothing ? julia_type_to_column_type(T) : column_type
