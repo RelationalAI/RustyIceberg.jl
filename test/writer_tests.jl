@@ -702,10 +702,10 @@ end
         println("\nTest: Writing data via write_columns...")
 
         # Prepare raw column data
-        ids = Int64[1, 2, 3, 4, 5]
-        counts = Int32[10, 20, 30, 40, 50]
-        values = Float64[1.1, 2.2, 3.3, 4.4, 5.5]
-        flags = UInt8[1, 0, 1, 0, 1]  # Booleans as bytes (1=true, 0=false)
+        col_ids = Int64[1, 2, 3, 4, 5]
+        col_counts = Int32[10, 20, 30, 40, 50]
+        col_values = Float64[1.1, 2.2, 3.3, 4.4, 5.5]
+        col_flags = UInt8[1, 0, 1, 0, 1]  # Booleans as bytes (1=true, 0=false)
 
         # Validity masks (all valid for this test)
         validity_counts = UInt8[1, 1, 1, 1, 1]
@@ -719,10 +719,10 @@ end
 
             # Build column batch using the helper
             batch = RustyIceberg.ColumnBatch()
-            push!(batch, ids)
-            push!(batch, counts; validity=validity_counts)
-            push!(batch, values; validity=validity_values)
-            push!(batch, flags; validity=validity_flags)
+            push!(batch, col_ids)
+            push!(batch, col_counts; validity=validity_counts)
+            push!(batch, col_values; validity=validity_values)
+            push!(batch, col_flags; validity=validity_flags)
 
             RustyIceberg.write_columns(writer, batch)
             println("✅ Data written via write_columns")
@@ -834,14 +834,14 @@ end
         println("✅ Test table created: $table_name")
 
         # Prepare data with some nulls
-        ids = Int64[1, 2, 3, 4, 5]
-        values = Float64[1.1, 0.0, 3.3, 0.0, 5.5]  # 0.0 will be null based on validity
+        col_ids = Int64[1, 2, 3, 4, 5]
+        col_values = Float64[1.1, 0.0, 3.3, 0.0, 5.5]  # 0.0 will be null based on validity
         validity_values = UInt8[1, 0, 1, 0, 1]  # positions 2 and 4 are null
 
         data_files = RustyIceberg.with_data_file_writer(table) do writer
             batch = RustyIceberg.ColumnBatch()
-            push!(batch, ids)
-            push!(batch, values; validity=validity_values)
+            push!(batch, col_ids)
+            push!(batch, col_values; validity=validity_values)
 
             RustyIceberg.write_columns(writer, batch)
             println("✅ Data with nulls written via write_columns")
