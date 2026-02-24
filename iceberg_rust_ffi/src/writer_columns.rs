@@ -44,7 +44,8 @@ pub struct ColumnDescriptor {
     /// Whether this column is nullable
     pub is_nullable: bool,
     /// Pointer to validity bitmap (only if is_nullable is true)
-    /// Each byte is 0 (null) or 1 (valid) - we convert to Arrow's bit-packed format
+    /// Points to bit-packed data from Julia's BitVector.chunks (UInt64 array)
+    /// Bit i is 1 if row i is valid, 0 if null
     pub validity_ptr: *const u8,
 }
 
@@ -54,17 +55,13 @@ unsafe impl Sync for ColumnDescriptor {}
 /// Build an Arrow array from a ColumnDescriptor
 unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow::Error> {
     let null_buffer = if desc.is_nullable && !desc.validity_ptr.is_null() {
-        // Convert Julia's Bool vector to Arrow's null buffer
-        // Julia stores bools as bytes (0 or 1), Arrow expects a bit-packed buffer
-        let validity_slice = std::slice::from_raw_parts(desc.validity_ptr, desc.num_rows);
-        let mut bits = vec![0u8; (desc.num_rows + 7) / 8];
-        for (i, &valid) in validity_slice.iter().enumerate() {
-            if valid != 0 {
-                bits[i / 8] |= 1 << (i % 8);
-            }
-        }
+        // Julia's BitVector stores bits packed in UInt64 chunks, which we can use directly
+        // since Arrow also uses little-endian bit-packed format.
+        // We just need to copy the right number of bytes.
+        let num_bytes = (desc.num_rows + 7) / 8;
+        let validity_slice = std::slice::from_raw_parts(desc.validity_ptr, num_bytes);
         Some(NullBuffer::new(BooleanBuffer::new(
-            Buffer::from(bits),
+            Buffer::from(validity_slice.to_vec()),
             0,
             desc.num_rows,
         )))

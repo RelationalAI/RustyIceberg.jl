@@ -475,7 +475,7 @@ This struct must match the Rust `ColumnDescriptor` layout exactly.
 - `num_rows::Csize_t`: Number of rows in the column
 - `column_type::Int32`: Type of the column (see `ColumnType` enum)
 - `is_nullable::Bool`: Whether this column can contain null values
-- `validity_ptr::Ptr{UInt8}`: Pointer to validity bitmap (Julia Bool vector, 0=null, 1=valid)
+- `validity_ptr::Ptr{UInt8}`: Pointer to validity bitmap (BitVector.chunks, bit-packed)
 
 Note: The struct layout must match Rust's #[repr(C)] layout, including padding.
 Layout: data_ptr(0-7), offsets_ptr(8-15), num_rows(16-23), column_type(24-27),
@@ -539,9 +539,9 @@ Add a column to the batch. The column type is inferred from the element type.
 
 # Arguments
 - `data`: The column data array
-- `validity`: Optional validity array (UInt8 vector where 0=null, 1=valid)
+- `validity`: Optional validity mask (BitVector where false=null, true=valid)
 """
-function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing, Vector{UInt8}}=nothing) where T
+function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing, BitVector}=nothing) where T
     push!(batch.arrays_to_preserve, data)
 
     col_type = julia_type_to_column_type(T)
@@ -549,8 +549,9 @@ function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing
     is_nullable = validity !== nothing
 
     validity_ptr = if is_nullable
+        # BitVector stores bits in UInt64 chunks - pass pointer to chunks directly
         push!(batch.arrays_to_preserve, validity)
-        pointer(validity)
+        Ptr{UInt8}(pointer(validity.chunks))
     else
         Ptr{UInt8}(C_NULL)
     end

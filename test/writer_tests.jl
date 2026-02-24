@@ -705,12 +705,12 @@ end
         col_ids = Int64[1, 2, 3, 4, 5]
         col_counts = Int32[10, 20, 30, 40, 50]
         col_values = Float64[1.1, 2.2, 3.3, 4.4, 5.5]
-        col_flags = UInt8[1, 0, 1, 0, 1]  # Booleans as bytes (1=true, 0=false)
+        col_flags = Bool[true, false, true, false, true]
 
-        # Validity masks (all valid for this test)
-        validity_counts = UInt8[1, 1, 1, 1, 1]
-        validity_values = UInt8[1, 1, 1, 1, 1]
-        validity_flags = UInt8[1, 1, 1, 1, 1]
+        # Validity masks (all valid for this test) - use BitVector
+        validity_counts = BitVector([true, true, true, true, true])
+        validity_values = BitVector([true, true, true, true, true])
+        validity_flags = BitVector([true, true, true, true, true])
 
         data_files = RustyIceberg.with_data_file_writer(table) do writer
             @test writer !== nothing
@@ -836,7 +836,7 @@ end
         # Prepare data with some nulls
         col_ids = Int64[1, 2, 3, 4, 5]
         col_values = Float64[1.1, 0.0, 3.3, 0.0, 5.5]  # 0.0 will be null based on validity
-        validity_values = UInt8[1, 0, 1, 0, 1]  # positions 2 and 4 are null
+        validity_values = BitVector([true, false, true, false, true])  # positions 2 and 4 are null
 
         data_files = RustyIceberg.with_data_file_writer(table) do writer
             batch = RustyIceberg.ColumnBatch()
