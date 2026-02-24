@@ -28,6 +28,9 @@ mod transaction;
 // Writer module
 mod writer;
 
+// Column-based writer module (zero-copy from Julia)
+mod writer_columns;
+
 // Response types module
 mod response;
 
@@ -50,6 +53,7 @@ pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionRe
 pub use writer::{
     IcebergDataFileWriter, IcebergDataFileWriterResponse, IcebergWriterCloseResponse,
 };
+pub use writer_columns::ColumnDescriptor;
 
 // We use `jl_adopt_thread` to ensure Rust can call into Julia when notifying
 // the Base.Event that is waiting for the Rust result.

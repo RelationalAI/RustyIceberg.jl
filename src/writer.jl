@@ -441,3 +441,200 @@ function close_writer(writer::DataFileWriter)
     writer.data_files = data_files  # Track for automatic cleanup
     return data_files
 end
+
+# ==========================================================================================
+# Column-based writing (zero-copy from Julia)
+# ==========================================================================================
+
+"""
+    ColumnType
+
+Enum for column data types, matching the Rust FFI constants.
+"""
+@enum ColumnType::Int32 begin
+    COLUMN_TYPE_INT32 = 0
+    COLUMN_TYPE_INT64 = 1
+    COLUMN_TYPE_FLOAT32 = 2
+    COLUMN_TYPE_FLOAT64 = 3
+    COLUMN_TYPE_STRING = 4
+    COLUMN_TYPE_DATE = 5
+    COLUMN_TYPE_TIMESTAMP = 6
+    COLUMN_TYPE_BOOLEAN = 7
+    COLUMN_TYPE_UUID = 8
+end
+
+"""
+    ColumnDescriptor
+
+FFI structure describing a single column for direct column writing.
+This struct must match the Rust `ColumnDescriptor` layout exactly.
+
+# Fields
+- `data_ptr::Ptr{Cvoid}`: Pointer to the raw column data
+- `offsets_ptr::Ptr{Int64}`: For string columns, pointer to offsets array (length = num_rows + 1)
+- `validity_ptr::Ptr{UInt8}`: Pointer to validity bitmap (BitVector.chunks, bit-packed)
+- `num_rows::Csize_t`: Number of rows in the column
+- `column_type::Int32`: Type of the column (see `ColumnType` enum)
+- `is_nullable::Bool`: Whether this column can contain null values
+
+Note: Fields are ordered to avoid padding (8-byte fields first, then 4-byte, then 1-byte).
+"""
+struct ColumnDescriptor
+    data_ptr::Ptr{Cvoid}        # 8 bytes, offset 0
+    offsets_ptr::Ptr{Int64}     # 8 bytes, offset 8
+    validity_ptr::Ptr{UInt8}    # 8 bytes, offset 16
+    num_rows::Csize_t           # 8 bytes, offset 24
+    column_type::Int32          # 4 bytes, offset 32
+    is_nullable::Bool           # 1 byte,  offset 36
+    # (3 bytes trailing padding added by compiler, total 40 bytes)
+end
+
+"""
+    julia_type_to_column_type(::Type{T}) -> ColumnType
+
+Map Julia types to the corresponding ColumnType enum value.
+"""
+julia_type_to_column_type(::Type{Int32}) = COLUMN_TYPE_INT32
+julia_type_to_column_type(::Type{Int64}) = COLUMN_TYPE_INT64
+julia_type_to_column_type(::Type{Float32}) = COLUMN_TYPE_FLOAT32
+julia_type_to_column_type(::Type{Float64}) = COLUMN_TYPE_FLOAT64
+julia_type_to_column_type(::Type{String}) = COLUMN_TYPE_STRING
+julia_type_to_column_type(::Type{Dates.Date}) = COLUMN_TYPE_DATE
+julia_type_to_column_type(::Type{Dates.DateTime}) = COLUMN_TYPE_TIMESTAMP
+julia_type_to_column_type(::Type{Bool}) = COLUMN_TYPE_BOOLEAN
+julia_type_to_column_type(::Type{UInt128}) = COLUMN_TYPE_UUID  # UUID stored as UInt128
+
+"""
+    ColumnBatch
+
+A builder for collecting column descriptors and their underlying arrays.
+Automatically tracks arrays that need to be preserved during FFI calls.
+
+# Example
+```julia
+batch = ColumnBatch()
+push!(batch, ids)                           # non-nullable column
+push!(batch, values; validity=validity_vec) # nullable column
+write_columns(writer, batch)
+```
+"""
+mutable struct ColumnBatch
+    descriptors::Vector{ColumnDescriptor}
+    arrays_to_preserve::Vector{Any}
+
+    ColumnBatch() = new(ColumnDescriptor[], Any[])
+end
+
+"""
+    push!(batch::ColumnBatch, data::Vector{T}; validity=nothing) where T
+
+Add a column to the batch. The column type is inferred from the element type.
+
+# Arguments
+- `data`: The column data array
+- `validity`: Optional validity mask (BitVector where false=null, true=valid)
+"""
+function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing, BitVector}=nothing) where T
+    push!(batch.arrays_to_preserve, data)
+
+    col_type = julia_type_to_column_type(T)
+    num_rows = length(data)
+    is_nullable = validity !== nothing
+
+    validity_ptr = if is_nullable
+        # BitVector stores bits in UInt64 chunks - pass pointer to chunks directly
+        push!(batch.arrays_to_preserve, validity)
+        Ptr{UInt8}(pointer(validity.chunks))
+    else
+        Ptr{UInt8}(C_NULL)
+    end
+
+    desc = ColumnDescriptor(
+        Ptr{Cvoid}(pointer(data)),
+        Ptr{Int64}(C_NULL),  # offsets_ptr not used for non-string types
+        validity_ptr,
+        Csize_t(num_rows),
+        Int32(col_type),
+        is_nullable
+    )
+    push!(batch.descriptors, desc)
+    return batch
+end
+
+"""
+    write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}, arrays_to_preserve)
+
+Write raw column data directly to the Parquet writer, bypassing Arrow IPC serialization.
+
+This is a low-level function that passes raw column pointers to Rust, which builds
+Arrow arrays directly from them. This avoids one serialization step compared to
+the standard `write` function.
+
+# Arguments
+- `writer::DataFileWriter`: The writer to write to
+- `columns::Vector{ColumnDescriptor}`: Array of column descriptors
+- `arrays_to_preserve`: A tuple/collection of arrays whose memory is referenced by the
+  ColumnDescriptors. These will be GC-preserved during the FFI call.
+
+# Safety
+The ColumnDescriptors contain raw pointers that must point to valid data.
+Pass all source arrays in `arrays_to_preserve` to ensure they are not garbage
+collected during the FFI call.
+
+# Throws
+- `IcebergException` if the write fails
+
+# Example
+```julia
+data = Int64[1, 2, 3]
+validity = UInt8[1, 1, 1]
+desc = ColumnDescriptor(pointer(data), ...)
+write_columns(writer, [desc], (data, validity))  # Arrays preserved during call
+```
+"""
+function write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}, arrays_to_preserve)
+    if writer.ptr == C_NULL
+        throw(IcebergException("Writer has been freed"))
+    end
+
+    if isempty(columns)
+        throw(IcebergException("No columns provided"))
+    end
+
+    response = Response{Cvoid}(-1, nothing, C_NULL, C_NULL)
+
+    # Pass arrays_to_preserve to async_ccall so GC.@preserve keeps them alive
+    async_ccall(response, columns, arrays_to_preserve) do handle
+        @ccall rust_lib.iceberg_writer_write_columns(
+            writer.ptr::Ptr{Cvoid},
+            pointer(columns)::Ptr{ColumnDescriptor},
+            length(columns)::Csize_t,
+            response::Ref{Response{Cvoid}},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "write_columns", IcebergException)
+
+    return nothing
+end
+
+"""
+    write_columns(writer::DataFileWriter, batch::ColumnBatch)
+
+Write columns from a ColumnBatch to the Parquet writer.
+
+This is the recommended way to use write_columns - the ColumnBatch automatically
+tracks all arrays that need to be preserved during the FFI call.
+
+# Example
+```julia
+batch = ColumnBatch()
+push!(batch, ids)
+push!(batch, values; validity=validity_vec)
+write_columns(writer, batch)
+```
+"""
+function write_columns(writer::DataFileWriter, batch::ColumnBatch)
+    write_columns(writer, batch.descriptors, batch.arrays_to_preserve)
+end
