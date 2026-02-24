@@ -471,8 +471,10 @@ FFI structure describing a single column for direct column writing.
 This struct must match the Rust `ColumnDescriptor` layout exactly.
 
 # Fields
-- `data_ptr::Ptr{Cvoid}`: Pointer to the raw column data
-- `offsets_ptr::Ptr{Int64}`: For string columns, pointer to offsets array (length = num_rows + 1)
+- `data_ptr::Ptr{Cvoid}`: Pointer to the raw column data. For strings, this is a
+  pointer to an array of string pointers (Ptr{UInt8}[]).
+- `lengths_ptr::Ptr{Int64}`: For string columns, pointer to lengths array (Int64[]).
+  For other types, this is C_NULL.
 - `validity_ptr::Ptr{UInt8}`: Pointer to validity bitmap (BitVector.chunks, bit-packed)
 - `num_rows::Csize_t`: Number of rows in the column
 - `column_type::Int32`: Type of the column (see `ColumnType` enum)
@@ -482,7 +484,7 @@ Note: Fields are ordered to avoid padding (8-byte fields first, then 4-byte, the
 """
 struct ColumnDescriptor
     data_ptr::Ptr{Cvoid}        # 8 bytes, offset 0
-    offsets_ptr::Ptr{Int64}     # 8 bytes, offset 8
+    lengths_ptr::Ptr{Int64}     # 8 bytes, offset 8
     validity_ptr::Ptr{UInt8}    # 8 bytes, offset 16
     num_rows::Csize_t           # 8 bytes, offset 24
     column_type::Int32          # 4 bytes, offset 32
@@ -504,6 +506,32 @@ julia_type_to_column_type(::Type{Dates.Date}) = COLUMN_TYPE_DATE
 julia_type_to_column_type(::Type{Dates.DateTime}) = COLUMN_TYPE_TIMESTAMP
 julia_type_to_column_type(::Type{Bool}) = COLUMN_TYPE_BOOLEAN
 julia_type_to_column_type(::Type{UInt128}) = COLUMN_TYPE_UUID  # UUID stored as UInt128
+
+"""
+    iceberg_column_type(type::AbstractIcebergType) -> ColumnType
+
+Map an Iceberg type to the corresponding ColumnType enum value for column writing.
+
+This function enables using the Iceberg type system directly with the column-based
+writer, avoiding the need to manually specify column types.
+
+# Example
+```julia
+field = Field(Int32(1), "event_time", IcebergTimestamp())
+col_type = iceberg_column_type(field.type)
+# Returns COLUMN_TYPE_TIMESTAMP
+```
+"""
+iceberg_column_type(::IcebergInt) = COLUMN_TYPE_INT32
+iceberg_column_type(::IcebergLong) = COLUMN_TYPE_INT64
+iceberg_column_type(::IcebergFloat) = COLUMN_TYPE_FLOAT32
+iceberg_column_type(::IcebergDouble) = COLUMN_TYPE_FLOAT64
+iceberg_column_type(::IcebergString) = COLUMN_TYPE_STRING
+iceberg_column_type(::IcebergDate) = COLUMN_TYPE_DATE
+iceberg_column_type(::IcebergTimestamp) = COLUMN_TYPE_TIMESTAMP
+iceberg_column_type(::IcebergTimestamptz) = COLUMN_TYPE_TIMESTAMPTZ
+iceberg_column_type(::IcebergBoolean) = COLUMN_TYPE_BOOLEAN
+iceberg_column_type(::IcebergUuid) = COLUMN_TYPE_UUID
 
 """
     ColumnBatch
@@ -529,8 +557,8 @@ end
 """
     push!(batch::ColumnBatch, data::Vector{String}; validity=nothing, length=nothing, column_type=nothing)
 
-Add a string column to the batch. Strings are passed as concatenated UTF-8 bytes
-with an offsets array.
+Add a string column to the batch. Strings are passed as an array of pointers with lengths
+(zero-copy from Julia's String array).
 
 # Arguments
 - `data`: The string column data array
@@ -544,32 +572,26 @@ function Base.push!(batch::ColumnBatch, data::Vector{String}; validity::Union{No
     is_nullable = validity !== nothing
     col_type = column_type === nothing ? COLUMN_TYPE_STRING : column_type
 
-    # Build concatenated bytes and offsets
-    # Offsets array has length num_rows + 1
-    offsets = Vector{Int64}(undef, num_rows + 1)
-    offsets[1] = 0
-
-    # First pass: compute total size and offsets
-    total_size = 0
+    # Build arrays of string pointers and lengths (zero-copy - just metadata)
+    # Each String in Julia is a pointer to contiguous UTF-8 bytes
+    # For null values, we use null pointer and zero length - Rust will check validity mask
+    str_ptrs = Vector{Ptr{UInt8}}(undef, num_rows)
+    str_lens = Vector{Int64}(undef, num_rows)
     for i in 1:num_rows
-        str_len = sizeof(data[i])
-        total_size += str_len
-        offsets[i + 1] = total_size
+        if is_nullable && !validity[i]
+            # Null value - use null pointer and zero length
+            str_ptrs[i] = Ptr{UInt8}(C_NULL)
+            str_lens[i] = 0
+        else
+            str_ptrs[i] = pointer(data[i])
+            str_lens[i] = sizeof(data[i])
+        end
     end
 
-    # Second pass: concatenate all string bytes
-    bytes = Vector{UInt8}(undef, total_size)
-    pos = 1
-    for i in 1:num_rows
-        str_bytes = codeunits(data[i])
-        str_len = Base.length(str_bytes)
-        copyto!(bytes, pos, str_bytes, 1, str_len)
-        pos += str_len
-    end
-
-    # Preserve both arrays
-    push!(batch.arrays_to_preserve, bytes)
-    push!(batch.arrays_to_preserve, offsets)
+    # Preserve all arrays (original strings + metadata arrays)
+    push!(batch.arrays_to_preserve, data)
+    push!(batch.arrays_to_preserve, str_ptrs)
+    push!(batch.arrays_to_preserve, str_lens)
 
     validity_ptr = if is_nullable
         push!(batch.arrays_to_preserve, validity)
@@ -578,9 +600,10 @@ function Base.push!(batch::ColumnBatch, data::Vector{String}; validity::Union{No
         Ptr{UInt8}(C_NULL)
     end
 
+    # For strings: data_ptr = pointer to string pointers, offsets_ptr = pointer to lengths
     desc = ColumnDescriptor(
-        Ptr{Cvoid}(pointer(bytes)),
-        pointer(offsets),
+        Ptr{Cvoid}(pointer(str_ptrs)),
+        pointer(str_lens),  # Reuse offsets_ptr for lengths array
         validity_ptr,
         Csize_t(num_rows),
         Int32(col_type),
@@ -628,7 +651,7 @@ function Base.push!(
 
     desc = ColumnDescriptor(
         Ptr{Cvoid}(pointer(data)),
-        Ptr{Int64}(C_NULL),  # offsets_ptr not used for non-string types
+        Ptr{Int64}(C_NULL),  # lengths_ptr not used for non-string types
         validity_ptr,
         Csize_t(num_rows),
         Int32(col_type),
