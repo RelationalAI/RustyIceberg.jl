@@ -132,9 +132,11 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
             Arc::new(BooleanArray::new(values, null_buffer))
         }
         COLUMN_TYPE_STRING => {
-            // String data is passed as (zero-copy from Julia):
+            // String data passed from Julia:
             // - data_ptr: pointer to array of string pointers (each pointing to UTF-8 bytes)
             // - lengths_ptr: pointer to array of string lengths (Int64)
+            // Note: While we avoid copying on the Julia side (just passing pointers),
+            // Arrow's StringArray copies the data into its own contiguous buffer below.
             if desc.lengths_ptr.is_null() {
                 return Err(anyhow::anyhow!("String column requires lengths"));
             }
@@ -142,7 +144,7 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
                 std::slice::from_raw_parts(desc.data_ptr as *const *const u8, desc.num_rows);
             let str_lens = std::slice::from_raw_parts(desc.lengths_ptr, desc.num_rows);
 
-            // Build strings by dereferencing each pointer
+            // Build string references, then Arrow copies them into its internal buffer
             let mut strings: Vec<Option<&str>> = Vec::with_capacity(desc.num_rows);
             for i in 0..desc.num_rows {
                 let is_null: bool = if let Some(ref nb) = null_buffer {

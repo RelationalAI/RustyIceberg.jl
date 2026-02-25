@@ -557,8 +557,9 @@ end
 """
     push!(batch::ColumnBatch, data::Vector{String}; validity=nothing, length=nothing, column_type=nothing)
 
-Add a string column to the batch. Strings are passed as an array of pointers with lengths
-(zero-copy from Julia's String array).
+Add a string column to the batch. Strings are passed as an array of pointers with lengths.
+Note: While this avoids copying on the Julia side, Arrow still copies the string data
+into its internal buffer on the Rust side.
 
 # Arguments
 - `data`: The string column data array
@@ -578,7 +579,7 @@ function Base.push!(
     is_nullable = validity !== nothing
     col_type = column_type === nothing ? COLUMN_TYPE_STRING : column_type
 
-    # Build arrays of string pointers and lengths (zero-copy - just metadata)
+    # Build arrays of string pointers and lengths (no copy on Julia side)
     # Each String in Julia is a pointer to contiguous UTF-8 bytes
     # For null values, we use null pointer and zero length - Rust will check validity mask
     str_ptrs = Vector{Ptr{UInt8}}(undef, num_rows)
