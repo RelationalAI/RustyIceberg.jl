@@ -1,5 +1,4 @@
 using RustyIceberg
-using RustyIceberg: IcebergType, BOOLEAN, INT, LONG, FLOAT, DOUBLE, DATE, TIME, TIMESTAMP, TIMESTAMPTZ, STRING, UUID, BINARY
 using RustyIceberg: SortDirection, ASC, DESC
 using RustyIceberg: NullOrder, NULLS_FIRST, NULLS_LAST
 using Test
@@ -9,29 +8,35 @@ using Dates
 
 @testset "Schema Types" begin
     @testset "Field Creation" begin
-        # Create field with string type
+        # Create field with string type (backwards compatibility)
         field1 = Field(Int32(1), "id", "long"; required=true)
         @test field1.id == Int32(1)
         @test field1.name == "id"
-        @test field1.type == "long"
+        @test field1.type isa IcebergLong
         @test field1.required == true
         @test field1.doc === nothing
 
-        # Create field with IcebergType enum
-        field2 = Field(Int32(2), "name", STRING)
-        @test field2.type == "string"
+        # Create field with Iceberg type struct
+        field2 = Field(Int32(2), "name", IcebergString())
+        @test field2.type isa IcebergString
         @test field2.required == false
 
         # Create field with doc
-        field3 = Field(Int32(3), "timestamp", TIMESTAMP; doc="Creation time")
+        field3 = Field(Int32(3), "timestamp", IcebergTimestamp(); doc="Creation time")
         @test field3.doc == "Creation time"
+
+        # Create field with decimal type
+        field4 = Field(Int32(4), "amount", IcebergDecimal(38, 18))
+        @test field4.type isa IcebergDecimal
+        @test field4.type.precision == 38
+        @test field4.type.scale == 18
     end
 
     @testset "Schema Creation" begin
         fields = [
-            Field(Int32(1), "id", LONG; required=true),
-            Field(Int32(2), "name", STRING),
-            Field(Int32(3), "age", INT),
+            Field(Int32(1), "id", IcebergLong(); required=true),
+            Field(Int32(2), "name", IcebergString()),
+            Field(Int32(3), "age", IcebergInt()),
         ]
         schema = Schema(fields)
         @test length(schema.fields) == 3
@@ -47,8 +52,8 @@ using Dates
 
     @testset "Schema JSON Serialization" begin
         schema = Schema([
-            Field(Int32(1), "id", LONG; required=true),
-            Field(Int32(2), "name", STRING),
+            Field(Int32(1), "id", IcebergLong(); required=true),
+            Field(Int32(2), "name", IcebergString()),
         ])
 
         json_str = schema_to_json(schema)
@@ -66,7 +71,7 @@ using Dates
 
     @testset "Schema with Identifier Fields JSON" begin
         schema = Schema(
-            [Field(Int32(1), "id", LONG; required=true)],
+            [Field(Int32(1), "id", IcebergLong(); required=true)],
             identifier_field_ids=Int32[1]
         )
 
@@ -177,8 +182,8 @@ end
 @testset "SchemaBuilder" begin
     @testset "Basic Builder" begin
         schema = SchemaBuilder() |>
-            s -> add_field(s, "id", LONG; required=true) |>
-            s -> add_field(s, "name", STRING) |>
+            s -> add_field(s, "id", IcebergLong(); required=true) |>
+            s -> add_field(s, "name", IcebergString()) |>
             build
 
         @test length(schema.fields) == 2
@@ -190,8 +195,8 @@ end
 
     @testset "Builder with Explicit IDs" begin
         schema = SchemaBuilder() |>
-            s -> add_field(s, Int32(10), "id", LONG; required=true) |>
-            s -> add_field(s, Int32(20), "name", STRING) |>
+            s -> add_field(s, Int32(10), "id", IcebergLong(); required=true) |>
+            s -> add_field(s, Int32(20), "name", IcebergString()) |>
             build
 
         @test schema.fields[1].id == Int32(10)
@@ -200,8 +205,8 @@ end
 
     @testset "Builder with Identifiers" begin
         schema = SchemaBuilder() |>
-            s -> add_field(s, "id", LONG; required=true) |>
-            s -> add_field(s, "name", STRING) |>
+            s -> add_field(s, "id", IcebergLong(); required=true) |>
+            s -> add_field(s, "name", IcebergString()) |>
             s -> with_identifier(s, Int32[1]) |>
             build
 
@@ -210,19 +215,19 @@ end
 
     @testset "Builder with Docs" begin
         schema = SchemaBuilder() |>
-            s -> add_field(s, "created_at", TIMESTAMP; doc="When row was created") |>
+            s -> add_field(s, "created_at", IcebergTimestamp(); doc="When row was created") |>
             build
 
         @test schema.fields[1].doc == "When row was created"
     end
 
     @testset "Mixed Type Specifications" begin
-        # Using IcebergType enums
+        # Using Iceberg type structs
         schema1 = SchemaBuilder() |>
-            s -> add_field(s, "id", LONG) |>
+            s -> add_field(s, "id", IcebergLong()) |>
             build
 
-        # Using string types
+        # Using string types (backwards compatibility)
         schema2 = SchemaBuilder() |>
             s -> add_field(s, "id", "long") |>
             build
@@ -232,26 +237,27 @@ end
     end
 end
 
-@testset "IcebergType Enum Conversion" begin
+@testset "IcebergType Conversion" begin
     test_cases = [
-        (BOOLEAN, "boolean"),
-        (INT, "int"),
-        (LONG, "long"),
-        (FLOAT, "float"),
-        (DOUBLE, "double"),
-        (DATE, "date"),
-        (TIME, "time"),
-        (TIMESTAMP, "timestamp"),
-        (TIMESTAMPTZ, "timestamptz"),
-        (STRING, "string"),
-        (UUID, "uuid"),
-        (BINARY, "binary"),
+        (IcebergBoolean(), "boolean"),
+        (IcebergInt(), "int"),
+        (IcebergLong(), "long"),
+        (IcebergFloat(), "float"),
+        (IcebergDouble(), "double"),
+        (IcebergDate(), "date"),
+        (IcebergTime(), "time"),
+        (IcebergTimestamp(), "timestamp"),
+        (IcebergTimestamptz(), "timestamptz"),
+        (IcebergTimestampNs(), "timestamp_ns"),
+        (IcebergTimestamptzNs(), "timestamptz_ns"),
+        (IcebergString(), "string"),
+        (IcebergUuid(), "uuid"),
+        (IcebergBinary(), "binary"),
+        (IcebergDecimal(38, 18), "decimal(38,18)"),
     ]
 
-    for (enum_val, str_val) in test_cases
-        field = Field(Int32(1), "test", enum_val)
-        @test field.type == str_val
-
+    for (type_val, str_val) in test_cases
+        field = Field(Int32(1), "test", type_val)
         json_str = schema_to_json(Schema([field]))
         parsed = JSON.parse(json_str)
         @test parsed["fields"][1]["type"] == str_val
@@ -259,63 +265,75 @@ end
 end
 
 @testset "Arrow Type Mappings" begin
-    @testset "iceberg_type_to_arrow_type" begin
+    @testset "iceberg_type_to_arrow_type with type structs" begin
         # Basic types
+        @test iceberg_type_to_arrow_type(IcebergBoolean()) == Bool
+        @test iceberg_type_to_arrow_type(IcebergInt()) == Int32
+        @test iceberg_type_to_arrow_type(IcebergLong()) == Int64
+        @test iceberg_type_to_arrow_type(IcebergFloat()) == Float32
+        @test iceberg_type_to_arrow_type(IcebergDouble()) == Float64
+        @test iceberg_type_to_arrow_type(IcebergString()) == String
+
+        # Temporal types
+        @test iceberg_type_to_arrow_type(IcebergDate()) == Dates.Date
+        @test iceberg_type_to_arrow_type(IcebergTime()) == Int64
+        @test iceberg_type_to_arrow_type(IcebergTimestamp()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
+        @test iceberg_type_to_arrow_type(IcebergTimestamptz()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, :UTC}
+        @test iceberg_type_to_arrow_type(IcebergTimestampNs()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, nothing}
+        @test iceberg_type_to_arrow_type(IcebergTimestamptzNs()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, :UTC}
+
+        # Complex types
+        @test iceberg_type_to_arrow_type(IcebergUuid()) == NTuple{16, UInt8}
+        @test iceberg_type_to_arrow_type(IcebergBinary()) == Vector{UInt8}
+
+        # Decimal types with different precisions
+        @test iceberg_type_to_arrow_type(IcebergDecimal(5, 2)) == Int32
+        @test iceberg_type_to_arrow_type(IcebergDecimal(9, 0)) == Int32
+        @test iceberg_type_to_arrow_type(IcebergDecimal(15, 4)) == Int64
+        @test iceberg_type_to_arrow_type(IcebergDecimal(18, 6)) == Int64
+        @test iceberg_type_to_arrow_type(IcebergDecimal(25, 10)) == NTuple{16, UInt8}
+        @test iceberg_type_to_arrow_type(IcebergDecimal(38, 18)) == NTuple{16, UInt8}
+    end
+
+    @testset "iceberg_type_to_arrow_type with strings (backwards compatibility)" begin
         @test iceberg_type_to_arrow_type("boolean") == Bool
         @test iceberg_type_to_arrow_type("int") == Int32
         @test iceberg_type_to_arrow_type("long") == Int64
         @test iceberg_type_to_arrow_type("float") == Float32
         @test iceberg_type_to_arrow_type("double") == Float64
         @test iceberg_type_to_arrow_type("string") == String
-
-        # Temporal types
         @test iceberg_type_to_arrow_type("date") == Dates.Date
-        @test iceberg_type_to_arrow_type("time") == Int64
         @test iceberg_type_to_arrow_type("timestamp") == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
-        @test iceberg_type_to_arrow_type("timestamptz") == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, :UTC}
-        @test iceberg_type_to_arrow_type("timestamp_ns") == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, nothing}
-        @test iceberg_type_to_arrow_type("timestamptz_ns") == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, :UTC}
-
-        # Complex types
-        @test iceberg_type_to_arrow_type("uuid") == NTuple{16, UInt8}
-        @test iceberg_type_to_arrow_type("binary") == Vector{UInt8}
-
-        # Decimal types with different precisions
-        @test iceberg_type_to_arrow_type("decimal(5,2)") == Int32
-        @test iceberg_type_to_arrow_type("decimal(9,0)") == Int32
-        @test iceberg_type_to_arrow_type("decimal(15,4)") == Int64
-        @test iceberg_type_to_arrow_type("decimal(18,6)") == Int64
-        @test iceberg_type_to_arrow_type("decimal(25,10)") == NTuple{16, UInt8}
         @test iceberg_type_to_arrow_type("decimal(38,18)") == NTuple{16, UInt8}
     end
 
     @testset "arrow_type with nullable fields" begin
         # Required field should return base type
-        field_required = Field(Int32(1), "id", "long"; required=true)
+        field_required = Field(Int32(1), "id", IcebergLong(); required=true)
         @test arrow_type(field_required) == Int64
 
         # Nullable field should return Union{Missing, T}
-        field_nullable = Field(Int32(2), "name", "string"; required=false)
+        field_nullable = Field(Int32(2), "name", IcebergString(); required=false)
         @test arrow_type(field_nullable) == Union{Missing, String}
 
         # Test with date field
-        field_date_required = Field(Int32(3), "birth_date", "date"; required=true)
+        field_date_required = Field(Int32(3), "birth_date", IcebergDate(); required=true)
         @test arrow_type(field_date_required) == Dates.Date
 
-        field_date_nullable = Field(Int32(4), "death_date", "date"; required=false)
+        field_date_nullable = Field(Int32(4), "death_date", IcebergDate(); required=false)
         @test arrow_type(field_date_nullable) == Union{Missing, Dates.Date}
 
         # Test with timestamp field
-        field_ts_nullable = Field(Int32(5), "created_at", "timestamp"; required=false)
+        field_ts_nullable = Field(Int32(5), "created_at", IcebergTimestamp(); required=false)
         @test arrow_type(field_ts_nullable) == Union{Missing, Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}}
     end
 
     @testset "arrow_types for schema" begin
         schema = Schema([
-            Field(Int32(1), "id", "long"; required=true),
-            Field(Int32(2), "name", "string"; required=false),
-            Field(Int32(3), "event_date", "date"; required=false),
-            Field(Int32(4), "created_at", "timestamp"; required=true),
+            Field(Int32(1), "id", IcebergLong(); required=true),
+            Field(Int32(2), "name", IcebergString(); required=false),
+            Field(Int32(3), "event_date", IcebergDate(); required=false),
+            Field(Int32(4), "created_at", IcebergTimestamp(); required=true),
         ])
 
         types = arrow_types(schema)

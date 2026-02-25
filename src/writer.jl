@@ -458,9 +458,10 @@ Enum for column data types, matching the Rust FFI constants.
     COLUMN_TYPE_FLOAT64 = 3
     COLUMN_TYPE_STRING = 4
     COLUMN_TYPE_DATE = 5
-    COLUMN_TYPE_TIMESTAMP = 6
+    COLUMN_TYPE_TIMESTAMP = 6      # Timestamp without timezone (Iceberg `timestamp`)
     COLUMN_TYPE_BOOLEAN = 7
     COLUMN_TYPE_UUID = 8
+    COLUMN_TYPE_TIMESTAMPTZ = 9    # Timestamp with UTC timezone (Iceberg `timestamptz`)
 end
 
 """
@@ -470,8 +471,10 @@ FFI structure describing a single column for direct column writing.
 This struct must match the Rust `ColumnDescriptor` layout exactly.
 
 # Fields
-- `data_ptr::Ptr{Cvoid}`: Pointer to the raw column data
-- `offsets_ptr::Ptr{Int64}`: For string columns, pointer to offsets array (length = num_rows + 1)
+- `data_ptr::Ptr{Cvoid}`: Pointer to the raw column data. For strings, this is a
+  pointer to an array of string pointers (Ptr{UInt8}[]).
+- `lengths_ptr::Ptr{Int64}`: For string columns, pointer to lengths array (Int64[]).
+  For other types, this is C_NULL.
 - `validity_ptr::Ptr{UInt8}`: Pointer to validity bitmap (BitVector.chunks, bit-packed)
 - `num_rows::Csize_t`: Number of rows in the column
 - `column_type::Int32`: Type of the column (see `ColumnType` enum)
@@ -481,7 +484,7 @@ Note: Fields are ordered to avoid padding (8-byte fields first, then 4-byte, the
 """
 struct ColumnDescriptor
     data_ptr::Ptr{Cvoid}        # 8 bytes, offset 0
-    offsets_ptr::Ptr{Int64}     # 8 bytes, offset 8
+    lengths_ptr::Ptr{Int64}     # 8 bytes, offset 8
     validity_ptr::Ptr{UInt8}    # 8 bytes, offset 16
     num_rows::Csize_t           # 8 bytes, offset 24
     column_type::Int32          # 4 bytes, offset 32
@@ -505,6 +508,32 @@ julia_type_to_column_type(::Type{Bool}) = COLUMN_TYPE_BOOLEAN
 julia_type_to_column_type(::Type{UInt128}) = COLUMN_TYPE_UUID  # UUID stored as UInt128
 
 """
+    iceberg_column_type(type::AbstractIcebergType) -> ColumnType
+
+Map an Iceberg type to the corresponding ColumnType enum value for column writing.
+
+This function enables using the Iceberg type system directly with the column-based
+writer, avoiding the need to manually specify column types.
+
+# Example
+```julia
+field = Field(Int32(1), "event_time", IcebergTimestamp())
+col_type = iceberg_column_type(field.type)
+# Returns COLUMN_TYPE_TIMESTAMP
+```
+"""
+iceberg_column_type(::IcebergInt) = COLUMN_TYPE_INT32
+iceberg_column_type(::IcebergLong) = COLUMN_TYPE_INT64
+iceberg_column_type(::IcebergFloat) = COLUMN_TYPE_FLOAT32
+iceberg_column_type(::IcebergDouble) = COLUMN_TYPE_FLOAT64
+iceberg_column_type(::IcebergString) = COLUMN_TYPE_STRING
+iceberg_column_type(::IcebergDate) = COLUMN_TYPE_DATE
+iceberg_column_type(::IcebergTimestamp) = COLUMN_TYPE_TIMESTAMP
+iceberg_column_type(::IcebergTimestamptz) = COLUMN_TYPE_TIMESTAMPTZ
+iceberg_column_type(::IcebergBoolean) = COLUMN_TYPE_BOOLEAN
+iceberg_column_type(::IcebergUuid) = COLUMN_TYPE_UUID
+
+"""
     ColumnBatch
 
 A builder for collecting column descriptors and their underlying arrays.
@@ -526,19 +555,97 @@ mutable struct ColumnBatch
 end
 
 """
-    push!(batch::ColumnBatch, data::Vector{T}; validity=nothing) where T
+    push!(batch::ColumnBatch, data::Vector{String}; validity=nothing, length=nothing, column_type=nothing)
 
-Add a column to the batch. The column type is inferred from the element type.
+Add a string column to the batch. Strings are passed as an array of pointers with lengths.
+Note: While this avoids copying on the Julia side, Arrow still copies the string data
+into its internal buffer on the Rust side.
+
+# Arguments
+- `data`: The string column data array
+- `validity`: Optional validity mask (BitVector where false=null, true=valid)
+- `length`: Optional number of rows to use from the array. If not specified,
+  uses the full array length.
+- `column_type`: Optional explicit column type (defaults to COLUMN_TYPE_STRING)
+"""
+function Base.push!(
+    batch::ColumnBatch,
+    data::Vector{String};
+    validity::Union{Nothing, BitVector}=nothing,
+    length::Union{Nothing, Int}=nothing,
+    column_type::Union{Nothing, ColumnType}=nothing
+)
+    num_rows = length === nothing ? Base.length(data) : length
+    is_nullable = validity !== nothing
+    col_type = column_type === nothing ? COLUMN_TYPE_STRING : column_type
+
+    # Build arrays of string pointers and lengths (no copy on Julia side)
+    # Each String in Julia is a pointer to contiguous UTF-8 bytes
+    # For null values, we use null pointer and zero length - Rust will check validity mask
+    str_ptrs = Vector{Ptr{UInt8}}(undef, num_rows)
+    str_lens = Vector{Int64}(undef, num_rows)
+    for i in 1:num_rows
+        if is_nullable && !validity[i]
+            # Null value - use null pointer and zero length
+            str_ptrs[i] = Ptr{UInt8}(C_NULL)
+            str_lens[i] = 0
+        else
+            str_ptrs[i] = pointer(data[i])
+            str_lens[i] = sizeof(data[i])
+        end
+    end
+
+    # Preserve all arrays (original strings + metadata arrays)
+    push!(batch.arrays_to_preserve, data)
+    push!(batch.arrays_to_preserve, str_ptrs)
+    push!(batch.arrays_to_preserve, str_lens)
+
+    validity_ptr = if is_nullable
+        push!(batch.arrays_to_preserve, validity)
+        Ptr{UInt8}(pointer(validity.chunks))
+    else
+        Ptr{UInt8}(C_NULL)
+    end
+
+    # For strings: data_ptr = pointer to string pointers, offsets_ptr = pointer to lengths
+    desc = ColumnDescriptor(
+        Ptr{Cvoid}(pointer(str_ptrs)),
+        pointer(str_lens),  # Reuse offsets_ptr for lengths array
+        validity_ptr,
+        Csize_t(num_rows),
+        Int32(col_type),
+        is_nullable
+    )
+    push!(batch.descriptors, desc)
+    return batch
+end
+
+"""
+    push!(batch::ColumnBatch, data::Vector{T}; validity=nothing, length=nothing, column_type=nothing) where T
+
+Add a column to the batch. The column type is inferred from the element type unless
+explicitly specified.
 
 # Arguments
 - `data`: The column data array
 - `validity`: Optional validity mask (BitVector where false=null, true=valid)
+- `length`: Optional number of rows to use from the array. If not specified,
+  uses the full array length. This allows writing only a prefix of the array.
+- `column_type`: Optional explicit column type (ColumnType enum). If not specified,
+  inferred from the element type T. Use this when the physical storage type differs
+  from the logical type (e.g., Int32 data that represents Date32).
 """
-function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing, BitVector}=nothing) where T
+function Base.push!(
+    batch::ColumnBatch,
+    data::Vector{T};
+    validity::Union{Nothing, BitVector}=nothing,
+    length::Union{Nothing, Int}=nothing,
+    column_type::Union{Nothing, ColumnType}=nothing
+) where T
     push!(batch.arrays_to_preserve, data)
 
-    col_type = julia_type_to_column_type(T)
-    num_rows = length(data)
+    col_type = column_type === nothing ? julia_type_to_column_type(T) : column_type
+    num_rows = length === nothing ? Base.length(data) : length
     is_nullable = validity !== nothing
 
     validity_ptr = if is_nullable
@@ -551,7 +658,7 @@ function Base.push!(batch::ColumnBatch, data::Vector{T}; validity::Union{Nothing
 
     desc = ColumnDescriptor(
         Ptr{Cvoid}(pointer(data)),
-        Ptr{Int64}(C_NULL),  # offsets_ptr not used for non-string types
+        Ptr{Int64}(C_NULL),  # lengths_ptr not used for non-string types
         validity_ptr,
         Csize_t(num_rows),
         Int32(col_type),
@@ -627,11 +734,21 @@ Write columns from a ColumnBatch to the Parquet writer.
 This is the recommended way to use write_columns - the ColumnBatch automatically
 tracks all arrays that need to be preserved during the FFI call.
 
+# Arguments
+- `writer::DataFileWriter`: The writer to write to
+- `batch::ColumnBatch`: The column batch to write
+
 # Example
 ```julia
 batch = ColumnBatch()
 push!(batch, ids)
 push!(batch, values; validity=validity_vec)
+write_columns(writer, batch)
+
+# To write only first 100 rows, use the length parameter on push!:
+batch = ColumnBatch()
+push!(batch, ids; length=100)
+push!(batch, values; validity=validity_vec, length=100)
 write_columns(writer, batch)
 ```
 """

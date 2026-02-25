@@ -28,15 +28,18 @@ pub const COLUMN_TYPE_DATE: i32 = 5;
 pub const COLUMN_TYPE_TIMESTAMP: i32 = 6;
 pub const COLUMN_TYPE_BOOLEAN: i32 = 7;
 pub const COLUMN_TYPE_UUID: i32 = 8;
+pub const COLUMN_TYPE_TIMESTAMPTZ: i32 = 9;
 
 /// Descriptor for a single column passed from Julia
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ColumnDescriptor {
     /// Pointer to the raw data (interpretation depends on column_type)
+    /// For strings: pointer to array of string pointers (Ptr{UInt8}[])
     pub data_ptr: *const c_void,
-    /// For string columns: pointer to offsets array (Int64)
-    pub offsets_ptr: *const i64,
+    /// For string columns: pointer to lengths array (Int64[])
+    /// For other types: unused (C_NULL)
+    pub lengths_ptr: *const i64,
     /// Pointer to validity bitmap (only if is_nullable is true)
     /// Points to bit-packed data from Julia's BitVector.chunks (UInt64 array)
     /// Bit i is 1 if row i is valid, 0 if null
@@ -97,7 +100,18 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
             Arc::new(PrimitiveArray::<Date32Type>::new(buffer, null_buffer))
         }
         COLUMN_TYPE_TIMESTAMP => {
-            // Timestamp is stored as Int64 (microseconds since epoch)
+            // Timestamp without timezone (Iceberg `timestamp`)
+            // Stored as Int64 microseconds since epoch
+            let data = std::slice::from_raw_parts(desc.data_ptr as *const i64, desc.num_rows);
+            let buffer = ScalarBuffer::from(data.to_vec());
+            Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(
+                buffer,
+                null_buffer,
+            ))
+        }
+        COLUMN_TYPE_TIMESTAMPTZ => {
+            // Timestamp with UTC timezone (Iceberg `timestamptz`)
+            // Stored as Int64 microseconds since epoch, with timezone metadata
             let data = std::slice::from_raw_parts(desc.data_ptr as *const i64, desc.num_rows);
             let buffer = ScalarBuffer::from(data.to_vec());
             Arc::new(
@@ -118,17 +132,19 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
             Arc::new(BooleanArray::new(values, null_buffer))
         }
         COLUMN_TYPE_STRING => {
-            // String data is passed as:
-            // - data_ptr: pointer to concatenated UTF-8 bytes
-            // - offsets_ptr: pointer to Int64 offsets array (length = num_rows + 1)
-            if desc.offsets_ptr.is_null() {
-                return Err(anyhow::anyhow!("String column requires offsets"));
+            // String data passed from Julia:
+            // - data_ptr: pointer to array of string pointers (each pointing to UTF-8 bytes)
+            // - lengths_ptr: pointer to array of string lengths (Int64)
+            // Note: While we avoid copying on the Julia side (just passing pointers),
+            // Arrow's StringArray copies the data into its own contiguous buffer below.
+            if desc.lengths_ptr.is_null() {
+                return Err(anyhow::anyhow!("String column requires lengths"));
             }
-            let offsets = std::slice::from_raw_parts(desc.offsets_ptr, desc.num_rows + 1);
-            let total_bytes = offsets[desc.num_rows] as usize;
-            let bytes = std::slice::from_raw_parts(desc.data_ptr as *const u8, total_bytes);
+            let str_ptrs =
+                std::slice::from_raw_parts(desc.data_ptr as *const *const u8, desc.num_rows);
+            let str_lens = std::slice::from_raw_parts(desc.lengths_ptr, desc.num_rows);
 
-            // Build strings from offsets
+            // Build string references, then Arrow copies them into its internal buffer
             let mut strings: Vec<Option<&str>> = Vec::with_capacity(desc.num_rows);
             for i in 0..desc.num_rows {
                 let is_null: bool = if let Some(ref nb) = null_buffer {
@@ -139,9 +155,10 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
                 if is_null {
                     strings.push(None);
                 } else {
-                    let start = offsets[i] as usize;
-                    let end = offsets[i + 1] as usize;
-                    let s = std::str::from_utf8(&bytes[start..end])
+                    let ptr = str_ptrs[i];
+                    let len = str_lens[i] as usize;
+                    let bytes = std::slice::from_raw_parts(ptr, len);
+                    let s = std::str::from_utf8(bytes)
                         .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in string column: {}", e))?;
                     strings.push(Some(s));
                 }
