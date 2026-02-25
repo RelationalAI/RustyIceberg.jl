@@ -567,7 +567,13 @@ Add a string column to the batch. Strings are passed as an array of pointers wit
   uses the full array length.
 - `column_type`: Optional explicit column type (defaults to COLUMN_TYPE_STRING)
 """
-function Base.push!(batch::ColumnBatch, data::Vector{String}; validity::Union{Nothing, BitVector}=nothing, length::Union{Nothing, Int}=nothing, column_type::Union{Nothing, ColumnType}=nothing)
+function Base.push!(
+    batch::ColumnBatch,
+    data::Vector{String};
+    validity::Union{Nothing, BitVector}=nothing,
+    length::Union{Nothing, Int}=nothing,
+    column_type::Union{Nothing, ColumnType}=nothing
+)
     num_rows = length === nothing ? Base.length(data) : length
     is_nullable = validity !== nothing
     col_type = column_type === nothing ? COLUMN_TYPE_STRING : column_type
