@@ -91,43 +91,18 @@ using Tables
 
         # Test 7: Verify data was written by scanning the table
         println("\nTest 7: Verifying written data...")
-        scan = RustyIceberg.new_scan(updated_table)
-        stream = RustyIceberg.scan!(scan)
-
-        # Collect all data from the scan
-        all_ids = Int64[]
-        all_names = String[]
-        all_values = Float64[]
-
-        batch_ptr = RustyIceberg.next_batch(stream)
-        while batch_ptr != C_NULL
-            batch = unsafe_load(batch_ptr)
-            # Convert batch to Arrow table
-            data = batch.data
-            len = batch.length
-            if len > 0
-                arrow_data = unsafe_wrap(Array, data, len)
-                tbl = Arrow.Table(arrow_data)
-                cols = Tables.columns(tbl)
-                append!(all_ids, cols.id)
-                append!(all_names, cols.name)
-                append!(all_values, cols.value)
-            end
-            RustyIceberg.free_batch(batch_ptr)
-            batch_ptr = RustyIceberg.next_batch(stream)
-        end
-        RustyIceberg.free_stream(stream)
-        RustyIceberg.free_scan!(scan)
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
 
         # Verify row count
-        @test length(all_ids) == 8  # 5 + 3 rows written
-        println("✅ Verified $(length(all_ids)) rows in table")
+        @test length(tbl.id) == 8  # 5 + 3 rows written
+        println("✅ Verified $(length(tbl.id)) rows in table")
 
         # Sort by id for consistent comparison
-        perm = sortperm(all_ids)
-        sorted_ids = all_ids[perm]
-        sorted_names = all_names[perm]
-        sorted_values = all_values[perm]
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_names = tbl.name[perm]
+        sorted_values = tbl.value[perm]
 
         # Verify exact data matches what we wrote
         expected_ids = Int64[1, 2, 3, 4, 5, 6, 7, 8]
@@ -253,42 +228,18 @@ end
 
         # Verify all data was written by scanning the table
         println("\nVerifying all data from both writers...")
-        scan = RustyIceberg.new_scan(updated_table)
-        stream = RustyIceberg.scan!(scan)
-
-        # Collect all data from the scan
-        all_ids = Int64[]
-        all_names = String[]
-        all_values = Float64[]
-
-        batch_ptr = RustyIceberg.next_batch(stream)
-        while batch_ptr != C_NULL
-            batch = unsafe_load(batch_ptr)
-            data = batch.data
-            len = batch.length
-            if len > 0
-                arrow_data = unsafe_wrap(Array, data, len)
-                tbl = Arrow.Table(arrow_data)
-                cols = Tables.columns(tbl)
-                append!(all_ids, cols.id)
-                append!(all_names, cols.name)
-                append!(all_values, cols.value)
-            end
-            RustyIceberg.free_batch(batch_ptr)
-            batch_ptr = RustyIceberg.next_batch(stream)
-        end
-        RustyIceberg.free_stream(stream)
-        RustyIceberg.free_scan!(scan)
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
 
         # Verify row count - should have all 6 rows (3 from each writer)
-        @test length(all_ids) == 6
-        println("✅ Verified $(length(all_ids)) rows in table")
+        @test length(tbl.id) == 6
+        println("✅ Verified $(length(tbl.id)) rows in table")
 
         # Sort by id for consistent comparison
-        perm = sortperm(all_ids)
-        sorted_ids = all_ids[perm]
-        sorted_names = all_names[perm]
-        sorted_values = all_values[perm]
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_names = tbl.name[perm]
+        sorted_values = tbl.value[perm]
 
         # Verify exact data matches what we wrote from both writers
         expected_ids = Int64[1, 2, 3, 4, 5, 6]
@@ -505,42 +456,18 @@ end
 
         # Verify data was written by scanning the table
         println("\nVerifying written data...")
-        scan = RustyIceberg.new_scan(updated_table)
-        stream = RustyIceberg.scan!(scan)
-
-        # Collect all data from the scan
-        all_ids = Int64[]
-        all_names = String[]
-        all_values = Float64[]
-
-        batch_ptr = RustyIceberg.next_batch(stream)
-        while batch_ptr != C_NULL
-            batch = unsafe_load(batch_ptr)
-            data = batch.data
-            len = batch.length
-            if len > 0
-                arrow_data = unsafe_wrap(Array, data, len)
-                tbl = Arrow.Table(arrow_data)
-                cols = Tables.columns(tbl)
-                append!(all_ids, cols.id)
-                append!(all_names, cols.name)
-                append!(all_values, cols.value)
-            end
-            RustyIceberg.free_batch(batch_ptr)
-            batch_ptr = RustyIceberg.next_batch(stream)
-        end
-        RustyIceberg.free_stream(stream)
-        RustyIceberg.free_scan!(scan)
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
 
         # Verify row count
-        @test length(all_ids) == 3
-        println("✅ Verified $(length(all_ids)) rows in table")
+        @test length(tbl.id) == 3
+        println("✅ Verified $(length(tbl.id)) rows in table")
 
         # Sort by id for consistent comparison
-        perm = sortperm(all_ids)
-        sorted_ids = all_ids[perm]
-        sorted_names = all_names[perm]
-        sorted_values = all_values[perm]
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_names = tbl.name[perm]
+        sorted_values = tbl.value[perm]
 
         # Verify exact data matches what we wrote
         expected_ids = Int64[10, 20, 30]
@@ -676,47 +603,23 @@ end
 
             # Verify data was written by scanning the table
             println("\nVerifying written data...")
-            scan = RustyIceberg.new_scan(updated_table)
-            stream = RustyIceberg.scan!(scan)
-
-            # Collect all data from the scan
-            all_ids = Int64[]
-            all_names = String[]
-            all_values = Float64[]
-
-            batch_ptr = RustyIceberg.next_batch(stream)
-            while batch_ptr != C_NULL
-                batch = unsafe_load(batch_ptr)
-                data = batch.data
-                len = batch.length
-                if len > 0
-                    arrow_data = unsafe_wrap(Array, data, len)
-                    tbl = Arrow.Table(arrow_data)
-                    cols = Tables.columns(tbl)
-                    append!(all_ids, cols.id)
-                    append!(all_names, cols.name)
-                    append!(all_values, cols.value)
-                end
-                RustyIceberg.free_batch(batch_ptr)
-                batch_ptr = RustyIceberg.next_batch(stream)
-            end
-            RustyIceberg.free_stream(stream)
-            RustyIceberg.free_scan!(scan)
+            tbl = read_table_data(updated_table)
+            @test tbl !== nothing
 
             # Verify row count and data
-            @test length(all_ids) == 5
-            println("✅ Verified $(length(all_ids)) rows in table")
+            @test length(tbl.id) == 5
+            println("✅ Verified $(length(tbl.id)) rows in table")
 
             # Sort by id for consistent comparison
-            perm = sortperm(all_ids)
-            all_ids = all_ids[perm]
-            all_names = all_names[perm]
-            all_values = all_values[perm]
+            perm = sortperm(tbl.id)
+            sorted_ids = tbl.id[perm]
+            sorted_names = tbl.name[perm]
+            sorted_values = tbl.value[perm]
 
             # Verify data matches
-            @test all_ids == [1, 2, 3, 4, 5]
-            @test all_names == ["Alice", "Bob", "Charlie", "Diana", "Eve"]
-            @test all_values == [1.1, 2.2, 3.3, 4.4, 5.5]
+            @test sorted_ids == [1, 2, 3, 4, 5]
+            @test sorted_names == ["Alice", "Bob", "Charlie", "Diana", "Eve"]
+            @test sorted_values == [1.1, 2.2, 3.3, 4.4, 5.5]
             println("✅ Data verified successfully")
 
         finally
@@ -751,4 +654,252 @@ end
     end # without_aws_env
 
     println("\n✅ Writer with vended credentials tests completed!")
+end
+
+@testset "Writer write_columns API" begin
+    println("Testing write_columns (raw column) API...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        # Create catalog connection
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+        println("✅ Catalog created successfully")
+
+        # Create a test namespace for table creation
+        test_namespace = ["test_write_columns_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+        println("✅ Test namespace created: $test_namespace")
+
+        # Create a schema for test table with various types
+        schema = Schema([
+            Field(Int32(1), "id", "long"; required=true),
+            Field(Int32(2), "count", "int"; required=false),
+            Field(Int32(3), "value", "double"; required=false),
+            Field(Int32(4), "flag", "boolean"; required=false),
+        ])
+
+        # Create test table
+        table_name = "write_columns_test_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(
+            catalog,
+            test_namespace,
+            table_name,
+            schema
+        )
+        @test table != C_NULL
+        println("✅ Test table created: $table_name")
+
+        # Test: Write raw column data using write_columns
+        println("\nTest: Writing data via write_columns...")
+
+        # Prepare raw column data
+        col_ids = Int64[1, 2, 3, 4, 5]
+        col_counts = Int32[10, 20, 30, 40, 50]
+        col_values = Float64[1.1, 2.2, 3.3, 4.4, 5.5]
+        col_flags = Bool[true, false, true, false, true]
+
+        # Validity masks (all valid for this test) - use BitVector
+        validity_counts = BitVector([true, true, true, true, true])
+        validity_values = BitVector([true, true, true, true, true])
+        validity_flags = BitVector([true, true, true, true, true])
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            @test writer !== nothing
+            @test writer.ptr != C_NULL
+            println("✅ Writer created successfully")
+
+            # Build column batch using the helper
+            batch = RustyIceberg.ColumnBatch()
+            push!(batch, col_ids)
+            push!(batch, col_counts; validity=validity_counts)
+            push!(batch, col_values; validity=validity_values)
+            push!(batch, col_flags; validity=validity_flags)
+
+            RustyIceberg.write_columns(writer, batch)
+            println("✅ Data written via write_columns")
+        end
+        @test data_files !== nothing
+        @test data_files.ptr != C_NULL
+        println("✅ Writer closed successfully, got DataFiles handle")
+
+        # Commit the data
+        println("\nCommitting data files via transaction...")
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+        println("✅ Transaction committed successfully")
+
+        # Verify data was written by scanning the table
+        println("\nVerifying written data...")
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
+
+        # Verify row count
+        @test length(tbl.id) == 5
+        println("✅ Verified $(length(tbl.id)) rows in table")
+
+        # Sort by id for consistent comparison
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_counts = tbl.count[perm]
+        sorted_values = tbl.value[perm]
+        sorted_flags = tbl.flag[perm]
+
+        # Verify exact data matches what we wrote
+        @test sorted_ids == Int64[1, 2, 3, 4, 5]
+        @test sorted_counts == Int32[10, 20, 30, 40, 50]
+        @test sorted_values == Float64[1.1, 2.2, 3.3, 4.4, 5.5]
+        @test sorted_flags == Bool[true, false, true, false, true]
+        println("✅ Verified write_columns data content matches exactly")
+
+        # Clean up updated table
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        # Clean up all resources in reverse order
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+            println("✅ Table cleaned up")
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+            println("✅ Test table dropped")
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+            println("✅ Test namespace dropped")
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+            println("✅ Catalog cleaned up")
+        end
+    end
+
+    println("\n✅ write_columns API tests completed!")
+end
+
+@testset "Writer write_columns with nulls" begin
+    println("Testing write_columns with null values...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        # Create catalog connection
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+        println("✅ Catalog created successfully")
+
+        # Create a test namespace
+        test_namespace = ["test_write_cols_nulls_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+        println("✅ Test namespace created: $test_namespace")
+
+        # Create a schema for test table
+        schema = Schema([
+            Field(Int32(1), "id", "long"; required=true),
+            Field(Int32(2), "value", "double"; required=false),
+        ])
+
+        # Create test table
+        table_name = "write_cols_nulls_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(
+            catalog,
+            test_namespace,
+            table_name,
+            schema
+        )
+        @test table != C_NULL
+        println("✅ Test table created: $table_name")
+
+        # Prepare data with some nulls
+        col_ids = Int64[1, 2, 3, 4, 5]
+        col_values = Float64[1.1, 0.0, 3.3, 0.0, 5.5]  # 0.0 will be null based on validity
+        validity_values = BitVector([true, false, true, false, true])  # positions 2 and 4 are null
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            batch = RustyIceberg.ColumnBatch()
+            push!(batch, col_ids)
+            push!(batch, col_values; validity=validity_values)
+
+            RustyIceberg.write_columns(writer, batch)
+            println("✅ Data with nulls written via write_columns")
+        end
+        @test data_files !== nothing
+        println("✅ Writer closed successfully")
+
+        # Commit the data
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+        println("✅ Transaction committed successfully")
+
+        # Verify data including nulls
+        println("\nVerifying written data with nulls...")
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
+
+        # Sort by id
+        perm = sortperm(tbl.id)
+        sorted_ids = tbl.id[perm]
+        sorted_values = tbl.value[perm]
+
+        # Verify data including null positions
+        @test sorted_ids == Int64[1, 2, 3, 4, 5]
+        @test !ismissing(sorted_values[1]) && sorted_values[1] ≈ 1.1
+        @test ismissing(sorted_values[2])  # null
+        @test !ismissing(sorted_values[3]) && sorted_values[3] ≈ 3.3
+        @test ismissing(sorted_values[4])  # null
+        @test !ismissing(sorted_values[5]) && sorted_values[5] ≈ 5.5
+        println("✅ Verified null values are correctly written and read")
+
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+            println("✅ Table cleaned up")
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+            println("✅ Test table dropped")
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+            println("✅ Test namespace dropped")
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+            println("✅ Catalog cleaned up")
+        end
+    end
+
+    println("\n✅ write_columns with nulls tests completed!")
 end

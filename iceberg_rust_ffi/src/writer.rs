@@ -5,8 +5,11 @@
 /// for use with the Transaction API.
 use std::ffi::{c_char, c_void};
 use std::io::Cursor;
+use std::sync::Arc;
 
 use arrow_ipc::reader::StreamReader;
+use arrow_schema::SchemaRef as ArrowSchemaRef;
+use iceberg::arrow::schema_to_arrow_schema;
 use iceberg::spec::DataFileFormat;
 use iceberg::writer::base_writer::data_file_writer::{DataFileWriter, DataFileWriterBuilder};
 use iceberg::writer::file_writer::location_generator::{
@@ -52,7 +55,9 @@ type ConcreteDataFileWriter =
 /// Opaque writer handle for FFI
 /// Holds the DataFileWriter which can write RecordBatches and produce DataFiles
 pub struct IcebergDataFileWriter {
-    writer: Option<ConcreteDataFileWriter>,
+    pub(crate) writer: Option<ConcreteDataFileWriter>,
+    /// The Arrow schema for this table, used by write_columns to create RecordBatches
+    pub(crate) arrow_schema: ArrowSchemaRef,
 }
 
 unsafe impl Send for IcebergDataFileWriter {}
@@ -150,8 +155,15 @@ export_runtime_op!(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to build data file writer: {}", e))?;
 
+        // Convert Iceberg schema to Arrow schema for use in write_columns
+        let arrow_schema = Arc::new(
+            schema_to_arrow_schema(table.metadata().current_schema().as_ref())
+                .map_err(|e| anyhow::anyhow!("Failed to convert schema to Arrow: {}", e))?
+        );
+
         Ok::<IcebergDataFileWriter, anyhow::Error>(IcebergDataFileWriter {
             writer: Some(writer),
+            arrow_schema,
         })
     },
     table: *mut IcebergTable,

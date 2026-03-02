@@ -5,41 +5,118 @@ This module provides Julia representations of Iceberg schema, partition specs,
 and related metadata needed for creating and writing to Iceberg tables.
 """
 
+# ============================================================================
+# Iceberg Type System
+# ============================================================================
+
 """
-    IcebergType
+    AbstractIcebergType
 
-Enum for valid Iceberg primitive types.
+Abstract base type for all Iceberg field types.
 
-Values:
-- `BOOLEAN`: Boolean type
-- `INT`: 32-bit integer
-- `LONG`: 64-bit integer
-- `FLOAT`: 32-bit floating point
-- `DOUBLE`: 64-bit floating point
-- `DECIMAL`: Decimal (not directly supported in enum, use string)
-- `DATE`: Date type
-- `TIME`: Time type
-- `TIMESTAMP`: Timestamp with timezone
-- `TIMESTAMPTZ`: Timestamp without timezone
-- `STRING`: String/text type
-- `UUID`: UUID type
-- `BINARY`: Binary type
+Subtypes include primitive types (IcebergBoolean, IcebergInt, etc.) and
+parameterized types (IcebergDecimal).
 
-Note: For complex types or decimal with specific precision/scale, pass type strings directly.
+# Example
+```julia
+field = Field(Int32(1), "name", IcebergString(); required=true)
+field = Field(Int32(2), "count", IcebergLong())
+field = Field(Int32(3), "amount", IcebergDecimal(38, 18))
+```
 """
-@enum IcebergType begin
-    BOOLEAN = 0
-    INT = 1
-    LONG = 2
-    FLOAT = 3
-    DOUBLE = 4
-    DATE = 5
-    TIME = 6
-    TIMESTAMP = 7
-    TIMESTAMPTZ = 8
-    STRING = 9
-    UUID = 10
-    BINARY = 11
+abstract type AbstractIcebergType end
+
+# Primitive types - singleton structs
+struct IcebergBoolean <: AbstractIcebergType end
+struct IcebergInt <: AbstractIcebergType end
+struct IcebergLong <: AbstractIcebergType end
+struct IcebergFloat <: AbstractIcebergType end
+struct IcebergDouble <: AbstractIcebergType end
+struct IcebergDate <: AbstractIcebergType end
+struct IcebergTime <: AbstractIcebergType end
+struct IcebergTimestamp <: AbstractIcebergType end
+struct IcebergTimestamptz <: AbstractIcebergType end
+struct IcebergTimestampNs <: AbstractIcebergType end
+struct IcebergTimestamptzNs <: AbstractIcebergType end
+struct IcebergString <: AbstractIcebergType end
+struct IcebergUuid <: AbstractIcebergType end
+struct IcebergBinary <: AbstractIcebergType end
+
+"""
+    IcebergDecimal(precision::Int, scale::Int)
+
+Decimal type with specified precision and scale.
+
+# Example
+```julia
+field = Field(Int32(1), "amount", IcebergDecimal(38, 18))
+```
+"""
+struct IcebergDecimal <: AbstractIcebergType
+    precision::Int
+    scale::Int
+end
+
+# Convert Iceberg type to string for JSON serialization
+_iceberg_type_to_string(::IcebergBoolean) = "boolean"
+_iceberg_type_to_string(::IcebergInt) = "int"
+_iceberg_type_to_string(::IcebergLong) = "long"
+_iceberg_type_to_string(::IcebergFloat) = "float"
+_iceberg_type_to_string(::IcebergDouble) = "double"
+_iceberg_type_to_string(::IcebergDate) = "date"
+_iceberg_type_to_string(::IcebergTime) = "time"
+_iceberg_type_to_string(::IcebergTimestamp) = "timestamp"
+_iceberg_type_to_string(::IcebergTimestamptz) = "timestamptz"
+_iceberg_type_to_string(::IcebergTimestampNs) = "timestamp_ns"
+_iceberg_type_to_string(::IcebergTimestamptzNs) = "timestamptz_ns"
+_iceberg_type_to_string(::IcebergString) = "string"
+_iceberg_type_to_string(::IcebergUuid) = "uuid"
+_iceberg_type_to_string(::IcebergBinary) = "binary"
+_iceberg_type_to_string(d::IcebergDecimal) = "decimal($(d.precision),$(d.scale))"
+
+# Parse string to Iceberg type (for reading schemas from JSON)
+function _string_to_iceberg_type(s::AbstractString)::AbstractIcebergType
+    type_str = strip(s)
+    if type_str == "boolean"
+        return IcebergBoolean()
+    elseif type_str == "int"
+        return IcebergInt()
+    elseif type_str == "long"
+        return IcebergLong()
+    elseif type_str == "float"
+        return IcebergFloat()
+    elseif type_str == "double"
+        return IcebergDouble()
+    elseif type_str == "date"
+        return IcebergDate()
+    elseif type_str == "time"
+        return IcebergTime()
+    elseif type_str == "timestamp"
+        return IcebergTimestamp()
+    elseif type_str == "timestamptz"
+        return IcebergTimestamptz()
+    elseif type_str == "timestamp_ns"
+        return IcebergTimestampNs()
+    elseif type_str == "timestamptz_ns"
+        return IcebergTimestamptzNs()
+    elseif type_str == "string"
+        return IcebergString()
+    elseif type_str == "uuid"
+        return IcebergUuid()
+    elseif type_str == "binary"
+        return IcebergBinary()
+    elseif startswith(type_str, "decimal(")
+        m = Base.match(r"decimal\((\d+)\s*,\s*(\d+)\)", type_str)
+        if m !== nothing
+            precision = parse(Int, m.captures[1])
+            scale = parse(Int, m.captures[2])
+            return IcebergDecimal(precision, scale)
+        else
+            throw(ArgumentError("Invalid decimal type format: $type_str"))
+        end
+    else
+        throw(ArgumentError("Unknown Iceberg type: $type_str"))
+    end
 end
 
 """
@@ -64,29 +141,75 @@ Values:
 """
 @enum NullOrder NULLS_FIRST=0 NULLS_LAST=1
 
-# Convert IcebergType enum to string for JSON
-function _iceberg_type_to_string(t::IcebergType)::String
-    mapping = Dict(
-        BOOLEAN => "boolean",
-        INT => "int",
-        LONG => "long",
-        FLOAT => "float",
-        DOUBLE => "double",
-        DATE => "date",
-        TIME => "time",
-        TIMESTAMP => "timestamp",
-        TIMESTAMPTZ => "timestamptz",
-        STRING => "string",
-        UUID => "uuid",
-        BINARY => "binary",
-    )
-    return mapping[t]
-end
-
 # Convert SortDirection enum to string for JSON
 function _sort_direction_to_string(direction::SortDirection)::String
     direction == ASC ? "asc" : "desc"
 end
+
+"""
+    iceberg_type_to_arrow_type(iceberg_type::AbstractIcebergType) -> Type
+
+Map an Iceberg field type to the corresponding Arrow/Julia output type.
+
+This function determines what Julia/Arrow type users should use when providing data
+for a given Iceberg field type. This is essential for correct Parquet serialization.
+
+# Mappings
+
+According to the Iceberg specification:
+- `IcebergBoolean()` → `Bool`
+- `IcebergInt()` → `Int32`
+- `IcebergLong()` → `Int64`
+- `IcebergFloat()` → `Float32`
+- `IcebergDouble()` → `Float64`
+- `IcebergDate()` → `Date` (from Dates module)
+- `IcebergTime()` → `Int64` - microseconds since midnight
+- `IcebergTimestamp()` → `Arrow.Timestamp{..., nothing}` - microseconds since epoch (no timezone)
+- `IcebergTimestamptz()` → `Arrow.Timestamp{..., :UTC}` - microseconds since epoch UTC
+- `IcebergString()` → `String`
+- `IcebergUuid()` → `NTuple{16, UInt8}` - 16-byte UUID representation
+- `IcebergBinary()` → `Vector{UInt8}` - variable-length byte array
+- `IcebergDecimal(p,s)` → `Int32` (if p ≤ 9), `Int64` (if p ≤ 18), or `NTuple{16, UInt8}` (if p > 18)
+
+# Example
+
+```julia
+using RustyIceberg
+using Dates
+
+arrow_type = iceberg_type_to_arrow_type(IcebergDate())
+# Returns Date type
+
+arrow_type = iceberg_type_to_arrow_type(IcebergDecimal(38, 18))
+# Returns NTuple{16, UInt8}
+```
+"""
+iceberg_type_to_arrow_type(::IcebergBoolean) = Bool
+iceberg_type_to_arrow_type(::IcebergInt) = Int32
+iceberg_type_to_arrow_type(::IcebergLong) = Int64
+iceberg_type_to_arrow_type(::IcebergFloat) = Float32
+iceberg_type_to_arrow_type(::IcebergDouble) = Float64
+iceberg_type_to_arrow_type(::IcebergDate) = Dates.Date
+iceberg_type_to_arrow_type(::IcebergTime) = Int64
+iceberg_type_to_arrow_type(::IcebergTimestamp) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
+iceberg_type_to_arrow_type(::IcebergTimestamptz) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, :UTC}
+iceberg_type_to_arrow_type(::IcebergTimestampNs) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, nothing}
+iceberg_type_to_arrow_type(::IcebergTimestamptzNs) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, :UTC}
+iceberg_type_to_arrow_type(::IcebergString) = String
+iceberg_type_to_arrow_type(::IcebergUuid) = NTuple{16, UInt8}
+iceberg_type_to_arrow_type(::IcebergBinary) = Vector{UInt8}
+function iceberg_type_to_arrow_type(d::IcebergDecimal)
+    if d.precision <= 9
+        return Int32
+    elseif d.precision <= 18
+        return Int64
+    else
+        return NTuple{16, UInt8}
+    end
+end
+
+# String-based version for backwards compatibility and parsing JSON schemas
+iceberg_type_to_arrow_type(s::AbstractString) = iceberg_type_to_arrow_type(_string_to_iceberg_type(s))
 
 # Convert NullOrder enum to string for JSON
 function _null_order_to_string(null_order::NullOrder)::String
@@ -101,29 +224,62 @@ Represents a single field in an Iceberg schema.
 # Fields
 - `id::Int32`: Field ID (must be unique within schema and positive)
 - `name::String`: Field name
-- `type::String`: Iceberg type (e.g., "int", "long", "string", "double", "boolean", "timestamp", etc.)
+- `type::AbstractIcebergType`: Iceberg type (e.g., IcebergLong(), IcebergString(), IcebergDecimal(38, 18))
 - `required::Bool`: Whether the field is required (default: false)
 - `doc::Union{String, Nothing}`: Optional documentation for the field
+
+# Example
+```julia
+Field(Int32(1), "id", IcebergLong(); required=true)
+Field(Int32(2), "name", IcebergString())
+Field(Int32(3), "amount", IcebergDecimal(38, 18))
+```
 """
 struct Field
     id::Int32
     name::String
-    type::String
+    type::AbstractIcebergType
     required::Bool
     doc::Union{String, Nothing}
 
     # Constructor with doc as optional keyword argument
-    Field(id::Int32, name::String, type::String; required::Bool=false, doc::Union{String, Nothing}=nothing) =
+    Field(id::Int32, name::String, type::AbstractIcebergType; required::Bool=false, doc::Union{String, Nothing}=nothing) =
         new(id, name, type, required, doc)
 end
 
-"""
-    Field(id::Int32, name::String, type::IcebergType; required::Bool=false, doc::Union{String, Nothing}=nothing)
+# Constructor from string type (for backwards compatibility / parsing JSON)
+Field(id::Int32, name::String, type::AbstractString; required::Bool=false, doc::Union{String, Nothing}=nothing) =
+    Field(id, name, _string_to_iceberg_type(type); required=required, doc=doc)
 
-Constructor that takes an IcebergType enum and converts it to string.
 """
-Field(id::Int32, name::String, type::IcebergType; required::Bool=false, doc::Union{String, Nothing}=nothing) =
-    Field(id, name, _iceberg_type_to_string(type); required=required, doc=doc)
+    arrow_type(field::Field) -> Type
+
+Get the Arrow/Julia type that should be used for data corresponding to this field.
+
+This function returns the Arrow/Julia type for the field's type, and accounts for nullability:
+- If the field is required, returns the type as-is
+- If the field is not required (nullable), returns `Union{Missing, T}` where T is the base type
+
+# Example
+
+```julia
+field_required = Field(Int32(1), "event_date", IcebergDate(); required=true)
+arrow_t = arrow_type(field_required)
+# Returns Date type - users should provide Date objects
+
+field_nullable = Field(Int32(2), "description", IcebergString(); required=false)
+arrow_t = arrow_type(field_nullable)
+# Returns Union{Missing, String} - users can provide String or missing values
+```
+"""
+function arrow_type(field::Field)
+    base_type = iceberg_type_to_arrow_type(field.type)
+    if field.required
+        return base_type
+    else
+        return Union{Missing, base_type}
+    end
+end
 
 """
     Schema
@@ -146,6 +302,38 @@ struct Schema
         end
         new(fields, identifier_field_ids)
     end
+end
+
+"""
+    arrow_types(schema::Schema) -> Dict{String, Type}
+
+Get a dictionary mapping field names to their Arrow/Julia types for the schema.
+
+This helps users understand what data types they need to provide when writing to
+an Iceberg table with this schema. For nullable fields, the type will be `Union{Missing, T}`.
+
+# Example
+
+```julia
+schema = Schema([
+    Field(Int32(1), "id", "long"; required=true),
+    Field(Int32(2), "event_date", "date"; required=false),
+    Field(Int32(3), "event_time", "timestamp"; required=true),
+])
+
+types = arrow_types(schema)
+# Returns Dict{String, Type}:
+#   "id" => Int64
+#   "event_date" => Union{Missing, Date}
+#   "event_time" => Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
+```
+"""
+function arrow_types(schema::Schema)::Dict{String, Type}
+    result = Dict{String, Type}()
+    for field in schema.fields
+        result[field.name] = arrow_type(field)
+    end
+    return result
 end
 
 """
@@ -250,7 +438,7 @@ function field_to_dict(field::Field)::Dict
         "id" => field.id,
         "name" => field.name,
         "required" => field.required,
-        "type" => field.type,
+        "type" => _iceberg_type_to_string(field.type),
     )
     if field.doc !== nothing
         d["doc"] = field.doc
@@ -352,9 +540,9 @@ Builder for constructing Iceberg schemas fluently.
 # Example
 ```julia
 schema = SchemaBuilder()
-    |> s -> add_field(s, 1, "id", LONG; required=true)
-    |> s -> add_field(s, 2, "name", STRING)
-    |> s -> add_field(s, 3, "timestamp", TIMESTAMP)
+    |> s -> add_field(s, "id", IcebergLong(); required=true)
+    |> s -> add_field(s, "name", IcebergString())
+    |> s -> add_field(s, "timestamp", IcebergTimestamp())
     |> build
 ```
 """
@@ -372,7 +560,7 @@ end
     add_field(
         builder::SchemaBuilder,
         name::String,
-        type::Union{String,IcebergType};
+        type::Union{AbstractString, AbstractIcebergType};
         required::Bool=false,
         doc::Union{String, Nothing}=nothing
     )::SchemaBuilder
@@ -382,12 +570,12 @@ Add a field to the schema builder with auto-incrementing field ID.
 function add_field(
     builder::SchemaBuilder,
     name::String,
-    type::Union{String,IcebergType};
+    type::Union{AbstractString, AbstractIcebergType};
     required::Bool=false,
     doc::Union{String, Nothing}=nothing
 )::SchemaBuilder
-    type_str = isa(type, IcebergType) ? _iceberg_type_to_string(type) : type
-    field = Field(builder.next_field_id, name, type_str; required=required, doc=doc)
+    iceberg_type = isa(type, AbstractIcebergType) ? type : _string_to_iceberg_type(type)
+    field = Field(builder.next_field_id, name, iceberg_type; required=required, doc=doc)
     push!(builder.fields, field)
     builder.next_field_id += 1
     return builder
@@ -398,7 +586,7 @@ end
         builder::SchemaBuilder,
         id::Int32,
         name::String,
-        type::Union{String,IcebergType};
+        type::Union{AbstractString, AbstractIcebergType};
         required::Bool=false,
         doc::Union{String, Nothing}=nothing
     )::SchemaBuilder
@@ -409,12 +597,12 @@ function add_field(
     builder::SchemaBuilder,
     id::Int32,
     name::String,
-    type::Union{String,IcebergType};
+    type::Union{AbstractString, AbstractIcebergType};
     required::Bool=false,
     doc::Union{String, Nothing}=nothing
 )::SchemaBuilder
-    type_str = isa(type, IcebergType) ? _iceberg_type_to_string(type) : type
-    field = Field(id, name, type_str; required=required, doc=doc)
+    iceberg_type = isa(type, AbstractIcebergType) ? type : _string_to_iceberg_type(type)
+    field = Field(id, name, iceberg_type; required=required, doc=doc)
     push!(builder.fields, field)
     builder.next_field_id = max(builder.next_field_id, id + 1)
     return builder
