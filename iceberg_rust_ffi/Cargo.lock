@@ -1532,7 +1532,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.8.0"
-source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=3babfb636b52ec4f148ff5546a0da14dc1027735#3babfb636b52ec4f148ff5546a0da14dc1027735"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=c49f7e972ade31a9afe495e29e5959c0b847fb7a#c49f7e972ade31a9afe495e29e5959c0b847fb7a"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -1587,7 +1587,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-rest"
 version = "0.8.0"
-source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=3babfb636b52ec4f148ff5546a0da14dc1027735#3babfb636b52ec4f148ff5546a0da14dc1027735"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=c49f7e972ade31a9afe495e29e5959c0b847fb7a#c49f7e972ade31a9afe495e29e5959c0b847fb7a"
 dependencies = [
  "async-trait",
  "chrono",
