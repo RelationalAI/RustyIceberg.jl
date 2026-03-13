@@ -97,7 +97,7 @@ Select specific columns for the incremental scan.
 function select_columns!(scan::IncrementalScan, column_names::Vector{String})
     # Convert String vector to Cstring array
     c_strings = [pointer(col) for col in column_names]
-    result = @ccall rust_lib.iceberg_incremental_select_columns(
+    result = GC.@preserve scan c_strings @ccall rust_lib.iceberg_incremental_select_columns(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         pointer(c_strings)::Ptr{Cstring},
         length(column_names)::Csize_t
@@ -115,7 +115,7 @@ end
 Sets the manifest file concurrency level for the incremental scan.
 """
 function with_manifest_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
-    result = @ccall rust_lib.iceberg_incremental_scan_with_manifest_file_concurrency_limit(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_manifest_file_concurrency_limit(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -132,7 +132,7 @@ end
 Sets the data file concurrency level for the incremental scan.
 """
 function with_data_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
-    result = @ccall rust_lib.iceberg_incremental_scan_with_data_file_concurrency_limit(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_data_file_concurrency_limit(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -149,7 +149,7 @@ end
 Sets the manifest entry concurrency level for the incremental scan.
 """
 function with_manifest_entry_concurrency_limit!(scan::IncrementalScan, n::UInt)
-    result = @ccall rust_lib.iceberg_incremental_scan_with_manifest_entry_concurrency_limit(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_manifest_entry_concurrency_limit(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -166,7 +166,7 @@ end
 Sets the batch size for the incremental scan.
 """
 function with_batch_size!(scan::IncrementalScan, n::UInt)
-    result = @ccall rust_lib.iceberg_incremental_scan_with_batch_size(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_batch_size(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -193,7 +193,7 @@ inserts_stream, deletes_stream = scan!(scan)
 ```
 """
 function with_file_column!(scan::IncrementalScan)
-    result = @ccall rust_lib.iceberg_incremental_scan_with_file_column(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_file_column(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cint
 
@@ -223,7 +223,7 @@ inserts_stream, deletes_stream = scan!(scan)
 ```
 """
 function with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
-    result = @ccall rust_lib.iceberg_incremental_scan_with_serialization_concurrency_limit(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_serialization_concurrency_limit(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -250,7 +250,7 @@ inserts_stream, deletes_stream = scan!(scan)
 ```
 """
 function with_pos_column!(scan::IncrementalScan)
-    result = @ccall rust_lib.iceberg_incremental_scan_with_pos_column(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_pos_column(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cint
 
@@ -266,7 +266,7 @@ end
 Build the provided incremental table scan object.
 """
 function build!(scan::IncrementalScan)
-    result = @ccall rust_lib.iceberg_incremental_scan_build(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_build(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cint
 
@@ -315,7 +315,7 @@ end
 Free the memory associated with an incremental scan.
 """
 function free_incremental_scan!(scan::IncrementalScan)
-    @ccall rust_lib.iceberg_free_incremental_scan(
+    GC.@preserve scan @ccall rust_lib.iceberg_free_incremental_scan(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cvoid
 end

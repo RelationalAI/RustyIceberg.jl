@@ -6,7 +6,10 @@ use crate::response::{
 use crate::IcebergTable;
 use anyhow::Result;
 use async_trait::async_trait;
-use iceberg::io::{StorageCredential, StorageCredentialsLoader};
+use iceberg::io::{
+    OpenDalRoutingStorageFactory, RefreshableStorageFactory, StorageCredential,
+    StorageCredentialsLoader, StorageFactory,
+};
 use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableIdent};
 use iceberg_catalog_rest::{CustomAuthenticator, RestCatalog, RestCatalogBuilder};
 use std::collections::HashMap;
@@ -210,28 +213,36 @@ impl IcebergCatalog {
             builder = builder.with_token_authenticator(authenticator.clone());
         }
 
-        let mut catalog = builder.load("rest", catalog_props).await?;
-
-        if self.use_credentials_loader {
-            // Create loader with empty catalog reference
+        let catalog_arc = if self.use_credentials_loader {
+            // Create loader before building catalog (new API: factory must be set on builder)
             let loader = Arc::new(RestCredentialsLoader {
                 catalog: OnceLock::new(),
             });
             let loader_ref = Arc::clone(&loader);
 
-            // Attach loader to catalog while we still have &mut access
-            catalog.set_storage_credentials_loader(loader);
+            // Attach loader via storage factory on the builder
+            let factory = Arc::new(RefreshableStorageFactory::new(loader));
+            let catalog = builder
+                .with_storage_factory(factory)
+                .load("rest", catalog_props)
+                .await?;
 
-            // Wrap catalog in Arc
             let catalog_arc = Arc::new(catalog);
 
             // Fill the loader's weak reference to the catalog
             let _ = loader_ref.catalog.set(Arc::downgrade(&catalog_arc));
-
-            self.catalog = Some(catalog_arc);
+            catalog_arc
         } else {
-            self.catalog = Some(Arc::new(catalog));
-        }
+            let factory: Arc<dyn StorageFactory> = Arc::new(OpenDalRoutingStorageFactory);
+            Arc::new(
+                builder
+                    .with_storage_factory(factory)
+                    .load("rest", catalog_props)
+                    .await?,
+            )
+        };
+
+        self.catalog = Some(catalog_arc);
 
         Ok(self)
     }

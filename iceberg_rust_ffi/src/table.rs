@@ -1,7 +1,7 @@
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
-use iceberg::io::FileIOBuilder;
+use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
 use iceberg::TableIdent;
@@ -123,22 +123,22 @@ export_runtime_op!(
     IcebergTableResponse,
     || {
         let snapshot_path_str = parse_c_string(snapshot_path, "snapshot_path")?;
-        let scheme_str = parse_c_string(scheme, "scheme")?;
         let props = parse_properties(properties, properties_len)?;
 
         // Convert HashMap to Vec of tuples for compatibility with FileIOBuilder::with_props
         let props_vec: Vec<(String, String)> = props.into_iter().collect();
-        Ok((snapshot_path_str, scheme_str, props_vec))
+        Ok((snapshot_path_str, props_vec))
     },
     result_tuple,
     async {
-        let (full_metadata_path, scheme_string, props) = result_tuple;
+        let (full_metadata_path, props) = result_tuple;
 
-        // Create file IO with the specified scheme
-        // Default behavior (when props is empty) uses environment variables for credentials
-        let file_io = FileIOBuilder::new(&scheme_string)
+        // Create file IO using routing factory that infers scheme from metadata location
+        let factory = std::sync::Arc::new(OpenDalRoutingStorageFactory);
+        let file_io = FileIOBuilder::new(factory)
             .with_props(props)
-            .build()?;
+            .with_prop("iceberg.internal.metadata-location", &full_metadata_path)
+            .build();
 
         // Create table identifier
         let table_ident = TableIdent::from_strs(["default", "table"])?;
@@ -150,7 +150,6 @@ export_runtime_op!(
         Ok::<IcebergTable, anyhow::Error>(IcebergTable { table: static_table.into_table() })
     },
     snapshot_path: *const c_char,
-    scheme: *const c_char,
     properties: *const PropertyEntry,
     properties_len: usize
 );

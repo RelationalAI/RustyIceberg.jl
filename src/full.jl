@@ -44,7 +44,7 @@ Select specific columns for the scan.
 function select_columns!(scan::Scan, column_names::Vector{String})
     # Convert String vector to Cstring array
     c_strings = [pointer(col) for col in column_names]
-    result = @ccall rust_lib.iceberg_select_columns(
+    result = GC.@preserve scan c_strings @ccall rust_lib.iceberg_select_columns(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         pointer(c_strings)::Ptr{Cstring},
         length(column_names)::Csize_t
@@ -62,7 +62,7 @@ end
 Sets the data file concurrency level for the scan.
 """
 function with_data_file_concurrency_limit!(scan::Scan, n::UInt)
-    result = @ccall rust_lib.iceberg_scan_with_data_file_concurrency_limit(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_data_file_concurrency_limit(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -79,7 +79,7 @@ end
 Sets the manifest file concurrency level for the full scan.
 """
 function with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
-    result = @ccall rust_lib.iceberg_scan_with_manifest_file_concurrency_limit(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_manifest_file_concurrency_limit(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -96,7 +96,7 @@ end
 Sets the manifest entry concurrency level for the scan.
 """
 function with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
-    result = @ccall rust_lib.iceberg_scan_with_manifest_entry_concurrency_limit(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_manifest_entry_concurrency_limit(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -113,7 +113,7 @@ end
 Sets the batch size for the scan.
 """
 function with_batch_size!(scan::Scan, n::UInt)
-    result = @ccall rust_lib.iceberg_scan_with_batch_size(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_batch_size(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -140,7 +140,7 @@ stream = scan!(scan)
 ```
 """
 function with_file_column!(scan::Scan)
-    result = @ccall rust_lib.iceberg_scan_with_file_column(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_file_column(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cint
 
@@ -166,7 +166,7 @@ stream = scan!(scan)
 ```
 """
 function with_pos_column!(scan::Scan)
-    result = @ccall rust_lib.iceberg_scan_with_pos_column(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_pos_column(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cint
 
@@ -195,7 +195,7 @@ stream = scan!(scan)
 ```
 """
 function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
-    result = @ccall rust_lib.iceberg_scan_with_serialization_concurrency_limit(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_serialization_concurrency_limit(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         n::Csize_t
     )::Cint
@@ -225,7 +225,7 @@ stream = scan!(scan)
 ```
 """
 function with_snapshot_id!(scan::Scan, snapshot_id::Int64)
-    result = @ccall rust_lib.iceberg_scan_with_snapshot_id(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_snapshot_id(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
         snapshot_id::Int64
     )::Cint
@@ -242,7 +242,7 @@ end
 Build the provided table scan object.
 """
 function build!(scan::Scan)
-    result = @ccall rust_lib.iceberg_scan_build(
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_build(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cint
 
@@ -293,7 +293,7 @@ end
 Free the memory associated with a scan.
 """
 function free_scan!(scan::Scan)
-    @ccall rust_lib.iceberg_scan_free(
+    GC.@preserve scan @ccall rust_lib.iceberg_scan_free(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cvoid
 end

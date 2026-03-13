@@ -347,13 +347,12 @@ end
 # High-level functions using the async API pattern from RustyObjectStore.jl
 
 """
-    table_open(snapshot_path::String; scheme::String="s3", properties::Dict{String,String}=Dict{String,String}())::Table
+    table_open(snapshot_path::String; properties::Dict{String,String}=Dict{String,String}())::Table
 
 Open an Iceberg table from the given snapshot path.
 
 # Arguments
 - `snapshot_path::String`: Path to the metadata.json file for the table snapshot
-- `scheme::String`: Storage scheme (e.g., "s3", "file"). Defaults to "s3"
 - `properties::Dict{String,String}`: Optional key-value properties for the FileIO configuration.
   By default (empty dict), credentials are read from environment variables (AWS_ACCESS_KEY_ID,
   AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_ENDPOINT_URL, etc.).
@@ -380,7 +379,6 @@ table = table_open(
 # Open with custom S3 credentials
 table = table_open(
     "s3://bucket/path/metadata/metadata.json",
-    scheme="s3",
     properties=Dict(
         "s3.endpoint" => "http://localhost:9000",
         "s3.access-key-id" => "minioadmin",
@@ -390,7 +388,7 @@ table = table_open(
 )
 ```
 """
-function table_open(snapshot_path::String; scheme::String="s3", properties::Dict{String,String}=Dict{String,String}())
+function table_open(snapshot_path::String; properties::Dict{String,String}=Dict{String,String}())
     response = TableResponse()
 
     # Convert properties dict to array of PropertyEntry structs
@@ -400,7 +398,6 @@ function table_open(snapshot_path::String; scheme::String="s3", properties::Dict
     async_ccall(response, property_entries, properties) do handle
         @ccall rust_lib.iceberg_table_open(
             snapshot_path::Cstring,
-            scheme::Cstring,
             (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
             properties_len::Csize_t,
             response::Ref{TableResponse},
