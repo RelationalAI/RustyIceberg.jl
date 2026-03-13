@@ -271,7 +271,7 @@ function catalog_create_rest(
     auth_fn = pointer_from_objref(authenticator_ref)
 
     # Step 5: Set the authenticator on the empty catalog BEFORE initializing REST
-    result = @ccall rust_lib.iceberg_catalog_set_token_authenticator(
+    result = GC.@preserve authenticator_ref @ccall rust_lib.iceberg_catalog_set_token_authenticator(
         catalog_ptr::Ptr{Cvoid},
         c_callback::Ptr{Cvoid},
         auth_fn::Ptr{Cvoid}
@@ -288,7 +288,7 @@ function catalog_create_rest(
 
     response = CatalogResponse()
 
-    async_ccall(response, property_entries, properties) do handle
+    async_ccall(response, property_entries, properties, authenticator_ref) do handle
         @ccall rust_lib.iceberg_rest_catalog_create(
             catalog_ptr::Ptr{Cvoid},
             uri::Cstring,
