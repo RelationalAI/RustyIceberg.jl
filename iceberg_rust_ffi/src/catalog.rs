@@ -6,7 +6,10 @@ use crate::response::{
 use crate::IcebergTable;
 use anyhow::Result;
 use async_trait::async_trait;
-use iceberg::io::{StorageCredential, StorageCredentialsLoader};
+use iceberg::io::{
+    LocalFsStorageFactory, OpenDalStorageFactory, RefreshableStorageFactory, StorageCredential,
+    StorageCredentialsLoader, StorageFactory,
+};
 use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableIdent};
 use iceberg_catalog_rest::{CustomAuthenticator, RestCatalog, RestCatalogBuilder};
 use std::collections::HashMap;
@@ -194,6 +197,21 @@ impl Default for IcebergCatalog {
     }
 }
 
+/// Infer a static StorageFactory from catalog properties.
+/// Checks for S3 keys (`s3.*`) first, then falls back to local filesystem.
+fn infer_storage_factory(props: &HashMap<String, String>) -> Arc<dyn StorageFactory> {
+    let has_s3 = props.keys().any(|k| k.starts_with("s3."));
+    if has_s3 {
+        // Default to "s3"; the actual credentials come from the props passed to FileIOBuilder
+        Arc::new(OpenDalStorageFactory::S3 {
+            configured_scheme: "s3".to_string(),
+            customized_credential_load: None,
+        })
+    } else {
+        Arc::new(LocalFsStorageFactory)
+    }
+}
+
 impl IcebergCatalog {
     /// Create and initialize a REST catalog with optional authenticator
     pub async fn create_rest(
@@ -210,28 +228,37 @@ impl IcebergCatalog {
             builder = builder.with_token_authenticator(authenticator.clone());
         }
 
-        let mut catalog = builder.load("rest", catalog_props).await?;
-
-        if self.use_credentials_loader {
-            // Create loader with empty catalog reference
+        let catalog_arc = if self.use_credentials_loader {
+            // Create loader before building catalog (new API: factory must be set on builder)
             let loader = Arc::new(RestCredentialsLoader {
                 catalog: OnceLock::new(),
             });
             let loader_ref = Arc::clone(&loader);
 
-            // Attach loader to catalog while we still have &mut access
-            catalog.set_storage_credentials_loader(loader);
+            // Attach loader via storage factory on the builder
+            let factory = Arc::new(RefreshableStorageFactory::new(loader));
+            let catalog = builder
+                .with_storage_factory(factory)
+                .load("rest", catalog_props)
+                .await?;
 
-            // Wrap catalog in Arc
             let catalog_arc = Arc::new(catalog);
 
             // Fill the loader's weak reference to the catalog
             let _ = loader_ref.catalog.set(Arc::downgrade(&catalog_arc));
-
-            self.catalog = Some(catalog_arc);
+            catalog_arc
         } else {
-            self.catalog = Some(Arc::new(catalog));
-        }
+            // Static credentials: infer factory from props (S3 keys → S3 factory, else local fs)
+            let factory = infer_storage_factory(&catalog_props);
+            Arc::new(
+                builder
+                    .with_storage_factory(factory)
+                    .load("rest", catalog_props)
+                    .await?,
+            )
+        };
+
+        self.catalog = Some(catalog_arc);
 
         Ok(self)
     }

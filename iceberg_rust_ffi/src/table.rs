@@ -136,9 +136,16 @@ export_runtime_op!(
 
         // Create file IO with the specified scheme
         // Default behavior (when props is empty) uses environment variables for credentials
-        let file_io = FileIOBuilder::new(&scheme_string)
+        let factory: std::sync::Arc<dyn iceberg::io::StorageFactory> = match scheme_string.as_str() {
+            "s3" | "s3a" => std::sync::Arc::new(iceberg::io::OpenDalStorageFactory::S3 {
+                configured_scheme: scheme_string.clone(),
+                customized_credential_load: None,
+            }),
+            _ => std::sync::Arc::new(iceberg::io::LocalFsStorageFactory),
+        };
+        let file_io = FileIOBuilder::new(factory)
             .with_props(props)
-            .build()?;
+            .build();
 
         // Create table identifier
         let table_ident = TableIdent::from_strs(["default", "table"])?;
