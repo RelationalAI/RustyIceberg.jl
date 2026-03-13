@@ -123,16 +123,15 @@ export_runtime_op!(
     IcebergTableResponse,
     || {
         let snapshot_path_str = parse_c_string(snapshot_path, "snapshot_path")?;
-        let scheme_str = parse_c_string(scheme, "scheme")?;
         let props = parse_properties(properties, properties_len)?;
 
         // Convert HashMap to Vec of tuples for compatibility with FileIOBuilder::with_props
         let props_vec: Vec<(String, String)> = props.into_iter().collect();
-        Ok((snapshot_path_str, scheme_str, props_vec))
+        Ok((snapshot_path_str, props_vec))
     },
     result_tuple,
     async {
-        let (full_metadata_path, _scheme_string, props) = result_tuple;
+        let (full_metadata_path, props) = result_tuple;
 
         // Create file IO using routing factory that infers scheme from metadata location
         let factory = std::sync::Arc::new(OpenDalRoutingStorageFactory);
@@ -151,7 +150,6 @@ export_runtime_op!(
         Ok::<IcebergTable, anyhow::Error>(IcebergTable { table: static_table.into_table() })
     },
     snapshot_path: *const c_char,
-    scheme: *const c_char,
     properties: *const PropertyEntry,
     properties_len: usize
 );
