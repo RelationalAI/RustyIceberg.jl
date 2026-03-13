@@ -1,7 +1,7 @@
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
-use iceberg::io::FileIOBuilder;
+use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
 use iceberg::TableIdent;
@@ -132,19 +132,13 @@ export_runtime_op!(
     },
     result_tuple,
     async {
-        let (full_metadata_path, scheme_string, props) = result_tuple;
+        let (full_metadata_path, _scheme_string, props) = result_tuple;
 
-        // Create file IO with the specified scheme
-        // Default behavior (when props is empty) uses environment variables for credentials
-        let factory: std::sync::Arc<dyn iceberg::io::StorageFactory> = match scheme_string.as_str() {
-            "s3" | "s3a" => std::sync::Arc::new(iceberg::io::OpenDalStorageFactory::S3 {
-                configured_scheme: scheme_string.clone(),
-                customized_credential_load: None,
-            }),
-            _ => std::sync::Arc::new(iceberg::io::LocalFsStorageFactory),
-        };
+        // Create file IO using routing factory that infers scheme from metadata location
+        let factory = std::sync::Arc::new(OpenDalRoutingStorageFactory);
         let file_io = FileIOBuilder::new(factory)
             .with_props(props)
+            .with_prop("iceberg.internal.metadata-location", &full_metadata_path)
             .build();
 
         // Create table identifier

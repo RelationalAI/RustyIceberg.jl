@@ -7,7 +7,7 @@ use crate::IcebergTable;
 use anyhow::Result;
 use async_trait::async_trait;
 use iceberg::io::{
-    LocalFsStorageFactory, OpenDalStorageFactory, RefreshableStorageFactory, StorageCredential,
+    OpenDalRoutingStorageFactory, RefreshableStorageFactory, StorageCredential,
     StorageCredentialsLoader, StorageFactory,
 };
 use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableIdent};
@@ -197,21 +197,6 @@ impl Default for IcebergCatalog {
     }
 }
 
-/// Infer a static StorageFactory from catalog properties.
-/// Checks for S3 keys (`s3.*`) first, then falls back to local filesystem.
-fn infer_storage_factory(props: &HashMap<String, String>) -> Arc<dyn StorageFactory> {
-    let has_s3 = props.keys().any(|k| k.starts_with("s3."));
-    if has_s3 {
-        // Default to "s3"; the actual credentials come from the props passed to FileIOBuilder
-        Arc::new(OpenDalStorageFactory::S3 {
-            configured_scheme: "s3".to_string(),
-            customized_credential_load: None,
-        })
-    } else {
-        Arc::new(LocalFsStorageFactory)
-    }
-}
-
 impl IcebergCatalog {
     /// Create and initialize a REST catalog with optional authenticator
     pub async fn create_rest(
@@ -248,8 +233,7 @@ impl IcebergCatalog {
             let _ = loader_ref.catalog.set(Arc::downgrade(&catalog_arc));
             catalog_arc
         } else {
-            // Static credentials: infer factory from props (S3 keys → S3 factory, else local fs)
-            let factory = infer_storage_factory(&catalog_props);
+            let factory: Arc<dyn StorageFactory> = Arc::new(OpenDalRoutingStorageFactory);
             Arc::new(
                 builder
                     .with_storage_factory(factory)
