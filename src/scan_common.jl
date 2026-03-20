@@ -90,3 +90,90 @@ Free the memory associated with an Arrow stream.
 function free_stream(stream::ArrowStream)
     @ccall rust_lib.iceberg_arrow_stream_free(stream::ArrowStream)::Cvoid
 end
+
+# ---------------------------------------------------------------------------
+# Split-scan API types
+#
+# These support a two-phase workflow:
+#   task_stream = plan_files(scan)
+#   reader = create_reader(scan)
+#   task = next_task(task_stream)         # concurrent-safe
+#   stream = read_task(reader, task)      # consumes task, shares reader cache
+#
+# ArrowReader is cloned per read_task call. The clone shares the internal
+# CachingDeleteFileLoader via Arc, so delete files loaded by one consumer
+# are cached for all others.
+# ---------------------------------------------------------------------------
+
+const ArrowReaderContext = Ptr{Cvoid}
+const FileScanTaskStream = Ptr{Cvoid}
+const FileScanTaskHandle = Ptr{Cvoid}
+const IncrementalFileScanTaskStreams = Ptr{Cvoid}
+const AppendTaskHandle = Ptr{Cvoid}
+const DeleteTaskHandle = Ptr{Cvoid}
+
+# Response type aliases — all resolve to Response{Ptr{Cvoid}} since handles
+# are opaque pointers. The aliases exist for documentation/clarity.
+const ArrowReaderContextResponse = Response{ArrowReaderContext}
+const FileScanTaskStreamResponse = Response{FileScanTaskStream}
+const FileScanTaskHandleResponse = Response{FileScanTaskHandle}
+const IncrementalFileScanTaskStreamsResponse = Response{IncrementalFileScanTaskStreams}
+const AppendTaskHandleResponse = Response{AppendTaskHandle}
+const DeleteTaskHandleResponse = Response{DeleteTaskHandle}
+
+"""
+    free_reader(reader::ArrowReaderContext)
+
+Free the shared ArrowReader context.
+"""
+function free_reader(reader::ArrowReaderContext)
+    @ccall rust_lib.iceberg_arrow_reader_context_free(reader::ArrowReaderContext)::Cvoid
+end
+
+"""
+    free_file_scan_task_stream(stream::FileScanTaskStream)
+
+Free a file scan task stream.
+"""
+function free_file_scan_task_stream(stream::FileScanTaskStream)
+    @ccall rust_lib.iceberg_file_scan_task_stream_free(stream::FileScanTaskStream)::Cvoid
+end
+
+"""
+    free_task(task::FileScanTaskHandle)
+
+Free a file scan task. Do NOT call this after passing the task to `read_task`
+(which consumes it).
+"""
+function free_task(task::FileScanTaskHandle)
+    @ccall rust_lib.iceberg_file_scan_task_free(task::FileScanTaskHandle)::Cvoid
+end
+
+"""
+    free_incremental_file_scan_task_streams(streams::IncrementalFileScanTaskStreams)
+
+Free incremental file scan task streams.
+"""
+function free_incremental_file_scan_task_streams(streams::IncrementalFileScanTaskStreams)
+    @ccall rust_lib.iceberg_incremental_file_scan_task_streams_free(
+        streams::IncrementalFileScanTaskStreams
+    )::Cvoid
+end
+
+"""
+    free_append_task(task::AppendTaskHandle)
+
+Free an append task. Do NOT call after `read_append_task` (which consumes it).
+"""
+function free_append_task(task::AppendTaskHandle)
+    @ccall rust_lib.iceberg_append_task_free(task::AppendTaskHandle)::Cvoid
+end
+
+"""
+    free_delete_task(task::DeleteTaskHandle)
+
+Free a delete task. Do NOT call after `read_delete_task` (which consumes it).
+"""
+function free_delete_task(task::DeleteTaskHandle)
+    @ccall rust_lib.iceberg_delete_task_free(task::DeleteTaskHandle)::Cvoid
+end

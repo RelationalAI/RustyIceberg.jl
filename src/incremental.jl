@@ -319,3 +319,117 @@ function free_incremental_scan!(scan::IncrementalScan)
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cvoid
 end
+
+# ---------------------------------------------------------------------------
+# Split-scan API for incremental scans
+#
+# Same pattern as full scans but with separate append/delete streams.
+# ---------------------------------------------------------------------------
+
+"""
+    plan_files(scan::IncrementalScan)::IncrementalFileScanTaskStreams
+
+Plan files for incremental scan. Returns two sub-streams (appends + deletes)
+for use with `next_append_task` / `next_delete_task`.
+"""
+function plan_files(scan::IncrementalScan)
+    response = IncrementalFileScanTaskStreamsResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_incremental_plan_files(
+            scan.ptr::Ptr{Cvoid},
+            response::Ref{IncrementalFileScanTaskStreamsResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_incremental_plan_files", IcebergException)
+    return response.value
+end
+
+"""
+    create_reader(scan::IncrementalScan)::ArrowReaderContext
+
+Create a shared reader context from the incremental scan's configuration.
+"""
+function create_reader(scan::IncrementalScan)
+    reader = @ccall rust_lib.iceberg_create_incremental_reader(
+        scan.ptr::Ptr{Cvoid}
+    )::ArrowReaderContext
+    if reader == C_NULL
+        throw(IcebergException("Failed to create reader from incremental scan"))
+    end
+    return reader
+end
+
+"""
+    next_append_task(streams::IncrementalFileScanTaskStreams)::AppendTaskHandle
+
+Pull next append task. Returns `C_NULL` when exhausted.
+"""
+function next_append_task(streams::IncrementalFileScanTaskStreams)
+    response = AppendTaskHandleResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_append_task(
+            streams::IncrementalFileScanTaskStreams,
+            response::Ref{AppendTaskHandleResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_next_append_task", IcebergException)
+    return response.value
+end
+
+"""
+    next_delete_task(streams::IncrementalFileScanTaskStreams)::DeleteTaskHandle
+
+Pull next delete task. Returns `C_NULL` when exhausted.
+"""
+function next_delete_task(streams::IncrementalFileScanTaskStreams)
+    response = DeleteTaskHandleResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_delete_task(
+            streams::IncrementalFileScanTaskStreams,
+            response::Ref{DeleteTaskHandleResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_next_delete_task", IcebergException)
+    return response.value
+end
+
+"""
+    read_append_task(reader::ArrowReaderContext, task::AppendTaskHandle)::ArrowStream
+
+Read a single append task. **Consumes the task.**
+"""
+function read_append_task(reader::ArrowReaderContext, task::AppendTaskHandle)
+    response = ArrowStreamResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_read_append_task(
+            reader::ArrowReaderContext,
+            task::AppendTaskHandle,
+            response::Ref{ArrowStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_read_append_task", IcebergException)
+    return response.value
+end
+
+"""
+    read_delete_task(reader::ArrowReaderContext, task::DeleteTaskHandle)::ArrowStream
+
+Read a single delete task. **Consumes the task.**
+"""
+function read_delete_task(reader::ArrowReaderContext, task::DeleteTaskHandle)
+    response = ArrowStreamResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_read_delete_task(
+            reader::ArrowReaderContext,
+            task::DeleteTaskHandle,
+            response::Ref{ArrowStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_read_delete_task", IcebergException)
+    return response.value
+end
