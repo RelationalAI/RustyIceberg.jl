@@ -177,3 +177,51 @@ Free a delete task. Do NOT call after `read_delete_task` (which consumes it).
 function free_delete_task(task::DeleteTaskHandle)
     @ccall rust_lib.iceberg_delete_task_free(task::DeleteTaskHandle)::Cvoid
 end
+
+"""
+    task_data_file_path(task::FileScanTaskHandle)::String
+
+Get the data file path from a file scan task.
+The returned string is a copy -- safe to use after freeing the task.
+"""
+function task_data_file_path(task::FileScanTaskHandle)
+    cstr = @ccall rust_lib.iceberg_file_scan_task_data_file_path(task::FileScanTaskHandle)::Ptr{Cchar}
+    if cstr == C_NULL
+        throw(IcebergException("Failed to get data file path"))
+    end
+    result = unsafe_string(cstr)
+    @ccall rust_lib.iceberg_destroy_cstring(cstr::Ptr{Cchar})::Cint
+    return result
+end
+
+"""
+    task_data_file_path(task::AppendTaskHandle)::String
+
+Get the data file path from an append task.
+The returned string is a copy -- safe to use after freeing the task.
+"""
+function task_data_file_path(task::AppendTaskHandle)
+    cstr = @ccall rust_lib.iceberg_append_task_data_file_path(task::AppendTaskHandle)::Ptr{Cchar}
+    if cstr == C_NULL
+        throw(IcebergException("Failed to get data file path"))
+    end
+    result = unsafe_string(cstr)
+    @ccall rust_lib.iceberg_destroy_cstring(cstr::Ptr{Cchar})::Cint
+    return result
+end
+
+"""
+    task_data_file_path(task::DeleteTaskHandle)::String
+
+Get the data file path from a delete task.
+The returned string is a copy -- safe to use after freeing the task.
+"""
+function task_data_file_path(task::DeleteTaskHandle)
+    cstr = @ccall rust_lib.iceberg_delete_task_data_file_path(task::DeleteTaskHandle)::Ptr{Cchar}
+    if cstr == C_NULL
+        throw(IcebergException("Failed to get data file path"))
+    end
+    result = unsafe_string(cstr)
+    @ccall rust_lib.iceberg_destroy_cstring(cstr::Ptr{Cchar})::Cint
+    return result
+end

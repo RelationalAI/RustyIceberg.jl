@@ -24,6 +24,7 @@ export plan_files, create_reader, next_task, read_task
 export next_append_task, next_delete_task, read_append_task, read_delete_task
 export free_reader, free_file_scan_task_stream, free_task
 export free_incremental_file_scan_task_streams, free_append_task, free_delete_task
+export task_data_file_path
 export Catalog, catalog_create_rest, free_catalog
 export load_table, list_tables, list_namespaces, table_exists, create_table, drop_table, drop_namespace, create_namespace
 export Field, Schema, PartitionField, PartitionSpec, SortField, SortOrder

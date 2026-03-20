@@ -9,7 +9,7 @@ use iceberg::scan::FileScanTaskStream;
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
 use iceberg::TableIdent;
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -429,6 +429,61 @@ pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char 
             Ok(c_str) => c_str.into_raw(),
             Err(_) => ptr::null_mut(),
         },
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Returns a newly allocated C string with the file path from a FileScanTask.
+/// Caller must free with `iceberg_destroy_cstring`.
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_task_data_file_path(
+    task: *const IcebergFileScanTask,
+) -> *mut c_char {
+    if task.is_null() {
+        return ptr::null_mut();
+    }
+    let task_ref = unsafe { &*task };
+    let path = task_ref.task.data_file_path();
+    match CString::new(path) {
+        Ok(cstr) => cstr.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Returns a newly allocated C string with the file path from an AppendedFileScanTask.
+/// Caller must free with `iceberg_destroy_cstring`.
+#[no_mangle]
+pub extern "C" fn iceberg_append_task_data_file_path(
+    task: *const IcebergAppendTask,
+) -> *mut c_char {
+    if task.is_null() {
+        return ptr::null_mut();
+    }
+    let task_ref = unsafe { &*task };
+    let path = task_ref.task.data_file_path();
+    match CString::new(path) {
+        Ok(cstr) => cstr.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Returns a newly allocated C string with the file path from a DeleteScanTask.
+/// Caller must free with `iceberg_destroy_cstring`.
+#[no_mangle]
+pub extern "C" fn iceberg_delete_task_data_file_path(
+    task: *const IcebergDeleteTask,
+) -> *mut c_char {
+    if task.is_null() {
+        return ptr::null_mut();
+    }
+    let task_ref = unsafe { &*task };
+    let path = match &task_ref.task {
+        DeleteScanTask::DeletedFile(inner) => inner.data_file_path(),
+        DeleteScanTask::PositionalDeletes(path, _) => path.as_str(),
+        DeleteScanTask::EqualityDeletes(inner) => inner.data_file_path(),
+    };
+    match CString::new(path) {
+        Ok(cstr) => cstr.into_raw(),
         Err(_) => ptr::null_mut(),
     }
 }
