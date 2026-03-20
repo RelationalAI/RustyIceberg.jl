@@ -178,13 +178,16 @@ function free_delete_task(task::DeleteTaskHandle)
     @ccall rust_lib.iceberg_delete_task_free(task::DeleteTaskHandle)::Cvoid
 end
 
+# Note: Handle types are all Ptr{Cvoid} aliases so multiple dispatch won't
+# distinguish them. We use distinct function names instead.
+
 """
-    task_data_file_path(task::FileScanTaskHandle)::String
+    file_scan_task_data_file_path(task::FileScanTaskHandle)::String
 
 Get the data file path from a file scan task.
-The returned string is a copy -- safe to use after freeing the task.
+The returned string is a copy — safe to use after freeing the task.
 """
-function task_data_file_path(task::FileScanTaskHandle)
+function file_scan_task_data_file_path(task::FileScanTaskHandle)
     cstr = @ccall rust_lib.iceberg_file_scan_task_data_file_path(task::FileScanTaskHandle)::Ptr{Cchar}
     if cstr == C_NULL
         throw(IcebergException("Failed to get data file path"))
@@ -195,12 +198,12 @@ function task_data_file_path(task::FileScanTaskHandle)
 end
 
 """
-    task_data_file_path(task::AppendTaskHandle)::String
+    append_task_data_file_path(task::AppendTaskHandle)::String
 
 Get the data file path from an append task.
-The returned string is a copy -- safe to use after freeing the task.
+The returned string is a copy — safe to use after freeing the task.
 """
-function task_data_file_path(task::AppendTaskHandle)
+function append_task_data_file_path(task::AppendTaskHandle)
     cstr = @ccall rust_lib.iceberg_append_task_data_file_path(task::AppendTaskHandle)::Ptr{Cchar}
     if cstr == C_NULL
         throw(IcebergException("Failed to get data file path"))
@@ -211,12 +214,12 @@ function task_data_file_path(task::AppendTaskHandle)
 end
 
 """
-    task_data_file_path(task::DeleteTaskHandle)::String
+    delete_task_data_file_path(task::DeleteTaskHandle)::String
 
 Get the data file path from a delete task.
-The returned string is a copy -- safe to use after freeing the task.
+The returned string is a copy — safe to use after freeing the task.
 """
-function task_data_file_path(task::DeleteTaskHandle)
+function delete_task_data_file_path(task::DeleteTaskHandle)
     cstr = @ccall rust_lib.iceberg_delete_task_data_file_path(task::DeleteTaskHandle)::Ptr{Cchar}
     if cstr == C_NULL
         throw(IcebergException("Failed to get data file path"))
