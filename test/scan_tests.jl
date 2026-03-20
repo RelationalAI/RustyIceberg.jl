@@ -1232,18 +1232,19 @@ end
     RustyIceberg.build!(scan)
 
     task_stream = RustyIceberg.plan_files(scan)
-    @test task_stream != C_NULL
+    @test task_stream isa RustyIceberg.FileScanTaskStream
 
     reader = RustyIceberg.create_reader(scan)
-    @test reader != C_NULL
+    @test reader isa RustyIceberg.ArrowReaderContext
 
     total_rows = 0
     task_count = 0
     while true
         task = RustyIceberg.next_task(task_stream)
-        if task == C_NULL
+        if task === nothing
             break
         end
+        @test task isa RustyIceberg.FileScanTaskHandle
         task_count += 1
 
         # read_task consumes the task — no free_task needed
@@ -1269,7 +1270,7 @@ end
     println("✅ Split scan API (full): $task_count tasks, $total_rows rows")
 
     RustyIceberg.free_reader(reader)
-    RustyIceberg.free_file_scan_task_stream(task_stream)
+    RustyIceberg.free_task_stream(task_stream)
     RustyIceberg.free_scan!(scan)
     RustyIceberg.free_table(table)
 end
@@ -1282,16 +1283,16 @@ end
     RustyIceberg.build!(scan)
 
     task_streams = RustyIceberg.plan_files(scan)
-    @test task_streams != C_NULL
+    @test task_streams isa RustyIceberg.IncrementalFileScanTaskStreams
 
     reader = RustyIceberg.create_reader(scan)
-    @test reader != C_NULL
+    @test reader isa RustyIceberg.ArrowReaderContext
 
     # Drain append tasks
     append_count = 0
     while true
         task = RustyIceberg.next_append_task(task_streams)
-        if task == C_NULL
+        if task === nothing
             break
         end
         append_count += 1
@@ -1308,7 +1309,7 @@ end
     delete_count = 0
     while true
         task = RustyIceberg.next_delete_task(task_streams)
-        if task == C_NULL
+        if task === nothing
             break
         end
         delete_count += 1
@@ -1324,7 +1325,7 @@ end
     println("✅ Split scan API (incremental): $append_count appends, $delete_count deletes")
 
     RustyIceberg.free_reader(reader)
-    RustyIceberg.free_incremental_file_scan_task_streams(task_streams)
+    RustyIceberg.free_task_stream(task_streams)
     RustyIceberg.free_incremental_scan!(scan)
     RustyIceberg.free_table(table)
 end

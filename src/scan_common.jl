@@ -105,21 +105,33 @@ end
 # are cached for all others.
 # ---------------------------------------------------------------------------
 
-const ArrowReaderContext = Ptr{Cvoid}
-const FileScanTaskStream = Ptr{Cvoid}
-const FileScanTaskHandle = Ptr{Cvoid}
-const IncrementalFileScanTaskStreams = Ptr{Cvoid}
-const AppendTaskHandle = Ptr{Cvoid}
-const DeleteTaskHandle = Ptr{Cvoid}
+# Wrapper structs for opaque FFI pointers — enables multiple dispatch.
+struct ArrowReaderContext
+    ptr::Ptr{Cvoid}
+end
 
-# Response type aliases — all resolve to Response{Ptr{Cvoid}} since handles
-# are opaque pointers. The aliases exist for documentation/clarity.
-const ArrowReaderContextResponse = Response{ArrowReaderContext}
-const FileScanTaskStreamResponse = Response{FileScanTaskStream}
-const FileScanTaskHandleResponse = Response{FileScanTaskHandle}
-const IncrementalFileScanTaskStreamsResponse = Response{IncrementalFileScanTaskStreams}
-const AppendTaskHandleResponse = Response{AppendTaskHandle}
-const DeleteTaskHandleResponse = Response{DeleteTaskHandle}
+struct FileScanTaskStream
+    ptr::Ptr{Cvoid}
+end
+
+struct FileScanTaskHandle
+    ptr::Ptr{Cvoid}
+end
+
+struct IncrementalFileScanTaskStreams
+    ptr::Ptr{Cvoid}
+end
+
+struct AppendTaskHandle
+    ptr::Ptr{Cvoid}
+end
+
+struct DeleteTaskHandle
+    ptr::Ptr{Cvoid}
+end
+
+# All FFI responses use Ptr{Cvoid}; we wrap into structs after receiving.
+const OpaqueResponse = Response{Ptr{Cvoid}}
 
 """
     free_reader(reader::ArrowReaderContext)
@@ -127,16 +139,16 @@ const DeleteTaskHandleResponse = Response{DeleteTaskHandle}
 Free the shared ArrowReader context.
 """
 function free_reader(reader::ArrowReaderContext)
-    @ccall rust_lib.iceberg_arrow_reader_context_free(reader::ArrowReaderContext)::Cvoid
+    @ccall rust_lib.iceberg_arrow_reader_context_free(reader.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """
-    free_file_scan_task_stream(stream::FileScanTaskStream)
+    free_task_stream(stream::FileScanTaskStream)
 
 Free a file scan task stream.
 """
-function free_file_scan_task_stream(stream::FileScanTaskStream)
-    @ccall rust_lib.iceberg_file_scan_task_stream_free(stream::FileScanTaskStream)::Cvoid
+function free_task_stream(stream::FileScanTaskStream)
+    @ccall rust_lib.iceberg_file_scan_task_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """
@@ -146,49 +158,44 @@ Free a file scan task. Do NOT call this after passing the task to `read_task`
 (which consumes it).
 """
 function free_task(task::FileScanTaskHandle)
-    @ccall rust_lib.iceberg_file_scan_task_free(task::FileScanTaskHandle)::Cvoid
+    @ccall rust_lib.iceberg_file_scan_task_free(task.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """
-    free_incremental_file_scan_task_streams(streams::IncrementalFileScanTaskStreams)
+    free_task_stream(streams::IncrementalFileScanTaskStreams)
 
 Free incremental file scan task streams.
 """
-function free_incremental_file_scan_task_streams(streams::IncrementalFileScanTaskStreams)
-    @ccall rust_lib.iceberg_incremental_file_scan_task_streams_free(
-        streams::IncrementalFileScanTaskStreams
-    )::Cvoid
+function free_task_stream(streams::IncrementalFileScanTaskStreams)
+    @ccall rust_lib.iceberg_incremental_file_scan_task_streams_free(streams.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """
-    free_append_task(task::AppendTaskHandle)
+    free_task(task::AppendTaskHandle)
 
 Free an append task. Do NOT call after `read_append_task` (which consumes it).
 """
-function free_append_task(task::AppendTaskHandle)
-    @ccall rust_lib.iceberg_append_task_free(task::AppendTaskHandle)::Cvoid
+function free_task(task::AppendTaskHandle)
+    @ccall rust_lib.iceberg_append_task_free(task.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """
-    free_delete_task(task::DeleteTaskHandle)
+    free_task(task::DeleteTaskHandle)
 
 Free a delete task. Do NOT call after `read_delete_task` (which consumes it).
 """
-function free_delete_task(task::DeleteTaskHandle)
-    @ccall rust_lib.iceberg_delete_task_free(task::DeleteTaskHandle)::Cvoid
+function free_task(task::DeleteTaskHandle)
+    @ccall rust_lib.iceberg_delete_task_free(task.ptr::Ptr{Cvoid})::Cvoid
 end
 
-# Note: Handle types are all Ptr{Cvoid} aliases so multiple dispatch won't
-# distinguish them. We use distinct function names instead.
-
 """
-    file_scan_task_data_file_path(task::FileScanTaskHandle)::String
+    task_data_file_path(task::FileScanTaskHandle)::String
 
 Get the data file path from a file scan task.
 The returned string is a copy — safe to use after freeing the task.
 """
-function file_scan_task_data_file_path(task::FileScanTaskHandle)
-    cstr = @ccall rust_lib.iceberg_file_scan_task_data_file_path(task::FileScanTaskHandle)::Ptr{Cchar}
+function task_data_file_path(task::FileScanTaskHandle)
+    cstr = @ccall rust_lib.iceberg_file_scan_task_data_file_path(task.ptr::Ptr{Cvoid})::Ptr{Cchar}
     if cstr == C_NULL
         throw(IcebergException("Failed to get data file path"))
     end
@@ -198,13 +205,13 @@ function file_scan_task_data_file_path(task::FileScanTaskHandle)
 end
 
 """
-    append_task_data_file_path(task::AppendTaskHandle)::String
+    task_data_file_path(task::AppendTaskHandle)::String
 
 Get the data file path from an append task.
 The returned string is a copy — safe to use after freeing the task.
 """
-function append_task_data_file_path(task::AppendTaskHandle)
-    cstr = @ccall rust_lib.iceberg_append_task_data_file_path(task::AppendTaskHandle)::Ptr{Cchar}
+function task_data_file_path(task::AppendTaskHandle)
+    cstr = @ccall rust_lib.iceberg_append_task_data_file_path(task.ptr::Ptr{Cvoid})::Ptr{Cchar}
     if cstr == C_NULL
         throw(IcebergException("Failed to get data file path"))
     end
@@ -214,13 +221,13 @@ function append_task_data_file_path(task::AppendTaskHandle)
 end
 
 """
-    delete_task_data_file_path(task::DeleteTaskHandle)::String
+    task_data_file_path(task::DeleteTaskHandle)::String
 
 Get the data file path from a delete task.
 The returned string is a copy — safe to use after freeing the task.
 """
-function delete_task_data_file_path(task::DeleteTaskHandle)
-    cstr = @ccall rust_lib.iceberg_delete_task_data_file_path(task::DeleteTaskHandle)::Ptr{Cchar}
+function task_data_file_path(task::DeleteTaskHandle)
+    cstr = @ccall rust_lib.iceberg_delete_task_data_file_path(task.ptr::Ptr{Cvoid})::Ptr{Cchar}
     if cstr == C_NULL
         throw(IcebergException("Failed to get data file path"))
     end

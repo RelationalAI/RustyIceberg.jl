@@ -333,16 +333,16 @@ Plan files for incremental scan. Returns two sub-streams (appends + deletes)
 for use with `next_append_task` / `next_delete_task`.
 """
 function plan_files(scan::IncrementalScan)
-    response = IncrementalFileScanTaskStreamsResponse()
+    response = OpaqueResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_incremental_plan_files(
             scan.ptr::Ptr{Cvoid},
-            response::Ref{IncrementalFileScanTaskStreamsResponse},
+            response::Ref{OpaqueResponse},
             handle::Ptr{Cvoid}
         )::Cint
     end
     @throw_on_error(response, "iceberg_incremental_plan_files", IcebergException)
-    return response.value
+    return IncrementalFileScanTaskStreams(response.value)
 end
 
 """
@@ -351,49 +351,47 @@ end
 Create a shared reader context from the incremental scan's configuration.
 """
 function create_reader(scan::IncrementalScan)
-    reader = @ccall rust_lib.iceberg_create_incremental_reader(
-        scan.ptr::Ptr{Cvoid}
-    )::ArrowReaderContext
-    if reader == C_NULL
+    ptr = @ccall rust_lib.iceberg_create_incremental_reader(scan.ptr::Ptr{Cvoid})::Ptr{Cvoid}
+    if ptr == C_NULL
         throw(IcebergException("Failed to create reader from incremental scan"))
     end
-    return reader
+    return ArrowReaderContext(ptr)
 end
 
 """
-    next_append_task(streams::IncrementalFileScanTaskStreams)::AppendTaskHandle
+    next_append_task(streams::IncrementalFileScanTaskStreams)::Union{AppendTaskHandle, Nothing}
 
-Pull next append task. Returns `C_NULL` when exhausted.
+Pull next append task. Returns `nothing` when exhausted.
 """
 function next_append_task(streams::IncrementalFileScanTaskStreams)
-    response = AppendTaskHandleResponse()
+    response = OpaqueResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_next_append_task(
-            streams::IncrementalFileScanTaskStreams,
-            response::Ref{AppendTaskHandleResponse},
+            streams.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
             handle::Ptr{Cvoid}
         )::Cint
     end
     @throw_on_error(response, "iceberg_next_append_task", IcebergException)
-    return response.value
+    return response.value == C_NULL ? nothing : AppendTaskHandle(response.value)
 end
 
 """
-    next_delete_task(streams::IncrementalFileScanTaskStreams)::DeleteTaskHandle
+    next_delete_task(streams::IncrementalFileScanTaskStreams)::Union{DeleteTaskHandle, Nothing}
 
-Pull next delete task. Returns `C_NULL` when exhausted.
+Pull next delete task. Returns `nothing` when exhausted.
 """
 function next_delete_task(streams::IncrementalFileScanTaskStreams)
-    response = DeleteTaskHandleResponse()
+    response = OpaqueResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_next_delete_task(
-            streams::IncrementalFileScanTaskStreams,
-            response::Ref{DeleteTaskHandleResponse},
+            streams.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
             handle::Ptr{Cvoid}
         )::Cint
     end
     @throw_on_error(response, "iceberg_next_delete_task", IcebergException)
-    return response.value
+    return response.value == C_NULL ? nothing : DeleteTaskHandle(response.value)
 end
 
 """
@@ -405,8 +403,8 @@ function read_append_task(reader::ArrowReaderContext, task::AppendTaskHandle)
     response = ArrowStreamResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_read_append_task(
-            reader::ArrowReaderContext,
-            task::AppendTaskHandle,
+            reader.ptr::Ptr{Cvoid},
+            task.ptr::Ptr{Cvoid},
             response::Ref{ArrowStreamResponse},
             handle::Ptr{Cvoid}
         )::Cint
@@ -424,8 +422,8 @@ function read_delete_task(reader::ArrowReaderContext, task::DeleteTaskHandle)
     response = ArrowStreamResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_read_delete_task(
-            reader::ArrowReaderContext,
-            task::DeleteTaskHandle,
+            reader.ptr::Ptr{Cvoid},
+            task.ptr::Ptr{Cvoid},
             response::Ref{ArrowStreamResponse},
             handle::Ptr{Cvoid}
         )::Cint

@@ -305,13 +305,13 @@ end
 #   build!(scan)
 #   task_stream = plan_files(scan)
 #   reader = create_reader(scan)
-#   while (task = next_task(task_stream)) != C_NULL
+#   while (task = next_task(task_stream)) !== nothing
 #       stream = read_task(reader, task)  # consumes task
 #       # ... iterate batches with next_batch(stream) ...
 #       free_stream(stream)
 #   end
 #   free_reader(reader)
-#   free_file_scan_task_stream(task_stream)
+#   free_task_stream(task_stream)
 #   free_scan!(scan)
 #
 # Multiple Julia tasks can call next_task concurrently on the same
@@ -326,16 +326,16 @@ Plan which files to read. Returns a task stream for use with `next_task`.
 The scan must be built first via `build!`.
 """
 function plan_files(scan::Scan)
-    response = FileScanTaskStreamResponse()
+    response = OpaqueResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_plan_files(
             scan.ptr::Ptr{Cvoid},
-            response::Ref{FileScanTaskStreamResponse},
+            response::Ref{OpaqueResponse},
             handle::Ptr{Cvoid}
         )::Cint
     end
     @throw_on_error(response, "iceberg_plan_files", IcebergException)
-    return response.value
+    return FileScanTaskStream(response.value)
 end
 
 """
@@ -346,30 +346,30 @@ Pass this to every `read_task` call. The internal ArrowReader is cloned
 per call, sharing the delete-file cache across consumers.
 """
 function create_reader(scan::Scan)
-    reader = @ccall rust_lib.iceberg_create_reader(scan.ptr::Ptr{Cvoid})::ArrowReaderContext
-    if reader == C_NULL
+    ptr = @ccall rust_lib.iceberg_create_reader(scan.ptr::Ptr{Cvoid})::Ptr{Cvoid}
+    if ptr == C_NULL
         throw(IcebergException("Failed to create reader from scan"))
     end
-    return reader
+    return ArrowReaderContext(ptr)
 end
 
 """
-    next_task(task_stream::FileScanTaskStream)::FileScanTaskHandle
+    next_task(task_stream::FileScanTaskStream)::Union{FileScanTaskHandle, Nothing}
 
-Pull the next task from the stream. Returns `C_NULL` when exhausted.
+Pull the next task from the stream. Returns `nothing` when exhausted.
 Safe to call concurrently from multiple Julia tasks.
 """
 function next_task(task_stream::FileScanTaskStream)
-    response = FileScanTaskHandleResponse()
+    response = OpaqueResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_next_file_scan_task(
-            task_stream::FileScanTaskStream,
-            response::Ref{FileScanTaskHandleResponse},
+            task_stream.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
             handle::Ptr{Cvoid}
         )::Cint
     end
     @throw_on_error(response, "iceberg_next_file_scan_task", IcebergException)
-    return response.value  # C_NULL means end of stream
+    return response.value == C_NULL ? nothing : FileScanTaskHandle(response.value)
 end
 
 """
@@ -382,8 +382,8 @@ function read_task(reader::ArrowReaderContext, task::FileScanTaskHandle)
     response = ArrowStreamResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_read_file_scan_task(
-            reader::ArrowReaderContext,
-            task::FileScanTaskHandle,
+            reader.ptr::Ptr{Cvoid},
+            task.ptr::Ptr{Cvoid},
             response::Ref{ArrowStreamResponse},
             handle::Ptr{Cvoid}
         )::Cint
