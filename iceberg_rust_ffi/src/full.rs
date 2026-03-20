@@ -1,6 +1,9 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
+use futures::stream;
+use futures::{StreamExt, TryStreamExt};
+use iceberg::arrow::ArrowReaderBuilder;
 use iceberg::io::FileIO;
 use iceberg::scan::{TableScan, TableScanBuilder};
 use object_store_ffi::{
@@ -9,7 +12,10 @@ use object_store_ffi::{
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::scan_common::*;
-use crate::{IcebergArrowStream, IcebergArrowStreamResponse, IcebergTable};
+use crate::{
+    IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanTaskStreamResponse,
+    IcebergNextFileScanTaskResponse, IcebergTable,
+};
 
 /// FFI wrapper for a regular (full) table scan.
 ///
@@ -71,7 +77,9 @@ pub extern "C" fn iceberg_scan_with_data_file_concurrency_limit(
         *scan = Box::into_raw(Box::new(scan_val));
         return CResult::Error;
     }
-    scan_val.builder = scan_val.builder.map(|b| b.with_data_file_concurrency_limit(n));
+    scan_val.builder = scan_val
+        .builder
+        .map(|b| b.with_data_file_concurrency_limit(n));
     scan_val.data_file_concurrency_limit = n;
     *scan = Box::into_raw(Box::new(scan_val));
     CResult::Ok
@@ -157,3 +165,154 @@ export_runtime_op!(
 );
 
 impl_scan_free!(iceberg_scan_free, IcebergScan);
+
+// ---------------------------------------------------------------------------
+// Split-scan API: plan_files → create_reader → next_task → read_task
+//
+// This separates scan planning from reading, allowing multiple consumers
+// to concurrently pull tasks from a shared stream and read them with a
+// shared ArrowReader (which caches loaded delete files via Arc).
+// ---------------------------------------------------------------------------
+
+// Async: plan which files to read. Returns a shared task stream.
+// Multiple consumers can call next_task on the same stream concurrently.
+export_runtime_op!(
+    iceberg_plan_files,
+    IcebergFileScanTaskStreamResponse,
+    || {
+        if scan.is_null() {
+            return Err(anyhow::anyhow!("Null scan pointer provided"));
+        }
+        let scan_ptr = unsafe { &*scan };
+        let scan_ref = scan_ptr.scan.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Scan not built — call build! first"))?;
+        Ok(scan_ref)
+    },
+    scan_ref,
+    async {
+        let stream = scan_ref.plan_files().await?;
+        Ok::<crate::IcebergFileScanTaskStream, anyhow::Error>(crate::IcebergFileScanTaskStream {
+            stream: AsyncMutex::new(stream),
+        })
+    },
+    scan: *mut IcebergScan
+);
+
+/// Sync: create a shared ArrowReader context from the scan's configuration.
+///
+/// The returned context should be passed to every read_task call.
+/// Cloning the inner ArrowReader is cheap and shares the delete-file cache.
+///
+/// For full scans, row_group_filtering is enabled and row_selection is
+/// disabled, matching the defaults in TableScan::to_arrow().
+#[no_mangle]
+pub extern "C" fn iceberg_create_reader(
+    scan: *mut IcebergScan,
+) -> *mut crate::IcebergArrowReaderContext {
+    if scan.is_null() {
+        return std::ptr::null_mut();
+    }
+    let scan_ptr = unsafe { &*scan };
+
+    let Some(file_io) = scan_ptr.file_io.as_ref() else {
+        return std::ptr::null_mut();
+    };
+
+    let mut builder = ArrowReaderBuilder::new(file_io.clone())
+        .with_row_group_filtering_enabled(true)
+        .with_row_selection_enabled(false);
+
+    if scan_ptr.data_file_concurrency_limit > 0 {
+        builder = builder.with_data_file_concurrency_limit(scan_ptr.data_file_concurrency_limit);
+    }
+    if scan_ptr.batch_size > 0 {
+        builder = builder.with_batch_size(scan_ptr.batch_size);
+    }
+
+    let serialization_concurrency = if scan_ptr.serialization_concurrency == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        scan_ptr.serialization_concurrency
+    };
+
+    Box::into_raw(Box::new(crate::IcebergArrowReaderContext {
+        reader: builder.build(),
+        serialization_concurrency,
+    }))
+}
+
+// Async: pull the next file scan task from the stream.
+// Returns null payload when the stream is exhausted (end of planning).
+// Safe to call concurrently from multiple consumers — the stream is
+// behind an AsyncMutex.
+export_runtime_op!(
+    iceberg_next_file_scan_task,
+    IcebergNextFileScanTaskResponse,
+    || {
+        if task_stream.is_null() {
+            return Err(anyhow::anyhow!("Null task stream pointer"));
+        }
+        let stream_ref = unsafe { &*task_stream };
+        Ok(stream_ref)
+    },
+    stream_ref,
+    async {
+        let mut guard = stream_ref.stream.lock().await;
+        match guard.try_next().await {
+            Ok(Some(task)) => Ok(Some(crate::IcebergFileScanTask { task })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("Error pulling next task: {}", e)),
+        }
+    },
+    task_stream: *mut crate::IcebergFileScanTaskStream
+);
+
+// Async: read a single file scan task into an Arrow stream.
+//
+// Clones the ArrowReader from the shared context — this shares the
+// CachingDeleteFileLoader cache across all concurrent consumers.
+// The task is wrapped in a one-element stream and fed to
+// ArrowReader::read().
+export_runtime_op!(
+    iceberg_read_file_scan_task,
+    IcebergArrowStreamResponse,
+    || {
+        if reader_ctx.is_null() {
+            return Err(anyhow::anyhow!("Null reader context pointer"));
+        }
+        if task.is_null() {
+            return Err(anyhow::anyhow!("Null task pointer"));
+        }
+        let ctx = unsafe { &*reader_ctx };
+        // Clone the reader — cheap, shares delete-file cache via Arc
+        let reader = ctx.reader.clone();
+        let serialization_concurrency = ctx.serialization_concurrency;
+
+        // Consume the task — caller must NOT call free_task after this
+        let task_ref = unsafe { Box::from_raw(task) };
+        let file_scan_task = task_ref.task;
+
+        Ok((reader, serialization_concurrency, file_scan_task))
+    },
+    result_tuple,
+    async {
+        let (reader, serialization_concurrency, file_scan_task) = result_tuple;
+
+        // Wrap single task in a one-element stream for ArrowReader::read()
+        let task_stream = stream::once(async { Ok(file_scan_task) }).boxed();
+        let record_batch_stream = reader.read(task_stream)?;
+
+        let serialized_stream = crate::transform_stream_with_parallel_serialization(
+            record_batch_stream,
+            serialization_concurrency,
+        );
+
+        Ok::<crate::IcebergArrowStream, anyhow::Error>(crate::IcebergArrowStream {
+            stream: AsyncMutex::new(serialized_stream),
+        })
+    },
+    reader_ctx: *mut crate::IcebergArrowReaderContext,
+    task: *mut crate::IcebergFileScanTask
+);
