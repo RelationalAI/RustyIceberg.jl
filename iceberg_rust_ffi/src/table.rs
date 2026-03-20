@@ -80,8 +80,11 @@ unsafe impl Send for IcebergFileScanTask {}
 /// Incremental file scan task streams (appends + deletes), each wrapped
 /// in AsyncMutex for concurrent pulling.
 pub struct IcebergIncrementalFileScanTaskStreams {
-    pub appends: AsyncMutex<futures::stream::BoxStream<'static, Result<AppendedFileScanTask, iceberg::Error>>>,
-    pub deletes: AsyncMutex<futures::stream::BoxStream<'static, Result<DeleteScanTask, iceberg::Error>>>,
+    pub appends: AsyncMutex<
+        futures::stream::BoxStream<'static, Result<AppendedFileScanTask, iceberg::Error>>,
+    >,
+    pub deletes:
+        AsyncMutex<futures::stream::BoxStream<'static, Result<DeleteScanTask, iceberg::Error>>>,
 }
 
 unsafe impl Send for IcebergIncrementalFileScanTaskStreams {}
@@ -119,7 +122,8 @@ pub type IcebergArrowStreamResponse = IcebergBoxedResponse<IcebergArrowStream>;
 pub type IcebergArrowReaderContextResponse = IcebergBoxedResponse<IcebergArrowReaderContext>;
 pub type IcebergFileScanTaskStreamResponse = IcebergBoxedResponse<IcebergFileScanTaskStream>;
 pub type IcebergFileScanTaskResponse = IcebergBoxedResponse<IcebergFileScanTask>;
-pub type IcebergIncrementalFileScanTaskStreamsResponse = IcebergBoxedResponse<IcebergIncrementalFileScanTaskStreams>;
+pub type IcebergIncrementalFileScanTaskStreamsResponse =
+    IcebergBoxedResponse<IcebergIncrementalFileScanTaskStreams>;
 pub type IcebergAppendTaskResponse = IcebergBoxedResponse<IcebergAppendTask>;
 pub type IcebergDeleteTaskResponse = IcebergBoxedResponse<IcebergDeleteTask>;
 
@@ -161,12 +165,20 @@ unsafe impl<T: Send> Send for IcebergOptionalTaskResponse<T> {}
 
 impl<T> RawResponse for IcebergOptionalTaskResponse<T> {
     type Payload = Option<T>;
-    fn result_mut(&mut self) -> &mut CResult { &mut self.0.result }
-    fn context_mut(&mut self) -> &mut *const Context { &mut self.0.context }
-    fn error_message_mut(&mut self) -> &mut *mut c_char { &mut self.0.error_message }
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.0.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.0.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.0.error_message
+    }
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload.flatten() {
-            Some(val) => { self.0.value = Box::into_raw(Box::new(val)); }
+            Some(val) => {
+                self.0.value = Box::into_raw(Box::new(val));
+            }
             None => self.0.value = ptr::null_mut(),
         }
     }
@@ -216,21 +228,27 @@ pub extern "C" fn iceberg_arrow_stream_free(stream: *mut IcebergArrowStream) {
 #[no_mangle]
 pub extern "C" fn iceberg_arrow_reader_context_free(ctx: *mut IcebergArrowReaderContext) {
     if !ctx.is_null() {
-        unsafe { let _ = Box::from_raw(ctx); }
+        unsafe {
+            let _ = Box::from_raw(ctx);
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn iceberg_file_scan_task_stream_free(stream: *mut IcebergFileScanTaskStream) {
     if !stream.is_null() {
-        unsafe { let _ = Box::from_raw(stream); }
+        unsafe {
+            let _ = Box::from_raw(stream);
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn iceberg_file_scan_task_free(task: *mut IcebergFileScanTask) {
     if !task.is_null() {
-        unsafe { let _ = Box::from_raw(task); }
+        unsafe {
+            let _ = Box::from_raw(task);
+        }
     }
 }
 
@@ -239,21 +257,27 @@ pub extern "C" fn iceberg_incremental_file_scan_task_streams_free(
     streams: *mut IcebergIncrementalFileScanTaskStreams,
 ) {
     if !streams.is_null() {
-        unsafe { let _ = Box::from_raw(streams); }
+        unsafe {
+            let _ = Box::from_raw(streams);
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn iceberg_append_task_free(task: *mut IcebergAppendTask) {
     if !task.is_null() {
-        unsafe { let _ = Box::from_raw(task); }
+        unsafe {
+            let _ = Box::from_raw(task);
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn iceberg_delete_task_free(task: *mut IcebergDeleteTask) {
     if !task.is_null() {
-        unsafe { let _ = Box::from_raw(task); }
+        unsafe {
+            let _ = Box::from_raw(task);
+        }
     }
 }
 

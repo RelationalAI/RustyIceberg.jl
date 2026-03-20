@@ -1,6 +1,10 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
+use futures::stream;
+use futures::{StreamExt, TryStreamExt};
+use iceberg::arrow::ArrowReaderBuilder;
+use iceberg::arrow::StreamsInto;
 use iceberg::io::FileIO;
 use iceberg::scan::incremental::{IncrementalTableScan, IncrementalTableScanBuilder};
 use object_store_ffi::{
@@ -10,7 +14,12 @@ use object_store_ffi::{
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::scan_common::*;
-use crate::{IcebergArrowStream, IcebergTable};
+use crate::{
+    IcebergAppendTask, IcebergArrowReaderContext, IcebergArrowStream, IcebergArrowStreamResponse,
+    IcebergDeleteTask,
+    IcebergIncrementalFileScanTaskStreams, IcebergIncrementalFileScanTaskStreamsResponse,
+    IcebergNextAppendTaskResponse, IcebergNextDeleteTaskResponse, IcebergTable,
+};
 
 /// Sentinel value for optional snapshot IDs in the C API.
 /// When -1 is passed as from_snapshot_id or to_snapshot_id, it means None (use default).
@@ -147,7 +156,9 @@ pub extern "C" fn iceberg_incremental_scan_with_data_file_concurrency_limit(
         *scan = Box::into_raw(Box::new(scan_val));
         return CResult::Error;
     }
-    scan_val.builder = scan_val.builder.map(|b| b.with_data_file_concurrency_limit(n));
+    scan_val.builder = scan_val
+        .builder
+        .map(|b| b.with_data_file_concurrency_limit(n));
     scan_val.data_file_concurrency_limit = n;
     *scan = Box::into_raw(Box::new(scan_val));
     CResult::Ok
@@ -239,3 +250,220 @@ export_runtime_op!(
 );
 
 impl_scan_free!(iceberg_free_incremental_scan, IcebergIncrementalScan);
+
+// ---------------------------------------------------------------------------
+// Split-scan API for incremental scans.
+//
+// Same pattern as full scans, but plan_files returns two sub-streams
+// (appends + deletes). Each sub-stream is independently pullable by
+// concurrent consumers via next_append_task / next_delete_task.
+// ---------------------------------------------------------------------------
+
+// Async: plan files for incremental scan. Returns two task sub-streams.
+export_runtime_op!(
+    iceberg_incremental_plan_files,
+    IcebergIncrementalFileScanTaskStreamsResponse,
+    || {
+        if scan.is_null() {
+            return Err(anyhow::anyhow!("Null scan pointer provided"));
+        }
+        let scan_ptr = unsafe { &*scan };
+        let scan_ref = scan_ptr.scan.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Incremental scan not built — call build! first"))?;
+        Ok(scan_ref)
+    },
+    scan_ref,
+    async {
+        let (appends_stream, deletes_stream) = scan_ref.plan_files().await?;
+        Ok::<IcebergIncrementalFileScanTaskStreams, anyhow::Error>(
+            IcebergIncrementalFileScanTaskStreams {
+                appends: AsyncMutex::new(appends_stream),
+                deletes: AsyncMutex::new(deletes_stream),
+            },
+        )
+    },
+    scan: *mut IcebergIncrementalScan
+);
+
+/// Sync: create a shared ArrowReader context from the incremental scan config.
+///
+/// For incremental scans, both row_group_filtering and row_selection are
+/// enabled (matching IncrementalTableScan::to_unzipped_arrow()).
+#[no_mangle]
+pub extern "C" fn iceberg_create_incremental_reader(
+    scan: *mut IcebergIncrementalScan,
+) -> *mut IcebergArrowReaderContext {
+    if scan.is_null() {
+        return std::ptr::null_mut();
+    }
+    let scan_ptr = unsafe { &*scan };
+
+    let Some(file_io) = scan_ptr.file_io.as_ref() else {
+        return std::ptr::null_mut();
+    };
+
+    let mut builder = ArrowReaderBuilder::new(file_io.clone())
+        .with_row_group_filtering_enabled(true)
+        .with_row_selection_enabled(true);
+
+    if scan_ptr.data_file_concurrency_limit > 0 {
+        builder = builder.with_data_file_concurrency_limit(scan_ptr.data_file_concurrency_limit);
+    }
+    if scan_ptr.batch_size > 0 {
+        builder = builder.with_batch_size(scan_ptr.batch_size);
+    }
+
+    let serialization_concurrency = if scan_ptr.serialization_concurrency == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        scan_ptr.serialization_concurrency
+    };
+
+    Box::into_raw(Box::new(IcebergArrowReaderContext {
+        reader: builder.build(),
+        serialization_concurrency,
+    }))
+}
+
+// Async: pull next append task. Returns null when exhausted.
+export_runtime_op!(
+    iceberg_next_append_task,
+    IcebergNextAppendTaskResponse,
+    || {
+        if task_streams.is_null() {
+            return Err(anyhow::anyhow!("Null task streams pointer"));
+        }
+        let streams_ref = unsafe { &*task_streams };
+        Ok(streams_ref)
+    },
+    streams_ref,
+    async {
+        let mut guard = streams_ref.appends.lock().await;
+        match guard.try_next().await {
+            Ok(Some(task)) => Ok(Some(IcebergAppendTask { task })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("Error pulling next append task: {}", e)),
+        }
+    },
+    task_streams: *mut IcebergIncrementalFileScanTaskStreams
+);
+
+// Async: pull next delete task. Returns null when exhausted.
+export_runtime_op!(
+    iceberg_next_delete_task,
+    IcebergNextDeleteTaskResponse,
+    || {
+        if task_streams.is_null() {
+            return Err(anyhow::anyhow!("Null task streams pointer"));
+        }
+        let streams_ref = unsafe { &*task_streams };
+        Ok(streams_ref)
+    },
+    streams_ref,
+    async {
+        let mut guard = streams_ref.deletes.lock().await;
+        match guard.try_next().await {
+            Ok(Some(task)) => Ok(Some(IcebergDeleteTask { task })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("Error pulling next delete task: {}", e)),
+        }
+    },
+    task_streams: *mut IcebergIncrementalFileScanTaskStreams
+);
+
+// Async: read a single append task into an Arrow stream.
+//
+// Creates a one-element IncrementalFileScanTaskStreams with an empty
+// deletes stream, then calls StreamsInto::stream(reader_clone) to
+// produce the arrow output. The reader clone shares the delete-file cache.
+export_runtime_op!(
+    iceberg_read_append_task,
+    IcebergArrowStreamResponse,
+    || {
+        if reader_ctx.is_null() {
+            return Err(anyhow::anyhow!("Null reader context pointer"));
+        }
+        if task.is_null() {
+            return Err(anyhow::anyhow!("Null task pointer"));
+        }
+        let ctx = unsafe { &*reader_ctx };
+        let reader = ctx.reader.clone();
+        let serialization_concurrency = ctx.serialization_concurrency;
+
+        // Consume the task (caller must not free after this call)
+        let task_ref = unsafe { Box::from_raw(task) };
+        let append_task = task_ref.task;
+
+        Ok((reader, serialization_concurrency, append_task))
+    },
+    result_tuple,
+    async {
+        let (reader, serialization_concurrency, append_task) = result_tuple;
+
+        // Wrap single append task + empty deletes → IncrementalFileScanTaskStreams
+        let task_streams = (
+            stream::once(async { Ok(append_task) }).boxed(),
+            stream::empty().boxed(),
+        );
+        // StreamsInto produces (appends_arrow_stream, empty_deletes_stream)
+        let (appends_stream, _empty_deletes) = task_streams.stream(reader)?;
+
+        let serialized_stream = crate::transform_stream_with_parallel_serialization(
+            appends_stream,
+            serialization_concurrency,
+        );
+
+        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
+            stream: AsyncMutex::new(serialized_stream),
+        })
+    },
+    reader_ctx: *mut IcebergArrowReaderContext,
+    task: *mut IcebergAppendTask
+);
+
+// Async: read a single delete task into an Arrow stream.
+//
+// Same pattern as read_append_task but with empty appends stream.
+export_runtime_op!(
+    iceberg_read_delete_task,
+    IcebergArrowStreamResponse,
+    || {
+        if reader_ctx.is_null() {
+            return Err(anyhow::anyhow!("Null reader context pointer"));
+        }
+        if task.is_null() {
+            return Err(anyhow::anyhow!("Null task pointer"));
+        }
+        let ctx = unsafe { &*reader_ctx };
+        let reader = ctx.reader.clone();
+        let serialization_concurrency = ctx.serialization_concurrency;
+
+        let task_ref = unsafe { Box::from_raw(task) };
+        let delete_task = task_ref.task;
+
+        Ok((reader, serialization_concurrency, delete_task))
+    },
+    result_tuple,
+    async {
+        let (reader, serialization_concurrency, delete_task) = result_tuple;
+
+        let task_streams = (
+            stream::empty().boxed(),
+            stream::once(async { Ok(delete_task) }).boxed(),
+        );
+        let (_empty_appends, deletes_stream) = task_streams.stream(reader)?;
+
+        let serialized_stream = crate::transform_stream_with_parallel_serialization(
+            deletes_stream,
+            serialization_concurrency,
+        );
+
+        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
+            stream: AsyncMutex::new(serialized_stream),
+        })
+    },
+    reader_ctx: *mut IcebergArrowReaderContext,
+    task: *mut IcebergDeleteTask
+);

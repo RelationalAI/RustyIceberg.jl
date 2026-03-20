@@ -48,12 +48,11 @@ pub use response::{
 pub use table::{
     ArrowBatch, IcebergAppendTask, IcebergAppendTaskResponse, IcebergArrowReaderContext,
     IcebergArrowReaderContextResponse, IcebergArrowStream, IcebergArrowStreamResponse,
-    IcebergBatchResponse, IcebergDeleteTask, IcebergDeleteTaskResponse,
-    IcebergFileScanTask, IcebergFileScanTaskResponse, IcebergFileScanTaskStream,
-    IcebergFileScanTaskStreamResponse, IcebergIncrementalFileScanTaskStreams,
-    IcebergIncrementalFileScanTaskStreamsResponse, IcebergNextAppendTaskResponse,
-    IcebergNextDeleteTaskResponse, IcebergNextFileScanTaskResponse, IcebergTable,
-    IcebergTableResponse,
+    IcebergBatchResponse, IcebergDeleteTask, IcebergDeleteTaskResponse, IcebergFileScanTask,
+    IcebergFileScanTaskResponse, IcebergFileScanTaskStream, IcebergFileScanTaskStreamResponse,
+    IcebergIncrementalFileScanTaskStreams, IcebergIncrementalFileScanTaskStreamsResponse,
+    IcebergNextAppendTaskResponse, IcebergNextDeleteTaskResponse, IcebergNextFileScanTaskResponse,
+    IcebergTable, IcebergTableResponse,
 };
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
 pub use writer::{
