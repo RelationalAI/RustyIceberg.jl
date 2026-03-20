@@ -22,6 +22,7 @@ export ArrowReaderContext, FileScanTaskStream, FileScanTaskHandle
 export IncrementalFileScanTaskStreams, AppendTaskHandle, DeleteTaskHandle
 export plan_files, create_reader, next_task, read_task
 export next_append_task, next_delete_task, read_append_task, read_delete_task
+export next_tasks, read_tasks, next_append_tasks, read_append_tasks, next_delete_tasks, read_delete_tasks
 export free_reader, free_task_stream, free_task
 export task_data_file_path
 export Catalog, catalog_create_rest, free_catalog

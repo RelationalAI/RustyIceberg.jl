@@ -188,6 +188,68 @@ pub type IcebergNextFileScanTaskResponse = IcebergOptionalTaskResponse<IcebergFi
 pub type IcebergNextAppendTaskResponse = IcebergOptionalTaskResponse<IcebergAppendTask>;
 pub type IcebergNextDeleteTaskResponse = IcebergOptionalTaskResponse<IcebergDeleteTask>;
 
+/// Response for batch task pull operations (next_*_tasks).
+///
+/// Returns an array of opaque task pointers + count. The individual tasks
+/// are boxed on the heap; the array itself is a shrink_to_fit Vec forgotten
+/// into a raw pointer. Free the array with `iceberg_free_task_ptr_array`
+/// after extracting the task pointers; free/consume individual tasks separately.
+#[repr(C)]
+pub struct IcebergTaskBatchResponse {
+    pub result: CResult,
+    pub tasks: *mut *mut c_void,
+    pub count: usize,
+    pub error_message: *mut c_char,
+    pub context: *const Context,
+}
+
+unsafe impl Send for IcebergTaskBatchResponse {}
+
+impl RawResponse for IcebergTaskBatchResponse {
+    type Payload = Vec<*mut c_void>;
+
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.error_message
+    }
+    fn set_payload(&mut self, payload: Option<Self::Payload>) {
+        match payload {
+            Some(mut ptrs) if !ptrs.is_empty() => {
+                self.count = ptrs.len();
+                ptrs.shrink_to_fit();
+                self.tasks = ptrs.as_mut_ptr();
+                std::mem::forget(ptrs);
+            }
+            _ => {
+                self.tasks = ptr::null_mut();
+                self.count = 0;
+            }
+        }
+    }
+}
+
+/// Free the pointer array returned by batch task pull operations.
+///
+/// Only frees the array allocation itself. Individual tasks must be
+/// consumed by a `read_*_tasks` call or freed individually via
+/// `iceberg_*_task_free`.
+#[no_mangle]
+pub extern "C" fn iceberg_free_task_ptr_array(tasks: *mut *mut c_void, count: usize) {
+    if tasks.is_null() || count == 0 {
+        return;
+    }
+    unsafe {
+        // Reconstruct Vec to free the allocation.
+        // shrink_to_fit was called before forget, so capacity == count.
+        let _ = Vec::from_raw_parts(tasks, count, count);
+    }
+}
+
 /// Synchronous operations for table and batch management
 
 /// Free a table
