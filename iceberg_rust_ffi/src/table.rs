@@ -1,7 +1,11 @@
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
+use iceberg::arrow::ArrowReader;
 use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
+use iceberg::scan::incremental::{AppendedFileScanTask, DeleteScanTask};
+use iceberg::scan::FileScanTask;
+use iceberg::scan::FileScanTaskStream;
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
 use iceberg::TableIdent;
@@ -31,6 +35,71 @@ pub struct IcebergArrowStream {
 
 unsafe impl Send for IcebergArrowStream {}
 
+// ---------------------------------------------------------------------------
+// Split-scan API types
+//
+// These types support a two-phase scan workflow:
+//   1. plan_files()  -> produces a task stream (file-level work items)
+//   2. create_reader() -> builds a shared ArrowReader (with delete-file cache)
+//   3. next_task()   -> concurrent-safe pull of one task from the stream
+//   4. read_task()   -> reads one task using a clone of the shared reader
+//
+// The ArrowReader is Clone; cloning shares the CachingDeleteFileLoader via
+// Arc, so delete files loaded by one consumer are cached for all others.
+// Task streams are wrapped in AsyncMutex so multiple Julia tasks can call
+// next_task concurrently.
+// ---------------------------------------------------------------------------
+
+/// Shared ArrowReader context for the split-scan API.
+///
+/// Created once via `create_reader`, then passed to every `read_task` call.
+/// Each `read_task` clones the inner ArrowReader -- this is cheap because
+/// the CachingDeleteFileLoader shares its cache via Arc<RwLock<...>>.
+pub struct IcebergArrowReaderContext {
+    pub reader: ArrowReader,
+    pub serialization_concurrency: usize,
+}
+
+unsafe impl Send for IcebergArrowReaderContext {}
+
+/// File scan task stream for full scans, wrapped in AsyncMutex for
+/// concurrent pulling by multiple consumers.
+pub struct IcebergFileScanTaskStream {
+    pub stream: AsyncMutex<FileScanTaskStream>,
+}
+
+unsafe impl Send for IcebergFileScanTaskStream {}
+
+/// A single file scan task pulled from the stream (full scan).
+pub struct IcebergFileScanTask {
+    pub task: FileScanTask,
+}
+
+unsafe impl Send for IcebergFileScanTask {}
+
+/// Incremental file scan task streams (appends + deletes), each wrapped
+/// in AsyncMutex for concurrent pulling.
+pub struct IcebergIncrementalFileScanTaskStreams {
+    pub appends: AsyncMutex<futures::stream::BoxStream<'static, Result<AppendedFileScanTask, iceberg::Error>>>,
+    pub deletes: AsyncMutex<futures::stream::BoxStream<'static, Result<DeleteScanTask, iceberg::Error>>>,
+}
+
+unsafe impl Send for IcebergIncrementalFileScanTaskStreams {}
+
+/// A single appended file scan task pulled from the incremental stream.
+pub struct IcebergAppendTask {
+    pub task: AppendedFileScanTask,
+}
+
+unsafe impl Send for IcebergAppendTask {}
+
+/// A single delete scan task pulled from the incremental stream.
+pub struct IcebergDeleteTask {
+    pub task: DeleteScanTask,
+}
+
+unsafe impl Send for IcebergDeleteTask {}
+
 /// Arrow batch serialized for FFI
 #[repr(C)]
 pub struct ArrowBatch {
@@ -47,6 +116,12 @@ unsafe impl Send for ArrowBatch {}
 /// Type aliases for response types
 pub type IcebergTableResponse = IcebergBoxedResponse<IcebergTable>;
 pub type IcebergArrowStreamResponse = IcebergBoxedResponse<IcebergArrowStream>;
+pub type IcebergArrowReaderContextResponse = IcebergBoxedResponse<IcebergArrowReaderContext>;
+pub type IcebergFileScanTaskStreamResponse = IcebergBoxedResponse<IcebergFileScanTaskStream>;
+pub type IcebergFileScanTaskResponse = IcebergBoxedResponse<IcebergFileScanTask>;
+pub type IcebergIncrementalFileScanTaskStreamsResponse = IcebergBoxedResponse<IcebergIncrementalFileScanTaskStreams>;
+pub type IcebergAppendTaskResponse = IcebergBoxedResponse<IcebergAppendTask>;
+pub type IcebergDeleteTaskResponse = IcebergBoxedResponse<IcebergDeleteTask>;
 
 /// Batch response - same memory layout as IcebergBoxedResponse<ArrowBatch>
 /// but with Option<ArrowBatch> payload to handle end-of-stream (None) case.
@@ -76,6 +151,30 @@ impl RawResponse for IcebergBatchResponse {
         }
     }
 }
+
+/// Response for next_task operations that may return None (end of stream).
+/// Uses the same pattern as IcebergBatchResponse.
+#[repr(transparent)]
+pub struct IcebergOptionalTaskResponse<T>(pub IcebergBoxedResponse<T>);
+
+unsafe impl<T: Send> Send for IcebergOptionalTaskResponse<T> {}
+
+impl<T> RawResponse for IcebergOptionalTaskResponse<T> {
+    type Payload = Option<T>;
+    fn result_mut(&mut self) -> &mut CResult { &mut self.0.result }
+    fn context_mut(&mut self) -> &mut *const Context { &mut self.0.context }
+    fn error_message_mut(&mut self) -> &mut *mut c_char { &mut self.0.error_message }
+    fn set_payload(&mut self, payload: Option<Self::Payload>) {
+        match payload.flatten() {
+            Some(val) => { self.0.value = Box::into_raw(Box::new(val)); }
+            None => self.0.value = ptr::null_mut(),
+        }
+    }
+}
+
+pub type IcebergNextFileScanTaskResponse = IcebergOptionalTaskResponse<IcebergFileScanTask>;
+pub type IcebergNextAppendTaskResponse = IcebergOptionalTaskResponse<IcebergAppendTask>;
+pub type IcebergNextDeleteTaskResponse = IcebergOptionalTaskResponse<IcebergDeleteTask>;
 
 /// Synchronous operations for table and batch management
 
@@ -111,6 +210,50 @@ pub extern "C" fn iceberg_arrow_stream_free(stream: *mut IcebergArrowStream) {
         unsafe {
             let _ = Box::from_raw(stream);
         }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn iceberg_arrow_reader_context_free(ctx: *mut IcebergArrowReaderContext) {
+    if !ctx.is_null() {
+        unsafe { let _ = Box::from_raw(ctx); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_task_stream_free(stream: *mut IcebergFileScanTaskStream) {
+    if !stream.is_null() {
+        unsafe { let _ = Box::from_raw(stream); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_task_free(task: *mut IcebergFileScanTask) {
+    if !task.is_null() {
+        unsafe { let _ = Box::from_raw(task); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn iceberg_incremental_file_scan_task_streams_free(
+    streams: *mut IcebergIncrementalFileScanTaskStreams,
+) {
+    if !streams.is_null() {
+        unsafe { let _ = Box::from_raw(streams); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn iceberg_append_task_free(task: *mut IcebergAppendTask) {
+    if !task.is_null() {
+        unsafe { let _ = Box::from_raw(task); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn iceberg_delete_task_free(task: *mut IcebergDeleteTask) {
+    if !task.is_null() {
+        unsafe { let _ = Box::from_raw(task); }
     }
 }
 

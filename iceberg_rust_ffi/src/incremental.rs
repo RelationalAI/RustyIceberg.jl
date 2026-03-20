@@ -1,6 +1,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
+use iceberg::io::FileIO;
 use iceberg::scan::incremental::{IncrementalTableScan, IncrementalTableScanBuilder};
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, Context, NotifyGuard, RawResponse,
@@ -15,13 +16,24 @@ use crate::{IcebergArrowStream, IcebergTable};
 /// When -1 is passed as from_snapshot_id or to_snapshot_id, it means None (use default).
 const SNAPSHOT_ID_NONE: i64 = -1;
 
-/// Struct for incremental scan builder and scan
+/// FFI wrapper for an incremental table scan.
+///
+/// In addition to the builder/scan from iceberg-rust, we store copies of
+/// file_io, batch_size, and data_file_concurrency_limit so that
+/// `create_reader` can build an ArrowReaderBuilder without accessing
+/// private fields on IncrementalTableScan.
 #[repr(C)]
 pub struct IcebergIncrementalScan {
     pub builder: Option<IncrementalTableScanBuilder<'static>>,
     pub scan: Option<IncrementalTableScan>,
     /// 0 = auto-detect (num_cpus)
     pub serialization_concurrency: usize,
+    /// Cloned from Table at scan creation time for use by create_reader
+    pub file_io: Option<FileIO>,
+    /// 0 = no batch size override (use reader default)
+    pub batch_size: usize,
+    /// 0 = auto-detect (num_cpus)
+    pub data_file_concurrency_limit: usize,
 }
 
 unsafe impl Send for IcebergIncrementalScan {}
@@ -97,11 +109,17 @@ pub extern "C" fn iceberg_new_incremental_scan(
         Some(to_snapshot_id)
     };
 
+    // Clone FileIO for later use by create_reader.
+    // FileIO is Arc-based internally so this is cheap.
+    let file_io = table_ref.table.file_io().clone();
     let scan_builder = table_ref.table.incremental_scan(from_id, to_id);
     Box::into_raw(Box::new(IcebergIncrementalScan {
         builder: Some(scan_builder),
         scan: None,
         serialization_concurrency: 0,
+        file_io: Some(file_io),
+        batch_size: 0,
+        data_file_concurrency_limit: 0,
     }))
 }
 
@@ -115,12 +133,25 @@ impl_scan_builder_method!(
     n: usize
 );
 
-impl_scan_builder_method!(
-    iceberg_incremental_scan_with_data_file_concurrency_limit,
-    IcebergIncrementalScan,
-    with_data_file_concurrency_limit,
-    n: usize
-);
+/// Sets data file concurrency and stores the value for create_reader.
+#[no_mangle]
+pub extern "C" fn iceberg_incremental_scan_with_data_file_concurrency_limit(
+    scan: &mut *mut IcebergIncrementalScan,
+    n: usize,
+) -> CResult {
+    if scan.is_null() || (*scan).is_null() {
+        return CResult::Error;
+    }
+    let mut scan_val = *unsafe { Box::from_raw(*scan) };
+    if scan_val.builder.is_none() {
+        *scan = Box::into_raw(Box::new(scan_val));
+        return CResult::Error;
+    }
+    scan_val.builder = scan_val.builder.map(|b| b.with_data_file_concurrency_limit(n));
+    scan_val.data_file_concurrency_limit = n;
+    *scan = Box::into_raw(Box::new(scan_val));
+    CResult::Ok
+}
 
 impl_scan_builder_method!(
     iceberg_incremental_scan_with_manifest_entry_concurrency_limit,
