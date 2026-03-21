@@ -235,3 +235,36 @@ function task_data_file_path(task::DeleteTaskHandle)
     @ccall rust_lib.iceberg_destroy_cstring(cstr::Ptr{Cchar})::Cint
     return result
 end
+
+"""
+    task_record_count(task::FileScanTaskHandle)::Union{Int64, Nothing}
+
+Get the record count from a file scan task.
+Returns `nothing` if the record count is not available (e.g. partial file read).
+"""
+function task_record_count(task::FileScanTaskHandle)
+    count = @ccall rust_lib.iceberg_file_scan_task_record_count(task.ptr::Ptr{Cvoid})::Int64
+    return count == -1 ? nothing : count
+end
+
+"""
+    task_record_count(task::AppendTaskHandle)::Union{Int64, Nothing}
+
+Get the record count from an append task.
+Returns `nothing` if the record count is not available.
+"""
+function task_record_count(task::AppendTaskHandle)
+    count = @ccall rust_lib.iceberg_append_task_record_count(task.ptr::Ptr{Cvoid})::Int64
+    return count == -1 ? nothing : count
+end
+
+"""
+    task_record_count(task::DeleteTaskHandle)::Union{Int64, Nothing}
+
+Get the record count from a delete task.
+Returns `nothing` if the record count is not available.
+"""
+function task_record_count(task::DeleteTaskHandle)
+    count = @ccall rust_lib.iceberg_delete_task_record_count(task.ptr::Ptr{Cvoid})::Int64
+    return count == -1 ? nothing : count
+end

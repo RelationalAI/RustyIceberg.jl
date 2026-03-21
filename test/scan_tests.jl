@@ -1247,6 +1247,10 @@ end
         @test task isa RustyIceberg.FileScanTaskHandle
         task_count += 1
 
+        # Test record_count — should be available for full file reads
+        rc = RustyIceberg.task_record_count(task)
+        @test rc isa Union{Int64, Nothing}
+
         # read_task consumes the task — no free_task needed
         stream = RustyIceberg.read_task(reader, task)
         @test stream != C_NULL
@@ -1296,6 +1300,8 @@ end
             break
         end
         append_count += 1
+        rc = RustyIceberg.task_record_count(task)
+        @test rc isa Union{Int64, Nothing}
         stream = RustyIceberg.read_append_task(reader, task)
         while true
             bp = RustyIceberg.next_batch(stream)
@@ -1313,6 +1319,8 @@ end
             break
         end
         delete_count += 1
+        rc = RustyIceberg.task_record_count(task)
+        @test rc isa Union{Int64, Nothing}
         stream = RustyIceberg.read_delete_task(reader, task)
         while true
             bp = RustyIceberg.next_batch(stream)
