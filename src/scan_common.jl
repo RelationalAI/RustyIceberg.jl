@@ -221,42 +221,6 @@ function task_data_file_path(task::AppendTaskHandle)
 end
 
 """
-    TaskBatchResponse
-
-Response structure for batch task pull operations that return an array of task pointers.
-
-# Fields
-- `result::Cint`: Result code from the operation (0 for success)
-- `tasks::Ptr{Ptr{Cvoid}}`: Pointer to array of task pointers
-- `count::Csize_t`: Number of tasks in the array
-- `error_message::Ptr{Cchar}`: Error message string if operation failed
-- `context::Ptr{Cvoid}`: Context pointer for operation cancellation
-"""
-mutable struct TaskBatchResponse
-    result::Cint
-    tasks::Ptr{Ptr{Cvoid}}
-    count::Csize_t
-    error_message::Ptr{Cchar}
-    context::Ptr{Cvoid}
-
-    TaskBatchResponse() = new(-1, C_NULL, 0, C_NULL, C_NULL)
-end
-
-"""
-    free_task_ptr_array(tasks_ptr::Ptr{Ptr{Cvoid}}, count::Integer)
-
-Free the pointer array returned by batch task pull operations.
-Does NOT free the individual tasks — those are consumed by `read_tasks`/`read_append_tasks`/
-`read_delete_tasks` or freed individually via `free_task`.
-"""
-function free_task_ptr_array(tasks_ptr::Ptr{Ptr{Cvoid}}, count::Integer)
-    @ccall rust_lib.iceberg_free_task_ptr_array(
-        tasks_ptr::Ptr{Ptr{Cvoid}},
-        count::Csize_t
-    )::Cvoid
-end
-
-"""
     task_data_file_path(task::DeleteTaskHandle)::String
 
 Get the data file path from a delete task.

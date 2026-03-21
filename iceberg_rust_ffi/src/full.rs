@@ -13,9 +13,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::scan_common::*;
 use crate::{
-    IcebergArrowReaderContext, IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanTask,
-    IcebergFileScanTaskStreamResponse, IcebergNextFileScanTaskResponse, IcebergTable,
-    IcebergTaskBatchResponse,
+    IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanTaskStreamResponse,
+    IcebergNextFileScanTaskResponse, IcebergTable,
 };
 
 /// FFI wrapper for a regular (full) table scan.
@@ -316,93 +315,4 @@ export_runtime_op!(
     },
     reader_ctx: *mut crate::IcebergArrowReaderContext,
     task: *mut crate::IcebergFileScanTask
-);
-
-// ---------------------------------------------------------------------------
-// Batch API: pull/read multiple tasks at once
-// ---------------------------------------------------------------------------
-
-// Async: pull up to `count` file scan tasks. count=0 drains all remaining.
-export_runtime_op!(
-    iceberg_next_file_scan_tasks,
-    IcebergTaskBatchResponse,
-    || {
-        if task_stream.is_null() {
-            return Err(anyhow::anyhow!("Null task stream pointer"));
-        }
-        let stream_ref = unsafe { &*task_stream };
-        Ok((stream_ref, count))
-    },
-    result_tuple,
-    async {
-        let (stream_ref, count) = result_tuple;
-        let mut guard = stream_ref.stream.lock().await;
-        let mut tasks: Vec<IcebergFileScanTask> = Vec::new();
-        loop {
-            if count > 0 && tasks.len() >= count {
-                break;
-            }
-            match guard.try_next().await {
-                Ok(Some(task)) => tasks.push(IcebergFileScanTask { task }),
-                Ok(None) => break,
-                Err(e) => return Err(anyhow::anyhow!("Error pulling next task: {}", e)),
-            }
-        }
-        // Convert to void pointers after async work is done (raw ptrs aren't Send)
-        let ptrs = tasks.into_iter()
-            .map(|t| Box::into_raw(Box::new(t)) as *mut c_void)
-            .collect();
-        Ok::<Vec<*mut c_void>, anyhow::Error>(ptrs)
-    },
-    task_stream: *mut crate::IcebergFileScanTaskStream,
-    count: usize
-);
-
-// Async: read multiple file scan tasks into a single Arrow stream.
-// Consumes all provided tasks — caller must NOT free them afterwards.
-export_runtime_op!(
-    iceberg_read_file_scan_tasks,
-    IcebergArrowStreamResponse,
-    || {
-        if reader_ctx.is_null() {
-            return Err(anyhow::anyhow!("Null reader context pointer"));
-        }
-        if tasks_ptr.is_null() || tasks_len == 0 {
-            return Err(anyhow::anyhow!("Empty tasks array"));
-        }
-        let ctx = unsafe { &*reader_ctx };
-        let reader = ctx.reader.clone();
-        let serialization_concurrency = ctx.serialization_concurrency;
-
-        // Consume all tasks from the pointer array
-        let task_slice = unsafe { std::slice::from_raw_parts(tasks_ptr, tasks_len) };
-        let file_scan_tasks: Vec<_> = task_slice
-            .iter()
-            .map(|&task_ptr| {
-                let task_box = unsafe { Box::from_raw(task_ptr as *mut IcebergFileScanTask) };
-                task_box.task
-            })
-            .collect();
-
-        Ok((reader, serialization_concurrency, file_scan_tasks))
-    },
-    result_tuple,
-    async {
-        let (reader, serialization_concurrency, file_scan_tasks) = result_tuple;
-
-        let task_stream = stream::iter(file_scan_tasks.into_iter().map(Ok)).boxed();
-        let record_batch_stream = reader.read(task_stream)?;
-
-        let serialized_stream = crate::transform_stream_with_parallel_serialization(
-            record_batch_stream,
-            serialization_concurrency,
-        );
-
-        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
-            stream: AsyncMutex::new(serialized_stream),
-        })
-    },
-    reader_ctx: *mut IcebergArrowReaderContext,
-    tasks_ptr: *const *mut c_void,
-    tasks_len: usize
 );

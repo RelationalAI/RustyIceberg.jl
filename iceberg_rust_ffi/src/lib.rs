@@ -52,7 +52,7 @@ pub use table::{
     IcebergFileScanTaskResponse, IcebergFileScanTaskStream, IcebergFileScanTaskStreamResponse,
     IcebergIncrementalFileScanTaskStreams, IcebergIncrementalFileScanTaskStreamsResponse,
     IcebergNextAppendTaskResponse, IcebergNextDeleteTaskResponse, IcebergNextFileScanTaskResponse,
-    IcebergTable, IcebergTableResponse, IcebergTaskBatchResponse,
+    IcebergTable, IcebergTableResponse,
 };
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
 pub use writer::{
