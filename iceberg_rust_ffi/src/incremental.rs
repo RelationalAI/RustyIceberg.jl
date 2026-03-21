@@ -16,9 +16,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::scan_common::*;
 use crate::{
     IcebergAppendTask, IcebergArrowReaderContext, IcebergArrowStream, IcebergArrowStreamResponse,
-    IcebergDeleteTask,
-    IcebergIncrementalFileScanTaskStreams, IcebergIncrementalFileScanTaskStreamsResponse,
-    IcebergNextAppendTaskResponse, IcebergNextDeleteTaskResponse, IcebergTable,
+    IcebergDeleteTask, IcebergIncrementalFileScanTaskStreams,
+    IcebergIncrementalFileScanTaskStreamsResponse, IcebergNextAppendTaskResponse,
+    IcebergNextDeleteTaskResponse, IcebergTable,
 };
 
 /// Sentinel value for optional snapshot IDs in the C API.

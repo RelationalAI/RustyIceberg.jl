@@ -494,46 +494,49 @@ const RECORD_COUNT_UNKNOWN: i64 = -1;
 /// Returns the record count from a FileScanTask.
 /// Returns -1 if the record count is not available (partial file read).
 #[no_mangle]
-pub extern "C" fn iceberg_file_scan_task_record_count(
-    task: *const IcebergFileScanTask,
-) -> i64 {
+pub extern "C" fn iceberg_file_scan_task_record_count(task: *const IcebergFileScanTask) -> i64 {
     if task.is_null() {
         return RECORD_COUNT_UNKNOWN;
     }
     let task_ref = unsafe { &*task };
-    task_ref.task.record_count.map_or(RECORD_COUNT_UNKNOWN, |n| n as i64)
+    task_ref
+        .task
+        .record_count
+        .map_or(RECORD_COUNT_UNKNOWN, |n| n as i64)
 }
 
 /// Returns the record count from an AppendedFileScanTask.
 /// Returns -1 if the record count is not available.
 #[no_mangle]
-pub extern "C" fn iceberg_append_task_record_count(
-    task: *const IcebergAppendTask,
-) -> i64 {
+pub extern "C" fn iceberg_append_task_record_count(task: *const IcebergAppendTask) -> i64 {
     if task.is_null() {
         return RECORD_COUNT_UNKNOWN;
     }
     let task_ref = unsafe { &*task };
-    task_ref.task.base.record_count.map_or(RECORD_COUNT_UNKNOWN, |n| n as i64)
+    task_ref
+        .task
+        .base
+        .record_count
+        .map_or(RECORD_COUNT_UNKNOWN, |n| n as i64)
 }
 
 /// Returns the record count from a DeleteScanTask.
 /// Returns -1 if the record count is not available.
 #[no_mangle]
-pub extern "C" fn iceberg_delete_task_record_count(
-    task: *const IcebergDeleteTask,
-) -> i64 {
+pub extern "C" fn iceberg_delete_task_record_count(task: *const IcebergDeleteTask) -> i64 {
     if task.is_null() {
         return RECORD_COUNT_UNKNOWN;
     }
     let task_ref = unsafe { &*task };
     match &task_ref.task {
-        DeleteScanTask::DeletedFile(inner) => {
-            inner.base.record_count.map_or(RECORD_COUNT_UNKNOWN, |n| n as i64)
-        }
+        DeleteScanTask::DeletedFile(inner) => inner
+            .base
+            .record_count
+            .map_or(RECORD_COUNT_UNKNOWN, |n| n as i64),
         DeleteScanTask::PositionalDeletes(_, _) => RECORD_COUNT_UNKNOWN,
-        DeleteScanTask::EqualityDeletes(inner) => {
-            inner.base.record_count.map_or(RECORD_COUNT_UNKNOWN, |n| n as i64)
-        }
+        DeleteScanTask::EqualityDeletes(inner) => inner
+            .base
+            .record_count
+            .map_or(RECORD_COUNT_UNKNOWN, |n| n as i64),
     }
 }
