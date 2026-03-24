@@ -253,6 +253,24 @@ function with_prefetch_depth!(scan::IncrementalScan, n::UInt)
 end
 
 """
+    with_task_prefetch_depth!(scan::IncrementalScan, n::UInt)
+
+Set the number of file scan tasks buffered ahead of the consumer.
+See `with_task_prefetch_depth!(::Scan, ::UInt)` for details.
+"""
+function with_task_prefetch_depth!(scan::IncrementalScan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_task_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set task prefetch depth for incremental scan", result))
+    end
+    return nothing
+end
+
+"""
     with_pos_column!(scan::IncrementalScan)
 
 Add the _pos metadata column to the incremental scan.

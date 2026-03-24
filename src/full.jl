@@ -236,6 +236,29 @@ function with_prefetch_depth!(scan::Scan, n::UInt)
 end
 
 """
+    with_task_prefetch_depth!(scan::Scan, n::UInt)
+
+Set the number of file scan tasks buffered ahead of the consumer.
+
+The Rust FFI layer eagerly plans file scan tasks into a bounded buffer,
+so task planning runs ahead of Julia's consumption. Only a small number
+of tasks need buffering — planning is cheap compared to reading data.
+- `n = 0`: Use the Rust-side default (currently 4)
+- `n > 0`: Use exactly n buffer slots
+"""
+function with_task_prefetch_depth!(scan::Scan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_task_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set task prefetch depth", result))
+    end
+    return nothing
+end
+
+"""
     with_snapshot_id!(scan::Scan, snapshot_id::Int64)
 
 Set the snapshot ID for the scan.
