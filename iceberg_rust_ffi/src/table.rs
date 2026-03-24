@@ -26,14 +26,83 @@ pub struct IcebergTable {
     pub table: Table,
 }
 
-/// Stream wrapper for FFI - using async mutex to avoid blocking calls
-#[repr(C)]
+/// Default number of serialized batches buffered ahead of the consumer.
+/// Keeps the Rust pipeline (Parquet decode → IPC serialize) running independently
+/// of how fast Julia pulls batches, while bounding memory usage.
+pub(crate) const DEFAULT_PREFETCH_DEPTH: usize = 8;
+
+/// Stream wrapper for FFI — eagerly drains serialized batches into a bounded
+/// channel so the producer runs independently of the Julia consumer.
+///
+/// Error handling:
+/// - Stream errors are sent through the channel as `Err(...)` values; the producer
+///   stops after forwarding the first error.
+/// - If the producer task panics, the sender is dropped, `recv()` returns `None`,
+///   and the `JoinHandle` is checked to surface the panic message as an error.
+/// - Dropping the `IcebergArrowStream` (via `iceberg_arrow_stream_free`) drops the
+///   receiver, which causes the producer to exit on its next `send()`.
 pub struct IcebergArrowStream {
-    // TODO: Maybe remove this mutex and let this be handled in Julia?
-    pub stream: AsyncMutex<futures::stream::BoxStream<'static, Result<ArrowBatch, iceberg::Error>>>,
+    receiver: AsyncMutex<tokio::sync::mpsc::Receiver<Result<ArrowBatch, iceberg::Error>>>,
+    producer_handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 unsafe impl Send for IcebergArrowStream {}
+
+impl IcebergArrowStream {
+    /// Spawn a background tokio task that eagerly drains `stream` into a bounded
+    /// mpsc channel of capacity `prefetch_depth`.
+    pub fn new(
+        stream: futures::stream::BoxStream<'static, Result<ArrowBatch, iceberg::Error>>,
+        prefetch_depth: usize,
+    ) -> Self {
+        use futures::StreamExt;
+        let (tx, rx) = tokio::sync::mpsc::channel(prefetch_depth);
+        let handle = tokio::spawn(async move {
+            futures::pin_mut!(stream);
+            while let Some(item) = stream.next().await {
+                let is_err = item.is_err();
+                // If the receiver is dropped (stream freed early), send() fails and we exit.
+                if tx.send(item).await.is_err() {
+                    break;
+                }
+                // Stop producing after forwarding an error — the stream is in an
+                // undefined state and the consumer will stop pulling anyway.
+                if is_err {
+                    break;
+                }
+            }
+        });
+        Self {
+            receiver: AsyncMutex::new(rx),
+            producer_handle: AsyncMutex::new(Some(handle)),
+        }
+    }
+
+    /// Pull the next batch from the internal buffer.
+    /// Returns `Ok(Some(batch))` for data, `Ok(None)` for end-of-stream,
+    /// or `Err(...)` for stream/producer errors.
+    pub async fn next(&self) -> Result<Option<ArrowBatch>, anyhow::Error> {
+        let mut rx = self.receiver.lock().await;
+        match rx.recv().await {
+            Some(Ok(batch)) => Ok(Some(batch)),
+            Some(Err(e)) => Err(anyhow::anyhow!("Stream error: {}", e)),
+            None => {
+                // Channel closed — either clean end-of-stream or producer panicked.
+                // Check the JoinHandle to distinguish.
+                let mut handle_guard = self.producer_handle.lock().await;
+                if let Some(handle) = handle_guard.take() {
+                    match handle.await {
+                        Ok(()) => Ok(None), // clean EOF
+                        Err(e) => Err(anyhow::anyhow!("Batch producer task panicked: {}", e)),
+                    }
+                } else {
+                    // Handle already consumed (second call after EOF) — just return None.
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Split-scan API types
@@ -58,6 +127,7 @@ unsafe impl Send for IcebergArrowStream {}
 pub struct IcebergArrowReaderContext {
     pub reader: ArrowReader,
     pub serialization_concurrency: usize,
+    pub prefetch_depth: usize,
 }
 
 unsafe impl Send for IcebergArrowReaderContext {}
@@ -321,7 +391,7 @@ export_runtime_op!(
     properties_len: usize
 );
 
-// Get next batch from stream
+// Get next batch from stream (pops from the internal prefetch buffer).
 export_runtime_op!(
     iceberg_next_batch,
     IcebergBatchResponse,
@@ -334,20 +404,7 @@ export_runtime_op!(
     },
     stream_ref,
     async {
-        use futures::TryStreamExt;
-        let mut stream_guard = stream_ref.stream.lock().await;
-
-        match stream_guard.try_next().await {
-            Ok(Some(record_batch)) => {
-                Ok(Some(record_batch))
-            }
-            Ok(None) => {
-                // End of stream
-                tracing::debug!("End of stream reached");
-                Ok(None)
-            }
-            Err(e) => Err(anyhow::anyhow!("Error reading batch: {}", e)),
-        }
+        stream_ref.next().await
     },
     stream: *mut IcebergArrowStream
 );

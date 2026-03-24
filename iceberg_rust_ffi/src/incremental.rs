@@ -43,6 +43,8 @@ pub struct IcebergIncrementalScan {
     pub batch_size: usize,
     /// 0 = auto-detect (num_cpus)
     pub data_file_concurrency_limit: usize,
+    /// 0 = use DEFAULT_PREFETCH_DEPTH
+    pub prefetch_depth: usize,
 }
 
 unsafe impl Send for IcebergIncrementalScan {}
@@ -129,6 +131,7 @@ pub extern "C" fn iceberg_new_incremental_scan(
         file_io: Some(file_io),
         batch_size: 0,
         data_file_concurrency_limit: 0,
+        prefetch_depth: 0,
     }))
 }
 
@@ -195,6 +198,11 @@ impl_with_serialization_concurrency_limit!(
     IcebergIncrementalScan
 );
 
+impl_with_prefetch_depth!(
+    iceberg_incremental_scan_with_prefetch_depth,
+    IcebergIncrementalScan
+);
+
 // Get unzipped Arrow streams from incremental scan (async)
 // Returns two separate streams: one for inserts, one for deletes
 export_runtime_op!(
@@ -220,29 +228,37 @@ export_runtime_op!(
             serialization_concurrency
         };
 
-        Ok((scan_ref.as_ref().unwrap(), serialization_concurrency))
+        let prefetch_depth = if scan_ptr.prefetch_depth == 0 {
+            crate::table::DEFAULT_PREFETCH_DEPTH
+        } else {
+            scan_ptr.prefetch_depth
+        };
+
+        Ok((scan_ref.as_ref().unwrap(), serialization_concurrency, prefetch_depth))
     },
     result_tuple,
     async {
-        let (scan_ref, serialization_concurrency) = result_tuple;
+        let (scan_ref, serialization_concurrency, prefetch_depth) = result_tuple;
 
         // Get unzipped streams (separate append and delete streams)
         let (inserts_stream, deletes_stream) = scan_ref.to_unzipped_arrow().await?;
 
         // Transform both streams with parallel serialization
-        let inserts = IcebergArrowStream {
-            stream: AsyncMutex::new(crate::transform_stream_with_parallel_serialization(
+        let inserts = IcebergArrowStream::new(
+            crate::transform_stream_with_parallel_serialization(
                 inserts_stream,
                 serialization_concurrency
-            )),
-        };
+            ),
+            prefetch_depth,
+        );
 
-        let deletes = IcebergArrowStream {
-            stream: AsyncMutex::new(crate::transform_stream_with_parallel_serialization(
+        let deletes = IcebergArrowStream::new(
+            crate::transform_stream_with_parallel_serialization(
                 deletes_stream,
                 serialization_concurrency
-            )),
-        };
+            ),
+            prefetch_depth,
+        );
 
         Ok::<(IcebergArrowStream, IcebergArrowStream), anyhow::Error>((inserts, deletes))
     },
@@ -321,9 +337,16 @@ pub extern "C" fn iceberg_create_incremental_reader(
         scan_ptr.serialization_concurrency
     };
 
+    let prefetch_depth = if scan_ptr.prefetch_depth == 0 {
+        crate::table::DEFAULT_PREFETCH_DEPTH
+    } else {
+        scan_ptr.prefetch_depth
+    };
+
     Box::into_raw(Box::new(IcebergArrowReaderContext {
         reader: builder.build(),
         serialization_concurrency,
+        prefetch_depth,
     }))
 }
 
@@ -391,16 +414,17 @@ export_runtime_op!(
         let ctx = unsafe { &*reader_ctx };
         let reader = ctx.reader.clone();
         let serialization_concurrency = ctx.serialization_concurrency;
+        let prefetch_depth = ctx.prefetch_depth;
 
         // Consume the task (caller must not free after this call)
         let task_ref = unsafe { Box::from_raw(task) };
         let append_task = task_ref.task;
 
-        Ok((reader, serialization_concurrency, append_task))
+        Ok((reader, serialization_concurrency, prefetch_depth, append_task))
     },
     result_tuple,
     async {
-        let (reader, serialization_concurrency, append_task) = result_tuple;
+        let (reader, serialization_concurrency, prefetch_depth, append_task) = result_tuple;
 
         // Wrap single append task + empty deletes → IncrementalFileScanTaskStreams
         let task_streams = (
@@ -415,9 +439,10 @@ export_runtime_op!(
             serialization_concurrency,
         );
 
-        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
-            stream: AsyncMutex::new(serialized_stream),
-        })
+        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream::new(
+            serialized_stream,
+            prefetch_depth,
+        ))
     },
     reader_ctx: *mut IcebergArrowReaderContext,
     task: *mut IcebergAppendTask
@@ -439,15 +464,16 @@ export_runtime_op!(
         let ctx = unsafe { &*reader_ctx };
         let reader = ctx.reader.clone();
         let serialization_concurrency = ctx.serialization_concurrency;
+        let prefetch_depth = ctx.prefetch_depth;
 
         let task_ref = unsafe { Box::from_raw(task) };
         let delete_task = task_ref.task;
 
-        Ok((reader, serialization_concurrency, delete_task))
+        Ok((reader, serialization_concurrency, prefetch_depth, delete_task))
     },
     result_tuple,
     async {
-        let (reader, serialization_concurrency, delete_task) = result_tuple;
+        let (reader, serialization_concurrency, prefetch_depth, delete_task) = result_tuple;
 
         let task_streams = (
             stream::empty().boxed(),
@@ -460,9 +486,10 @@ export_runtime_op!(
             serialization_concurrency,
         );
 
-        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
-            stream: AsyncMutex::new(serialized_stream),
-        })
+        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream::new(
+            serialized_stream,
+            prefetch_depth,
+        ))
     },
     reader_ctx: *mut IcebergArrowReaderContext,
     task: *mut IcebergDeleteTask

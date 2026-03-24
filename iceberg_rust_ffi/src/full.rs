@@ -35,6 +35,8 @@ pub struct IcebergScan {
     pub batch_size: usize,
     /// 0 = auto-detect (num_cpus)
     pub data_file_concurrency_limit: usize,
+    /// 0 = use DEFAULT_PREFETCH_DEPTH
+    pub prefetch_depth: usize,
 }
 
 unsafe impl Send for IcebergScan {}
@@ -57,6 +59,7 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
         file_io: Some(file_io),
         batch_size: 0,
         data_file_concurrency_limit: 0,
+        prefetch_depth: 0,
     }))
 }
 
@@ -112,6 +115,11 @@ impl_with_serialization_concurrency_limit!(
     IcebergScan
 );
 
+impl_with_prefetch_depth!(
+    iceberg_scan_with_prefetch_depth,
+    IcebergScan
+);
+
 impl_scan_builder_method!(
     iceberg_scan_with_snapshot_id,
     IcebergScan,
@@ -143,11 +151,17 @@ export_runtime_op!(
             serialization_concurrency
         };
 
-        Ok((scan_ref.as_ref().unwrap(), serialization_concurrency))
+        let prefetch_depth = if scan_ptr.prefetch_depth == 0 {
+            crate::table::DEFAULT_PREFETCH_DEPTH
+        } else {
+            scan_ptr.prefetch_depth
+        };
+
+        Ok((scan_ref.as_ref().unwrap(), serialization_concurrency, prefetch_depth))
     },
     result_tuple,
     async {
-        let (scan_ref, serialization_concurrency) = result_tuple;
+        let (scan_ref, serialization_concurrency, prefetch_depth) = result_tuple;
 
         let stream = scan_ref.to_arrow().await?;
 
@@ -157,9 +171,10 @@ export_runtime_op!(
             serialization_concurrency
         );
 
-        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
-            stream: AsyncMutex::new(serialized_stream),
-        })
+        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream::new(
+            serialized_stream,
+            prefetch_depth,
+        ))
     },
     scan: *mut IcebergScan
 );
@@ -237,9 +252,16 @@ pub extern "C" fn iceberg_create_reader(
         scan_ptr.serialization_concurrency
     };
 
+    let prefetch_depth = if scan_ptr.prefetch_depth == 0 {
+        crate::table::DEFAULT_PREFETCH_DEPTH
+    } else {
+        scan_ptr.prefetch_depth
+    };
+
     Box::into_raw(Box::new(crate::IcebergArrowReaderContext {
         reader: builder.build(),
         serialization_concurrency,
+        prefetch_depth,
     }))
 }
 
@@ -289,16 +311,17 @@ export_runtime_op!(
         // Clone the reader — cheap, shares delete-file cache via Arc
         let reader = ctx.reader.clone();
         let serialization_concurrency = ctx.serialization_concurrency;
+        let prefetch_depth = ctx.prefetch_depth;
 
         // Consume the task — caller must NOT call free_task after this
         let task_ref = unsafe { Box::from_raw(task) };
         let file_scan_task = task_ref.task;
 
-        Ok((reader, serialization_concurrency, file_scan_task))
+        Ok((reader, serialization_concurrency, prefetch_depth, file_scan_task))
     },
     result_tuple,
     async {
-        let (reader, serialization_concurrency, file_scan_task) = result_tuple;
+        let (reader, serialization_concurrency, prefetch_depth, file_scan_task) = result_tuple;
 
         // Wrap single task in a one-element stream for ArrowReader::read()
         let task_stream = stream::once(async { Ok(file_scan_task) }).boxed();
@@ -309,9 +332,10 @@ export_runtime_op!(
             serialization_concurrency,
         );
 
-        Ok::<crate::IcebergArrowStream, anyhow::Error>(crate::IcebergArrowStream {
-            stream: AsyncMutex::new(serialized_stream),
-        })
+        Ok::<crate::IcebergArrowStream, anyhow::Error>(crate::IcebergArrowStream::new(
+            serialized_stream,
+            prefetch_depth,
+        ))
     },
     reader_ctx: *mut crate::IcebergArrowReaderContext,
     task: *mut crate::IcebergFileScanTask
