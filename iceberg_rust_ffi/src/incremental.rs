@@ -45,6 +45,8 @@ pub struct IcebergIncrementalScan {
     pub data_file_concurrency_limit: usize,
     /// 0 = use DEFAULT_PREFETCH_DEPTH
     pub prefetch_depth: usize,
+    /// 0 = use DEFAULT_TASK_PREFETCH_DEPTH
+    pub task_prefetch_depth: usize,
 }
 
 unsafe impl Send for IcebergIncrementalScan {}
@@ -132,6 +134,7 @@ pub extern "C" fn iceberg_new_incremental_scan(
         batch_size: 0,
         data_file_concurrency_limit: 0,
         prefetch_depth: 0,
+        task_prefetch_depth: 0,
     }))
 }
 
@@ -267,6 +270,11 @@ export_runtime_op!(
 
 impl_scan_free!(iceberg_free_incremental_scan, IcebergIncrementalScan);
 
+impl_with_task_prefetch_depth!(
+    iceberg_incremental_scan_with_task_prefetch_depth,
+    IcebergIncrementalScan
+);
+
 // ---------------------------------------------------------------------------
 // Split-scan API for incremental scans.
 //
@@ -286,16 +294,25 @@ export_runtime_op!(
         let scan_ptr = unsafe { &*scan };
         let scan_ref = scan_ptr.scan.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Incremental scan not built — call build! first"))?;
-        Ok(scan_ref)
+
+        let task_prefetch_depth = if scan_ptr.task_prefetch_depth == 0 {
+            crate::table::DEFAULT_TASK_PREFETCH_DEPTH
+        } else {
+            scan_ptr.task_prefetch_depth
+        };
+
+        Ok((scan_ref, task_prefetch_depth))
     },
-    scan_ref,
+    result_tuple,
     async {
+        let (scan_ref, task_prefetch_depth) = result_tuple;
         let (appends_stream, deletes_stream) = scan_ref.plan_files().await?;
         Ok::<IcebergIncrementalFileScanTaskStreams, anyhow::Error>(
-            IcebergIncrementalFileScanTaskStreams {
-                appends: AsyncMutex::new(appends_stream),
-                deletes: AsyncMutex::new(deletes_stream),
-            },
+            IcebergIncrementalFileScanTaskStreams::new(
+                appends_stream,
+                deletes_stream,
+                task_prefetch_depth,
+            ),
         )
     },
     scan: *mut IcebergIncrementalScan
@@ -370,11 +387,11 @@ export_runtime_op!(
     },
     streams_ref,
     async {
-        let mut guard = streams_ref.appends.lock().await;
-        match guard.try_next().await {
-            Ok(Some(task)) => Ok(Some(IcebergAppendTask { task })),
-            Ok(None) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Error pulling next append task: {}", e)),
+        let mut rx = streams_ref.appends_rx.lock().await;
+        match rx.recv().await {
+            Some(Ok(task)) => Ok(Some(IcebergAppendTask { task })),
+            Some(Err(e)) => Err(anyhow::anyhow!("Error pulling next append task: {}", e)),
+            None => Ok(None),
         }
     },
     task_streams: *mut IcebergIncrementalFileScanTaskStreams
@@ -393,11 +410,11 @@ export_runtime_op!(
     },
     streams_ref,
     async {
-        let mut guard = streams_ref.deletes.lock().await;
-        match guard.try_next().await {
-            Ok(Some(task)) => Ok(Some(IcebergDeleteTask { task })),
-            Ok(None) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Error pulling next delete task: {}", e)),
+        let mut rx = streams_ref.deletes_rx.lock().await;
+        match rx.recv().await {
+            Some(Ok(task)) => Ok(Some(IcebergDeleteTask { task })),
+            Some(Err(e)) => Err(anyhow::anyhow!("Error pulling next delete task: {}", e)),
+            None => Ok(None),
         }
     },
     task_streams: *mut IcebergIncrementalFileScanTaskStreams

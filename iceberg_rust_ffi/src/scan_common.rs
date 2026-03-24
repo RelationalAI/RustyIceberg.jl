@@ -180,6 +180,22 @@ macro_rules! impl_with_prefetch_depth {
     };
 }
 
+/// Macro to generate with_task_prefetch_depth function for any scan type
+macro_rules! impl_with_task_prefetch_depth {
+    ($fn_name:ident, $scan_type:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type, n: usize) -> CResult {
+            if scan.is_null() || (*scan).is_null() {
+                return CResult::Error;
+            }
+            let mut scan_val = *unsafe { Box::from_raw(*scan) };
+            scan_val.task_prefetch_depth = n;
+            *scan = Box::into_raw(Box::new(scan_val));
+            CResult::Ok
+        }
+    };
+}
+
 // Re-export macros for use in other modules
 pub(crate) use impl_scan_build;
 pub(crate) use impl_scan_builder_method;
@@ -188,3 +204,4 @@ pub(crate) use impl_select_columns;
 pub(crate) use impl_with_batch_size;
 pub(crate) use impl_with_prefetch_depth;
 pub(crate) use impl_with_serialization_concurrency_limit;
+pub(crate) use impl_with_task_prefetch_depth;

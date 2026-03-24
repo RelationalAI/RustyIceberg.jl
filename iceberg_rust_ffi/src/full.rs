@@ -35,8 +35,10 @@ pub struct IcebergScan {
     pub batch_size: usize,
     /// 0 = auto-detect (num_cpus)
     pub data_file_concurrency_limit: usize,
-    /// 0 = use DEFAULT_PREFETCH_DEPTH
+    /// 0 = use DEFAULT_PREFETCH_DEPTH (for batch prefetch)
     pub prefetch_depth: usize,
+    /// 0 = use DEFAULT_TASK_PREFETCH_DEPTH (for task planning prefetch)
+    pub task_prefetch_depth: usize,
 }
 
 unsafe impl Send for IcebergScan {}
@@ -60,6 +62,7 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
         batch_size: 0,
         data_file_concurrency_limit: 0,
         prefetch_depth: 0,
+        task_prefetch_depth: 0,
     }))
 }
 
@@ -117,6 +120,11 @@ impl_with_serialization_concurrency_limit!(
 
 impl_with_prefetch_depth!(
     iceberg_scan_with_prefetch_depth,
+    IcebergScan
+);
+
+impl_with_task_prefetch_depth!(
+    iceberg_scan_with_task_prefetch_depth,
     IcebergScan
 );
 
@@ -201,14 +209,22 @@ export_runtime_op!(
         let scan_ptr = unsafe { &*scan };
         let scan_ref = scan_ptr.scan.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Scan not built — call build! first"))?;
-        Ok(scan_ref)
+
+        let task_prefetch_depth = if scan_ptr.task_prefetch_depth == 0 {
+            crate::table::DEFAULT_TASK_PREFETCH_DEPTH
+        } else {
+            scan_ptr.task_prefetch_depth
+        };
+
+        Ok((scan_ref, task_prefetch_depth))
     },
-    scan_ref,
+    result_tuple,
     async {
+        let (scan_ref, task_prefetch_depth) = result_tuple;
         let stream = scan_ref.plan_files().await?;
-        Ok::<crate::IcebergFileScanTaskStream, anyhow::Error>(crate::IcebergFileScanTaskStream {
-            stream: AsyncMutex::new(stream),
-        })
+        Ok::<crate::IcebergFileScanTaskStream, anyhow::Error>(
+            crate::IcebergFileScanTaskStream::new(stream, task_prefetch_depth)
+        )
     },
     scan: *mut IcebergScan
 );
@@ -291,12 +307,11 @@ export_runtime_op!(
     },
     stream_ref,
     async {
-        let mut guard = stream_ref.stream.lock().await;
-        match guard.try_next().await {
-            Ok(Some(task)) => Ok(Some(crate::IcebergFileScanTask { task })),
-            Ok(None) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Error pulling next task: {}", e)),
-        }
+        let result: Result<Option<crate::IcebergFileScanTask>, anyhow::Error> = match stream_ref.next().await? {
+            Some(task) => Ok(Some(crate::IcebergFileScanTask { task })),
+            None => Ok(None),
+        };
+        result
     },
     task_stream: *mut crate::IcebergFileScanTaskStream
 );

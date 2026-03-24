@@ -31,6 +31,11 @@ pub struct IcebergTable {
 /// of how fast Julia pulls batches, while bounding memory usage.
 pub(crate) const DEFAULT_PREFETCH_DEPTH: usize = 8;
 
+/// Default number of file scan tasks buffered ahead of the consumer.
+/// Only a few tasks need to be planned ahead — task planning is cheap compared
+/// to reading/serializing batches.
+pub(crate) const DEFAULT_TASK_PREFETCH_DEPTH: usize = 4;
+
 /// Stream wrapper for FFI — eagerly drains serialized batches into a bounded
 /// channel so the producer runs independently of the Julia consumer.
 ///
@@ -132,13 +137,56 @@ pub struct IcebergArrowReaderContext {
 
 unsafe impl Send for IcebergArrowReaderContext {}
 
-/// File scan task stream for full scans, wrapped in AsyncMutex for
-/// concurrent pulling by multiple consumers.
+/// File scan task stream for full scans — eagerly drains planned tasks into
+/// a bounded channel so task planning runs ahead of Julia's consumption.
 pub struct IcebergFileScanTaskStream {
-    pub stream: AsyncMutex<FileScanTaskStream>,
+    receiver: AsyncMutex<tokio::sync::mpsc::Receiver<Result<FileScanTask, iceberg::Error>>>,
+    producer_handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 unsafe impl Send for IcebergFileScanTaskStream {}
+
+impl IcebergFileScanTaskStream {
+    pub fn new(stream: FileScanTaskStream, prefetch_depth: usize) -> Self {
+        use futures::StreamExt;
+        let (tx, rx) = tokio::sync::mpsc::channel(prefetch_depth);
+        let handle = tokio::spawn(async move {
+            futures::pin_mut!(stream);
+            while let Some(item) = stream.next().await {
+                let is_err = item.is_err();
+                if tx.send(item).await.is_err() {
+                    break;
+                }
+                if is_err {
+                    break;
+                }
+            }
+        });
+        Self {
+            receiver: AsyncMutex::new(rx),
+            producer_handle: AsyncMutex::new(Some(handle)),
+        }
+    }
+
+    pub async fn next(&self) -> Result<Option<FileScanTask>, anyhow::Error> {
+        let mut rx = self.receiver.lock().await;
+        match rx.recv().await {
+            Some(Ok(task)) => Ok(Some(task)),
+            Some(Err(e)) => Err(anyhow::anyhow!("Task planning error: {}", e)),
+            None => {
+                let mut handle_guard = self.producer_handle.lock().await;
+                if let Some(handle) = handle_guard.take() {
+                    match handle.await {
+                        Ok(()) => Ok(None),
+                        Err(e) => Err(anyhow::anyhow!("Task planner panicked: {}", e)),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
 
 /// A single file scan task pulled from the stream (full scan).
 pub struct IcebergFileScanTask {
@@ -147,17 +195,54 @@ pub struct IcebergFileScanTask {
 
 unsafe impl Send for IcebergFileScanTask {}
 
-/// Incremental file scan task streams (appends + deletes), each wrapped
-/// in AsyncMutex for concurrent pulling.
+/// Incremental file scan task streams (appends + deletes) — each eagerly
+/// drained into a bounded channel for prefetching.
 pub struct IcebergIncrementalFileScanTaskStreams {
-    pub appends: AsyncMutex<
-        futures::stream::BoxStream<'static, Result<AppendedFileScanTask, iceberg::Error>>,
-    >,
-    pub deletes:
-        AsyncMutex<futures::stream::BoxStream<'static, Result<DeleteScanTask, iceberg::Error>>>,
+    pub appends_rx: AsyncMutex<tokio::sync::mpsc::Receiver<Result<AppendedFileScanTask, iceberg::Error>>>,
+    pub deletes_rx: AsyncMutex<tokio::sync::mpsc::Receiver<Result<DeleteScanTask, iceberg::Error>>>,
+    _appends_handle: tokio::task::JoinHandle<()>,
+    _deletes_handle: tokio::task::JoinHandle<()>,
 }
 
 unsafe impl Send for IcebergIncrementalFileScanTaskStreams {}
+
+impl IcebergIncrementalFileScanTaskStreams {
+    pub fn new(
+        appends_stream: futures::stream::BoxStream<'static, Result<AppendedFileScanTask, iceberg::Error>>,
+        deletes_stream: futures::stream::BoxStream<'static, Result<DeleteScanTask, iceberg::Error>>,
+        prefetch_depth: usize,
+    ) -> Self {
+        use futures::StreamExt;
+
+        let (atx, arx) = tokio::sync::mpsc::channel(prefetch_depth);
+        let appends_handle = tokio::spawn(async move {
+            futures::pin_mut!(appends_stream);
+            while let Some(item) = appends_stream.next().await {
+                let is_err = item.is_err();
+                if atx.send(item).await.is_err() { break; }
+                if is_err { break; }
+            }
+        });
+
+        // TODO @vustef: I'm not sure, but why don't we use the existing concurrency limits?
+        let (dtx, drx) = tokio::sync::mpsc::channel(prefetch_depth);
+        let deletes_handle = tokio::spawn(async move {
+            futures::pin_mut!(deletes_stream);
+            while let Some(item) = deletes_stream.next().await {
+                let is_err = item.is_err();
+                if dtx.send(item).await.is_err() { break; }
+                if is_err { break; }
+            }
+        });
+
+        Self {
+            appends_rx: AsyncMutex::new(arx),
+            deletes_rx: AsyncMutex::new(drx),
+            _appends_handle: appends_handle,
+            _deletes_handle: deletes_handle,
+        }
+    }
+}
 
 /// A single appended file scan task pulled from the incremental stream.
 pub struct IcebergAppendTask {
