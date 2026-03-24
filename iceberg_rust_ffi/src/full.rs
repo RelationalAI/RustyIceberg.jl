@@ -220,9 +220,13 @@ export_runtime_op!(
 ///
 /// For full scans, row_group_filtering is enabled and row_selection is
 /// disabled, matching the defaults in TableScan::to_arrow().
+/// `reader_concurrency`: data-file concurrency for the reader (0 = use scan default).
+/// This overrides the scan-level `data_file_concurrency_limit` when set,
+/// allowing the per-task reader to use a different parallelism than the scan planner.
 #[no_mangle]
 pub extern "C" fn iceberg_create_reader(
     scan: *mut IcebergScan,
+    reader_concurrency: usize,
 ) -> *mut crate::IcebergArrowReaderContext {
     if scan.is_null() {
         return std::ptr::null_mut();
@@ -237,8 +241,14 @@ pub extern "C" fn iceberg_create_reader(
         .with_row_group_filtering_enabled(true)
         .with_row_selection_enabled(false);
 
-    if scan_ptr.data_file_concurrency_limit > 0 {
-        builder = builder.with_data_file_concurrency_limit(scan_ptr.data_file_concurrency_limit);
+    // reader_concurrency > 0 overrides the scan-level setting
+    let data_file_concurrency = if reader_concurrency > 0 {
+        reader_concurrency
+    } else {
+        scan_ptr.data_file_concurrency_limit
+    };
+    if data_file_concurrency > 0 {
+        builder = builder.with_data_file_concurrency_limit(data_file_concurrency);
     }
     if scan_ptr.batch_size > 0 {
         builder = builder.with_batch_size(scan_ptr.batch_size);

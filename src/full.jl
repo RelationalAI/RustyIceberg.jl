@@ -368,14 +368,22 @@ function plan_files(scan::Scan)
 end
 
 """
-    create_reader(scan::Scan)::ArrowReaderContext
+    create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))::ArrowReaderContext
 
 Create a shared reader context from the scan's configuration.
 Pass this to every `read_task` call. The internal ArrowReader is cloned
 per call, sharing the delete-file cache across consumers.
+
+`reader_concurrency` sets the data-file concurrency for the reader (how many
+files the reader can process in parallel within a single `read_task` call).
+- `0`: Use the scan-level `data_file_concurrency_limit` (default)
+- `> 0`: Override with this value
 """
-function create_reader(scan::Scan)
-    ptr = @ccall rust_lib.iceberg_create_reader(scan.ptr::Ptr{Cvoid})::Ptr{Cvoid}
+function create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))
+    ptr = @ccall rust_lib.iceberg_create_reader(
+        scan.ptr::Ptr{Cvoid},
+        reader_concurrency::Csize_t,
+    )::Ptr{Cvoid}
     if ptr == C_NULL
         throw(IcebergException("Failed to create reader from scan"))
     end

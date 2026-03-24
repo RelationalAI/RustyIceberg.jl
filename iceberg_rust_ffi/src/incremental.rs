@@ -305,9 +305,11 @@ export_runtime_op!(
 ///
 /// For incremental scans, both row_group_filtering and row_selection are
 /// enabled (matching IncrementalTableScan::to_unzipped_arrow()).
+/// `reader_concurrency`: data-file concurrency for the reader (0 = use scan default).
 #[no_mangle]
 pub extern "C" fn iceberg_create_incremental_reader(
     scan: *mut IcebergIncrementalScan,
+    reader_concurrency: usize,
 ) -> *mut IcebergArrowReaderContext {
     if scan.is_null() {
         return std::ptr::null_mut();
@@ -322,8 +324,13 @@ pub extern "C" fn iceberg_create_incremental_reader(
         .with_row_group_filtering_enabled(true)
         .with_row_selection_enabled(true);
 
-    if scan_ptr.data_file_concurrency_limit > 0 {
-        builder = builder.with_data_file_concurrency_limit(scan_ptr.data_file_concurrency_limit);
+    let data_file_concurrency = if reader_concurrency > 0 {
+        reader_concurrency
+    } else {
+        scan_ptr.data_file_concurrency_limit
+    };
+    if data_file_concurrency > 0 {
+        builder = builder.with_data_file_concurrency_limit(data_file_concurrency);
     }
     if scan_ptr.batch_size > 0 {
         builder = builder.with_batch_size(scan_ptr.batch_size);

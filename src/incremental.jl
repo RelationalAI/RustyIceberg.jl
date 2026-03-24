@@ -364,12 +364,19 @@ function plan_files(scan::IncrementalScan)
 end
 
 """
-    create_reader(scan::IncrementalScan)::ArrowReaderContext
+    create_reader(scan::IncrementalScan; reader_concurrency::UInt=UInt(0))::ArrowReaderContext
 
 Create a shared reader context from the incremental scan's configuration.
+
+`reader_concurrency` sets the data-file concurrency for the reader.
+- `0`: Use the scan-level `data_file_concurrency_limit` (default)
+- `> 0`: Override with this value
 """
-function create_reader(scan::IncrementalScan)
-    ptr = @ccall rust_lib.iceberg_create_incremental_reader(scan.ptr::Ptr{Cvoid})::Ptr{Cvoid}
+function create_reader(scan::IncrementalScan; reader_concurrency::UInt=UInt(0))
+    ptr = @ccall rust_lib.iceberg_create_incremental_reader(
+        scan.ptr::Ptr{Cvoid},
+        reader_concurrency::Csize_t,
+    )::Ptr{Cvoid}
     if ptr == C_NULL
         throw(IcebergException("Failed to create reader from incremental scan"))
     end
