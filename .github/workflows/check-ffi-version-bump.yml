@@ -1,0 +1,43 @@
+name: Check FFI Version Bump
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if FFI version was bumped
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+
+          # Check if any source files or Cargo.toml changed
+          CHANGED=$(git diff --name-only "$BASE_SHA" HEAD -- iceberg_rust_ffi/src/ iceberg_rust_ffi/Cargo.toml)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No FFI source changes detected, skipping version check."
+            exit 0
+          fi
+
+          echo "FFI source changes detected:"
+          echo "$CHANGED"
+
+          # Extract versions
+          BASE_VERSION=$(git show "$BASE_SHA:iceberg_rust_ffi/Cargo.toml" | grep '^version' | head -1 | sed 's/version = "\(.*\)"/\1/')
+          HEAD_VERSION=$(grep '^version' iceberg_rust_ffi/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+
+          echo "Base version: $BASE_VERSION"
+          echo "Head version: $HEAD_VERSION"
+
+          if [ "$BASE_VERSION" = "$HEAD_VERSION" ]; then
+            echo "ERROR: iceberg_rust_ffi was changed but the version in iceberg_rust_ffi/Cargo.toml was not bumped."
+            echo "Please update the version field in iceberg_rust_ffi/Cargo.toml."
+            exit 1
+          fi
+
+          echo "Version bumped from $BASE_VERSION to $HEAD_VERSION."
