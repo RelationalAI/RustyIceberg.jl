@@ -169,7 +169,10 @@ According to the Iceberg specification:
 - `IcebergString()` → `String`
 - `IcebergUuid()` → `NTuple{16, UInt8}` - 16-byte UUID representation
 - `IcebergBinary()` → `Vector{UInt8}` - variable-length byte array
-- `IcebergDecimal(p,s)` → `Arrow.Decimal{p, s, Int128}` - Arrow decimal type with the given precision and scale
+- `IcebergDecimal(p,s)` → `Int32` (if p ≤ 9), `Int64` (if p ≤ 18), or `NTuple{16, UInt8}` (if p > 18)
+
+  Note: these are the physical storage types used by the `write_columns` API. The Arrow IPC
+  `write` path does not support decimal columns via this mapping.
 
 # Example
 
@@ -181,7 +184,7 @@ arrow_type = iceberg_type_to_arrow_type(IcebergDate())
 # Returns Date type
 
 arrow_type = iceberg_type_to_arrow_type(IcebergDecimal(38, 18))
-# Returns Arrow.Decimal{38, 18, Int128}
+# Returns NTuple{16, UInt8}
 ```
 """
 iceberg_type_to_arrow_type(::IcebergBoolean) = Bool
@@ -198,7 +201,15 @@ iceberg_type_to_arrow_type(::IcebergTimestamptzNs) = Arrow.Timestamp{Arrow.Flatb
 iceberg_type_to_arrow_type(::IcebergString) = String
 iceberg_type_to_arrow_type(::IcebergUuid) = NTuple{16, UInt8}
 iceberg_type_to_arrow_type(::IcebergBinary) = Vector{UInt8}
-iceberg_type_to_arrow_type(d::IcebergDecimal) = Arrow.Decimal{d.precision, d.scale, Int128}
+function iceberg_type_to_arrow_type(d::IcebergDecimal)
+    if d.precision <= 9
+        return Int32
+    elseif d.precision <= 18
+        return Int64
+    else
+        return NTuple{16, UInt8}
+    end
+end
 
 # String-based version for backwards compatibility and parsing JSON schemas
 iceberg_type_to_arrow_type(s::AbstractString) = iceberg_type_to_arrow_type(_string_to_iceberg_type(s))
