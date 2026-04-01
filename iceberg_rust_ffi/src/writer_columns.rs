@@ -7,10 +7,14 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use arrow_array::{
-    types::{Date32Type, Float32Type, Float64Type, Int32Type, Int64Type, TimestampMicrosecondType},
+    types::{
+        Date32Type, Decimal128Type, Float32Type, Float64Type, Int32Type, Int64Type,
+        TimestampMicrosecondType,
+    },
     ArrayRef, BooleanArray, PrimitiveArray, RecordBatch, StringArray,
 };
 use arrow_buffer::{BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
+use arrow_schema::DataType;
 
 use crate::writer::IcebergDataFileWriter;
 use iceberg::writer::IcebergWriter;
@@ -29,6 +33,12 @@ pub const COLUMN_TYPE_TIMESTAMP: i32 = 6;
 pub const COLUMN_TYPE_BOOLEAN: i32 = 7;
 pub const COLUMN_TYPE_UUID: i32 = 8;
 pub const COLUMN_TYPE_TIMESTAMPTZ: i32 = 9;
+/// Decimal backed by Int32 (precision ≤ 9): data is i32[] scaled integers
+pub const COLUMN_TYPE_DECIMAL_INT32: i32 = 10;
+/// Decimal backed by Int64 (precision ≤ 18): data is i64[] scaled integers
+pub const COLUMN_TYPE_DECIMAL_INT64: i32 = 11;
+/// Decimal backed by 16-byte LE (precision > 18): data is u8[] in 16-byte chunks
+pub const COLUMN_TYPE_DECIMAL_BYTES: i32 = 12;
 
 /// Descriptor for a single column passed from Julia
 #[repr(C)]
@@ -55,8 +65,12 @@ pub struct ColumnDescriptor {
 unsafe impl Send for ColumnDescriptor {}
 unsafe impl Sync for ColumnDescriptor {}
 
-/// Build an Arrow array from a ColumnDescriptor
-unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow::Error> {
+/// Build an Arrow array from a ColumnDescriptor and its corresponding schema field.
+/// The schema field is used to extract precision/scale for decimal columns.
+unsafe fn build_arrow_array(
+    desc: &ColumnDescriptor,
+    schema_field: &arrow_schema::Field,
+) -> Result<ArrayRef, anyhow::Error> {
     let null_buffer = if desc.is_nullable && !desc.validity_ptr.is_null() {
         // Julia's BitVector stores bits packed in UInt64 chunks, which we can use directly
         // since Arrow also uses little-endian bit-packed format.
@@ -177,6 +191,52 @@ unsafe fn build_arrow_array(desc: &ColumnDescriptor) -> Result<ArrayRef, anyhow:
                     .map_err(|e| anyhow::anyhow!("Failed to create UUID array: {}", e))?,
             )
         }
+        COLUMN_TYPE_DECIMAL_INT32 | COLUMN_TYPE_DECIMAL_INT64 | COLUMN_TYPE_DECIMAL_BYTES => {
+            // All decimal variants map to Arrow Decimal128. Precision and scale come from
+            // the schema field (set when the Iceberg table was created).
+            let (precision, scale) = match schema_field.data_type() {
+                DataType::Decimal128(p, s) => (*p, *s),
+                dt => {
+                    return Err(anyhow::anyhow!(
+                        "Expected Decimal128 schema field for decimal column, got {:?}",
+                        dt
+                    ))
+                }
+            };
+
+            // Convert the backing integer representation to i128 values
+            let i128_values: Vec<i128> = match desc.column_type {
+                COLUMN_TYPE_DECIMAL_INT32 => {
+                    let data =
+                        std::slice::from_raw_parts(desc.data_ptr as *const i32, desc.num_rows);
+                    data.iter().map(|&v| v as i128).collect()
+                }
+                COLUMN_TYPE_DECIMAL_INT64 => {
+                    let data =
+                        std::slice::from_raw_parts(desc.data_ptr as *const i64, desc.num_rows);
+                    data.iter().map(|&v| v as i128).collect()
+                }
+                _ => {
+                    // COLUMN_TYPE_DECIMAL_BYTES: 16-byte little-endian i128 per value
+                    let data =
+                        std::slice::from_raw_parts(desc.data_ptr as *const u8, desc.num_rows * 16);
+                    data.chunks(16)
+                        .map(|chunk| {
+                            let mut bytes = [0u8; 16];
+                            bytes.copy_from_slice(chunk);
+                            i128::from_le_bytes(bytes)
+                        })
+                        .collect()
+                }
+            };
+
+            let buffer = ScalarBuffer::<i128>::from(i128_values);
+            Arc::new(
+                PrimitiveArray::<Decimal128Type>::new(buffer, null_buffer)
+                    .with_precision_and_scale(precision, scale)
+                    .map_err(|e| anyhow::anyhow!("Failed to set decimal precision/scale: {}", e))?,
+            )
+        }
         _ => {
             return Err(anyhow::anyhow!("Unknown column type: {}", desc.column_type));
         }
@@ -233,8 +293,9 @@ export_runtime_op!(
         // Build Arrow arrays from column descriptors
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(cols.len());
 
-        for desc in cols.iter() {
-            let array = unsafe { build_arrow_array(desc)? };
+        for (i, desc) in cols.iter().enumerate() {
+            let schema_field = arrow_schema.field(i);
+            let array = unsafe { build_arrow_array(desc, schema_field)? };
             arrays.push(array);
         }
 

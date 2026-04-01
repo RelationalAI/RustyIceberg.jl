@@ -462,6 +462,9 @@ Enum for column data types, matching the Rust FFI constants.
     COLUMN_TYPE_BOOLEAN = 7
     COLUMN_TYPE_UUID = 8
     COLUMN_TYPE_TIMESTAMPTZ = 9    # Timestamp with UTC timezone (Iceberg `timestamptz`)
+    COLUMN_TYPE_DECIMAL_INT32 = 10 # Decimal backed by Int32 (precision ≤ 9)
+    COLUMN_TYPE_DECIMAL_INT64 = 11 # Decimal backed by Int64 (precision ≤ 18)
+    COLUMN_TYPE_DECIMAL_BYTES = 12 # Decimal backed by 16-byte LE (precision > 18)
 end
 
 """
@@ -532,6 +535,15 @@ iceberg_column_type(::IcebergTimestamp) = COLUMN_TYPE_TIMESTAMP
 iceberg_column_type(::IcebergTimestamptz) = COLUMN_TYPE_TIMESTAMPTZ
 iceberg_column_type(::IcebergBoolean) = COLUMN_TYPE_BOOLEAN
 iceberg_column_type(::IcebergUuid) = COLUMN_TYPE_UUID
+function iceberg_column_type(d::IcebergDecimal)
+    if d.precision <= 9
+        return COLUMN_TYPE_DECIMAL_INT32
+    elseif d.precision <= 18
+        return COLUMN_TYPE_DECIMAL_INT64
+    else
+        return COLUMN_TYPE_DECIMAL_BYTES
+    end
+end
 
 """
     ColumnBatch

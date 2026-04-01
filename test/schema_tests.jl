@@ -286,13 +286,13 @@ end
         @test iceberg_type_to_arrow_type(IcebergUuid()) == NTuple{16, UInt8}
         @test iceberg_type_to_arrow_type(IcebergBinary()) == Vector{UInt8}
 
-        # Decimal types with different precisions
-        @test iceberg_type_to_arrow_type(IcebergDecimal(5, 2)) == Int32
-        @test iceberg_type_to_arrow_type(IcebergDecimal(9, 0)) == Int32
-        @test iceberg_type_to_arrow_type(IcebergDecimal(15, 4)) == Int64
-        @test iceberg_type_to_arrow_type(IcebergDecimal(18, 6)) == Int64
-        @test iceberg_type_to_arrow_type(IcebergDecimal(25, 10)) == NTuple{16, UInt8}
-        @test iceberg_type_to_arrow_type(IcebergDecimal(38, 18)) == NTuple{16, UInt8}
+        # Decimal types — all map to Arrow.Decimal{P, S, Int128} regardless of precision
+        @test iceberg_type_to_arrow_type(IcebergDecimal(5, 2)) == Arrow.Decimal{5, 2, Int128}
+        @test iceberg_type_to_arrow_type(IcebergDecimal(9, 0)) == Arrow.Decimal{9, 0, Int128}
+        @test iceberg_type_to_arrow_type(IcebergDecimal(15, 4)) == Arrow.Decimal{15, 4, Int128}
+        @test iceberg_type_to_arrow_type(IcebergDecimal(18, 6)) == Arrow.Decimal{18, 6, Int128}
+        @test iceberg_type_to_arrow_type(IcebergDecimal(25, 10)) == Arrow.Decimal{25, 10, Int128}
+        @test iceberg_type_to_arrow_type(IcebergDecimal(38, 18)) == Arrow.Decimal{38, 18, Int128}
     end
 
     @testset "iceberg_type_to_arrow_type with strings (backwards compatibility)" begin
@@ -304,7 +304,7 @@ end
         @test iceberg_type_to_arrow_type("string") == String
         @test iceberg_type_to_arrow_type("date") == Dates.Date
         @test iceberg_type_to_arrow_type("timestamp") == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
-        @test iceberg_type_to_arrow_type("decimal(38,18)") == NTuple{16, UInt8}
+        @test iceberg_type_to_arrow_type("decimal(38,18)") == Arrow.Decimal{38, 18, Int128}
     end
 
     @testset "arrow_type with nullable fields" begin

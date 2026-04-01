@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "iceberg_rust_ffi"
-version = "0.7.14"
+version = "0.7.15"
 dependencies = [
  "anyhow",
  "arrow-array",
