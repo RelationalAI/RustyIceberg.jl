@@ -941,12 +941,6 @@ end
         @test table != C_NULL
         println("✅ Test table created: $table_name")
 
-        # Helper: convert Int128 to NTuple{16,UInt8} in little-endian byte order
-        function to_decimal_bytes(v::Int128)
-            u = reinterpret(UInt128, v)
-            return ntuple(i -> UInt8((u >> (8 * (i - 1))) & 0xff), Val(16))
-        end
-
         col_ids = Int64[1, 2, 3]
 
         # DECIMAL(9, 2): values 123.45, -67.89, 0.01
@@ -957,16 +951,15 @@ end
         # Physical: Int64 scaled by 10^5
         col_volumes = Int64[12345678, -9999999, 100000]
 
-        # DECIMAL(38, 10): values using large Int128 scaled by 10^10
-        raw_balance_vals = [Int128(12345678901234567890), Int128(-999999999999), Int128(1)]
-        col_balances = [to_decimal_bytes(v) for v in raw_balance_vals]
+        # DECIMAL(38, 10): values using Int128 scaled by 10^10
+        col_balances = Int128[12345678901234567890, -999999999999, 1]
 
         data_files = RustyIceberg.with_data_file_writer(table) do writer
             batch = RustyIceberg.ColumnBatch()
             push!(batch, col_ids)
             push!(batch, col_prices;   column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT32)
             push!(batch, col_volumes;  column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT64)
-            push!(batch, col_balances; column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_BYTES)
+            push!(batch, col_balances; column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT128)
             RustyIceberg.write_columns(writer, batch)
             println("✅ Decimal data written via write_columns")
         end
