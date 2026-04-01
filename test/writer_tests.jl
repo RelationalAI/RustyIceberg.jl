@@ -926,9 +926,9 @@ end
         println("✅ Test namespace created: $test_namespace")
 
         # Three decimal columns covering all backing types:
-        #   price:   DECIMAL(9, 2)  → COLUMN_TYPE_DECIMAL_INT32 (Int32 data)
-        #   volume:  DECIMAL(18, 5) → COLUMN_TYPE_DECIMAL_INT64 (Int64 data)
-        #   balance: DECIMAL(38, 10) → COLUMN_TYPE_DECIMAL_BYTES (NTuple{16,UInt8} data)
+        #   price:   DECIMAL(9, 2)  → COLUMN_TYPE_DECIMAL_INT32  (Int32 data)
+        #   volume:  DECIMAL(18, 5) → COLUMN_TYPE_DECIMAL_INT64  (Int64 data)
+        #   balance: DECIMAL(38, 10) → COLUMN_TYPE_DECIMAL_INT128 (Int128 data)
         schema = Schema([
             Field(Int32(1), "id",      IcebergLong();           required=true),
             Field(Int32(2), "price",   IcebergDecimal(9, 2);    required=true),
