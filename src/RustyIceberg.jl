@@ -37,6 +37,7 @@ export WriterConfig, CompressionCodec, UNCOMPRESSED, SNAPPY, GZIP, LZ4, ZSTD
 export ColumnDescriptor, ColumnType
 export COLUMN_TYPE_INT32, COLUMN_TYPE_INT64, COLUMN_TYPE_FLOAT32, COLUMN_TYPE_FLOAT64
 export COLUMN_TYPE_STRING, COLUMN_TYPE_DATE, COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMPTZ, COLUMN_TYPE_BOOLEAN, COLUMN_TYPE_UUID
+export COLUMN_TYPE_DECIMAL_INT32, COLUMN_TYPE_DECIMAL_INT64, COLUMN_TYPE_DECIMAL_INT128
 export julia_type_to_column_type
 
 # Always use the JLL library - override via Preferences if needed for local development
