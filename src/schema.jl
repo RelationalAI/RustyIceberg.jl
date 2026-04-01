@@ -169,7 +169,7 @@ According to the Iceberg specification:
 - `IcebergString()` → `String`
 - `IcebergUuid()` → `NTuple{16, UInt8}` - 16-byte UUID representation
 - `IcebergBinary()` → `Vector{UInt8}` - variable-length byte array
-- `IcebergDecimal(p,s)` → `Int32` (if p ≤ 9), `Int64` (if p ≤ 18), or `NTuple{16, UInt8}` (if p > 18)
+- `IcebergDecimal(p,s)` → `Int32` (if p ≤ 9), `Int64` (if p ≤ 18), or `Int128` (if p > 18)
 
   Note: these are the physical storage types used by the `write_columns` API. The Arrow IPC
   `write` path does not support decimal columns via this mapping.
@@ -184,7 +184,7 @@ arrow_type = iceberg_type_to_arrow_type(IcebergDate())
 # Returns Date type
 
 arrow_type = iceberg_type_to_arrow_type(IcebergDecimal(38, 18))
-# Returns NTuple{16, UInt8}
+# Returns Int128
 ```
 """
 iceberg_type_to_arrow_type(::IcebergBoolean) = Bool
@@ -207,7 +207,7 @@ function iceberg_type_to_arrow_type(d::IcebergDecimal)
     elseif d.precision <= 18
         return Int64
     else
-        return NTuple{16, UInt8}
+        return Int128
     end
 end
 
