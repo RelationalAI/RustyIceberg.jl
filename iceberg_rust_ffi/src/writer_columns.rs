@@ -37,8 +37,8 @@ pub const COLUMN_TYPE_TIMESTAMPTZ: i32 = 9;
 pub const COLUMN_TYPE_DECIMAL_INT32: i32 = 10;
 /// Decimal backed by Int64 (precision ≤ 18): data is i64[] scaled integers
 pub const COLUMN_TYPE_DECIMAL_INT64: i32 = 11;
-/// Decimal backed by 16-byte LE (precision > 18): data is u8[] in 16-byte chunks
-pub const COLUMN_TYPE_DECIMAL_BYTES: i32 = 12;
+/// Decimal backed by Int128 (precision > 18): data is i128[] scaled integers
+pub const COLUMN_TYPE_DECIMAL_INT128: i32 = 12;
 
 /// Descriptor for a single column passed from Julia
 #[repr(C)]
@@ -191,7 +191,7 @@ unsafe fn build_arrow_array(
                     .map_err(|e| anyhow::anyhow!("Failed to create UUID array: {}", e))?,
             )
         }
-        COLUMN_TYPE_DECIMAL_INT32 | COLUMN_TYPE_DECIMAL_INT64 | COLUMN_TYPE_DECIMAL_BYTES => {
+        COLUMN_TYPE_DECIMAL_INT32 | COLUMN_TYPE_DECIMAL_INT64 | COLUMN_TYPE_DECIMAL_INT128 => {
             // All decimal variants map to Arrow Decimal128. Precision and scale come from
             // the schema field (set when the Iceberg table was created).
             let (precision, scale) = match schema_field.data_type() {
@@ -217,16 +217,11 @@ unsafe fn build_arrow_array(
                     data.iter().map(|&v| v as i128).collect()
                 }
                 _ => {
-                    // COLUMN_TYPE_DECIMAL_BYTES: 16-byte little-endian i128 per value
+                    // COLUMN_TYPE_DECIMAL_INT128: Julia Int128 and Rust i128 share the same
+                    // 16-byte little-endian layout on all supported platforms.
                     let data =
-                        std::slice::from_raw_parts(desc.data_ptr as *const u8, desc.num_rows * 16);
-                    data.chunks(16)
-                        .map(|chunk| {
-                            let mut bytes = [0u8; 16];
-                            bytes.copy_from_slice(chunk);
-                            i128::from_le_bytes(bytes)
-                        })
-                        .collect()
+                        std::slice::from_raw_parts(desc.data_ptr as *const i128, desc.num_rows);
+                    data.to_vec()
                 }
             };
 
