@@ -1,4 +1,4 @@
-use crate::response::IcebergBoxedResponse;
+use crate::response::{IcebergBoxedResponse, IcebergFileRowCountResponse};
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
 use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
@@ -263,5 +263,52 @@ pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char 
             Err(_) => ptr::null_mut(),
         },
         Err(_) => ptr::null_mut(),
+    }
+}
+
+// Get per-file row counts for the current snapshot via plan_files()
+export_runtime_op!(
+    iceberg_table_file_row_counts,
+    IcebergFileRowCountResponse,
+    || {
+        let table_ref = unsafe { &*table };
+        let scan = table_ref.table.scan().build()?;
+        Ok(scan)
+    },
+    scan,
+    async {
+        use futures::TryStreamExt;
+        let mut stream = scan.plan_files().await?;
+        let mut result: Vec<(String, i64)> = Vec::new();
+        while let Some(task) = stream.try_next().await? {
+            let count = task.record_count.unwrap_or(0) as i64;
+            result.push((task.data_file_path().to_string(), count));
+        }
+        Ok::<Vec<(String, i64)>, anyhow::Error>(result)
+    },
+    table: *mut IcebergTable
+);
+
+/// Free the memory allocated by iceberg_table_file_row_counts
+#[no_mangle]
+pub extern "C" fn iceberg_file_row_counts_free(
+    paths: *mut *mut std::ffi::c_char,
+    counts: *mut i64,
+    count: usize,
+) {
+    if !paths.is_null() {
+        unsafe {
+            let paths_slice = Box::from_raw(std::slice::from_raw_parts_mut(paths, count));
+            for path in paths_slice.iter() {
+                if !path.is_null() {
+                    let _ = std::ffi::CString::from_raw(*path);
+                }
+            }
+        }
+    }
+    if !counts.is_null() {
+        unsafe {
+            let _ = Box::from_raw(std::slice::from_raw_parts_mut(counts, count));
+        }
     }
 }

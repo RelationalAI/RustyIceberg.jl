@@ -116,6 +116,63 @@ impl RawResponse for IcebergStringListResponse {
     }
 }
 
+/// Response type for file row count operations (parallel arrays of paths and counts)
+#[repr(C)]
+pub struct IcebergFileRowCountResponse {
+    pub result: CResult,
+    pub paths: *mut *mut c_char,
+    pub counts: *mut i64,
+    pub count: usize,
+    pub error_message: *mut c_char,
+    pub context: *const Context,
+}
+
+unsafe impl Send for IcebergFileRowCountResponse {}
+
+impl RawResponse for IcebergFileRowCountResponse {
+    type Payload = Vec<(String, i64)>;
+
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.result
+    }
+
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.context
+    }
+
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.error_message
+    }
+
+    fn set_payload(&mut self, payload: Option<Self::Payload>) {
+        match payload {
+            Some(items) => {
+                let mut paths: Vec<*mut c_char> = Vec::with_capacity(items.len());
+                let mut counts: Vec<i64> = Vec::with_capacity(items.len());
+                for (path, count) in items {
+                    let c_string = std::ffi::CString::new(path).unwrap_or_default();
+                    paths.push(c_string.into_raw());
+                    counts.push(count);
+                }
+                self.count = paths.len();
+                // Use boxed slices so the pointer points directly to the array data,
+                // not to a Vec struct. This allows Julia to index the arrays directly.
+                let mut paths_slice = paths.into_boxed_slice();
+                let mut counts_slice = counts.into_boxed_slice();
+                self.paths = paths_slice.as_mut_ptr();
+                self.counts = counts_slice.as_mut_ptr();
+                std::mem::forget(paths_slice);
+                std::mem::forget(counts_slice);
+            }
+            None => {
+                self.paths = ptr::null_mut();
+                self.counts = ptr::null_mut();
+                self.count = 0;
+            }
+        }
+    }
+}
+
 /// Response type for nested string list operations (for namespace lists)
 #[repr(C)]
 pub struct IcebergNestedStringListResponse {
