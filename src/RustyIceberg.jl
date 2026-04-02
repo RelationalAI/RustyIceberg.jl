@@ -13,7 +13,7 @@ export init_runtime
 export IcebergException
 export new_incremental_scan, free_incremental_scan!
 export table_open, free_table, new_scan, free_scan!
-export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_schema
+export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_schema, table_file_row_counts
 export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
 export with_file_column!, with_pos_column!
 export scan!, next_batch, free_batch, free_stream
@@ -503,6 +503,54 @@ function table_schema(table::Table)
     end
     result = unsafe_string(ptr)
     @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
+    return result
+end
+
+mutable struct FileRowCountResponse
+    result::Cint
+    paths::Ptr{Ptr{Cchar}}
+    counts::Ptr{Int64}
+    count::Csize_t
+    error_message::Ptr{Cchar}
+    context::Ptr{Cvoid}
+
+    FileRowCountResponse() = new(-1, C_NULL, C_NULL, 0, C_NULL, C_NULL)
+end
+
+"""
+    table_file_row_counts(table::Table) -> Dict{String, Int64}
+
+Return the row count for each data file in the current snapshot of the table.
+
+The counts come from Iceberg manifest metadata and do not require reading any
+Parquet files.
+"""
+function table_file_row_counts(table::Table)
+    response = FileRowCountResponse()
+
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_table_file_row_counts(
+            table::Table,
+            response::Ref{FileRowCountResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "iceberg_table_file_row_counts", IcebergException)
+
+    result = Dict{String, Int64}()
+    for i in 1:response.count
+        path = unsafe_string(unsafe_load(response.paths, i))
+        count = unsafe_load(response.counts, i)
+        result[path] = count
+    end
+
+    @ccall rust_lib.iceberg_file_row_counts_free(
+        response.paths::Ptr{Ptr{Cchar}},
+        response.counts::Ptr{Int64},
+        response.count::Csize_t
+    )::Cvoid
+
     return result
 end
 

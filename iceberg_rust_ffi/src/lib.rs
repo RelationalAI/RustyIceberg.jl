@@ -42,8 +42,8 @@ pub use catalog::{IcebergBoolResponse, IcebergCatalog, IcebergCatalogResponse};
 pub use full::IcebergScan;
 pub use incremental::{IcebergIncrementalScan, IcebergUnzippedStreamsResponse};
 pub use response::{
-    IcebergBoxedResponse, IcebergNestedStringListResponse, IcebergPropertyResponse,
-    IcebergStringListResponse,
+    IcebergBoxedResponse, IcebergFileRowCountResponse, IcebergNestedStringListResponse,
+    IcebergPropertyResponse, IcebergStringListResponse,
 };
 pub use table::{
     ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse, IcebergTable,

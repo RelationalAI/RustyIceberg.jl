@@ -1223,3 +1223,24 @@ end
         end
     end
 end
+
+@testset "table_file_row_counts" begin
+    customer_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
+
+    table = RustyIceberg.table_open(customer_path)
+    try
+        counts = RustyIceberg.table_file_row_counts(table)
+
+        # Should return a non-empty dict
+        @test counts isa Dict{String, Int64}
+
+        # Total row count should match known tpch sf01 customer table size (15000 rows). See
+        # assets/tpch/tpch.sf01/customer/metadata/01992e1d-25b3-7111-9dfc-38f55f99f91b-m0.avro
+        @test length(counts) == 1
+        @test collect(keys(counts)) == ["s3://warehouse/tpch.sf01/customer/data/data_customer-00000.parquet"]
+        @test collect(values(counts)) == [15000]
+
+    finally
+        RustyIceberg.free_table(table)
+    end
+end
