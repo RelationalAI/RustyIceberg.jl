@@ -22,6 +22,10 @@ pub struct IcebergIncrementalScan {
     pub scan: Option<IncrementalTableScan>,
     /// 0 = auto-detect (num_cpus)
     pub serialization_concurrency: usize,
+    // Present for macro compatibility with IcebergScan; unused for incremental.
+    pub file_io: Option<iceberg::io::FileIO>,
+    pub batch_size: Option<usize>,
+    pub file_concurrency: usize,
 }
 
 unsafe impl Send for IcebergIncrementalScan {}
@@ -102,6 +106,9 @@ pub extern "C" fn iceberg_new_incremental_scan(
         builder: Some(scan_builder),
         scan: None,
         serialization_concurrency: 0,
+        file_io: None,
+        batch_size: None,
+        file_concurrency: 0,
     }))
 }
 

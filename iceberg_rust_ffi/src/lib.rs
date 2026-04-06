@@ -31,6 +31,9 @@ mod writer;
 // Column-based writer module (zero-copy from Julia)
 mod writer_columns;
 
+// Ordered file-parallel pipeline
+mod ordered_file_pipeline;
+
 // Response types module
 mod response;
 
