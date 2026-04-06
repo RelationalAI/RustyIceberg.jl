@@ -174,7 +174,7 @@ pub(crate) fn transform_stream_with_parallel_serialization(
                 )),
             }
         })
-        .buffer_unordered(concurrency)
+        .buffered(concurrency)
         .boxed()
 }
 
