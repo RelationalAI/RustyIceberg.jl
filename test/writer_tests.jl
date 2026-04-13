@@ -903,3 +903,226 @@ end
 
     println("\n✅ write_columns with nulls tests completed!")
 end
+
+@testset "Writer write_columns decimal types" begin
+    println("Testing write_columns with decimal types (Int32/Int64/bytes backing)...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+        println("✅ Catalog created successfully")
+
+        test_namespace = ["test_decimal_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+        println("✅ Test namespace created: $test_namespace")
+
+        # Three decimal columns covering all backing types:
+        #   price:   DECIMAL(9, 2)  → COLUMN_TYPE_DECIMAL_INT32  (Int32 data)
+        #   volume:  DECIMAL(18, 5) → COLUMN_TYPE_DECIMAL_INT64  (Int64 data)
+        #   balance: DECIMAL(38, 10) → COLUMN_TYPE_DECIMAL_INT128 (Int128 data)
+        schema = Schema([
+            Field(Int32(1), "id",      IcebergLong();           required=true),
+            Field(Int32(2), "price",   IcebergDecimal(9, 2);    required=true),
+            Field(Int32(3), "volume",  IcebergDecimal(18, 5);   required=true),
+            Field(Int32(4), "balance", IcebergDecimal(38, 10);  required=true),
+        ])
+
+        table_name = "decimal_test_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(catalog, test_namespace, table_name, schema)
+        @test table != C_NULL
+        println("✅ Test table created: $table_name")
+
+        col_ids = Int64[1, 2, 3]
+
+        # DECIMAL(9, 2): values 123.45, -67.89, 0.01
+        # Physical: Int32 scaled by 10^2
+        col_prices = Int32[12345, -6789, 1]
+
+        # DECIMAL(18, 5): values 123.45678, -99.99999, 1.00000
+        # Physical: Int64 scaled by 10^5
+        col_volumes = Int64[12345678, -9999999, 100000]
+
+        # DECIMAL(38, 10): values using Int128 scaled by 10^10
+        col_balances = Int128[12345678901234567890, -999999999999, 1]
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            batch = RustyIceberg.ColumnBatch()
+            push!(batch, col_ids)
+            push!(batch, col_prices;   column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT32)
+            push!(batch, col_volumes;  column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT64)
+            push!(batch, col_balances; column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT128)
+            RustyIceberg.write_columns(writer, batch)
+            println("✅ Decimal data written via write_columns")
+        end
+        @test data_files !== nothing && data_files.ptr != C_NULL
+        println("✅ Writer closed, got DataFiles handle")
+
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+        println("✅ Transaction committed successfully")
+
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
+        @test length(tbl.id) == 3
+
+        perm = sortperm(tbl.id)
+        sorted_ids      = tbl.id[perm]
+        sorted_prices   = tbl.price[perm]
+        sorted_volumes  = tbl.volume[perm]
+        sorted_balances = tbl.balance[perm]
+
+        @test sorted_ids == Int64[1, 2, 3]
+
+        # Decimal values come back as Arrow.Decimal{P, S, Int128} with a .value field
+        # containing the raw scaled integer.
+        @test sorted_prices[1].value == Int128(12345)   # 123.45
+        @test sorted_prices[2].value == Int128(-6789)   # -67.89
+        @test sorted_prices[3].value == Int128(1)       # 0.01
+        println("✅ DECIMAL(9, 2) values verified")
+
+        @test sorted_volumes[1].value == Int128(12345678)   # 123.45678
+        @test sorted_volumes[2].value == Int128(-9999999)   # -99.99999
+        @test sorted_volumes[3].value == Int128(100000)     # 1.00000
+        println("✅ DECIMAL(18, 5) values verified")
+
+        @test sorted_balances[1].value == Int128(12345678901234567890)
+        @test sorted_balances[2].value == Int128(-999999999999)
+        @test sorted_balances[3].value == Int128(1)
+        println("✅ DECIMAL(38, 10) values verified")
+
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+            println("✅ Table cleaned up")
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+            println("✅ Test table dropped")
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+            println("✅ Test namespace dropped")
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+            println("✅ Catalog cleaned up")
+        end
+    end
+
+    println("\n✅ write_columns decimal types tests completed!")
+end
+
+@testset "Writer write_columns decimal nullable" begin
+    println("Testing write_columns with nullable decimal column...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+        println("✅ Catalog created successfully")
+
+        test_namespace = ["test_dec_null_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+        println("✅ Test namespace created: $test_namespace")
+
+        schema = Schema([
+            Field(Int32(1), "id",    IcebergLong();          required=true),
+            Field(Int32(2), "price", IcebergDecimal(18, 2);  required=false),  # nullable
+        ])
+
+        table_name = "dec_null_test_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(catalog, test_namespace, table_name, schema)
+        @test table != C_NULL
+        println("✅ Test table created: $table_name")
+
+        col_ids    = Int64[1, 2, 3, 4, 5]
+        # Scaled integers for DECIMAL(18, 2): 100.00, null, 300.00, null, 500.00
+        col_prices = Int64[10000, 0, 30000, 0, 50000]  # 0 at null positions (ignored)
+        validity   = BitVector([true, false, true, false, true])
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            batch = RustyIceberg.ColumnBatch()
+            push!(batch, col_ids)
+            push!(batch, col_prices; validity=validity, column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT64)
+            RustyIceberg.write_columns(writer, batch)
+            println("✅ Nullable decimal data written")
+        end
+        @test data_files !== nothing
+
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+        println("✅ Transaction committed successfully")
+
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
+        @test length(tbl.id) == 5
+
+        perm = sortperm(tbl.id)
+        sorted_ids    = tbl.id[perm]
+        sorted_prices = tbl.price[perm]
+
+        @test sorted_ids == Int64[1, 2, 3, 4, 5]
+
+        @test !ismissing(sorted_prices[1]) && sorted_prices[1].value == Int128(10000)  # 100.00
+        @test ismissing(sorted_prices[2])
+        @test !ismissing(sorted_prices[3]) && sorted_prices[3].value == Int128(30000)  # 300.00
+        @test ismissing(sorted_prices[4])
+        @test !ismissing(sorted_prices[5]) && sorted_prices[5].value == Int128(50000)  # 500.00
+        println("✅ Nullable decimal values verified (nulls at positions 2 and 4)")
+
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+            println("✅ Table cleaned up")
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+            println("✅ Test table dropped")
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+            println("✅ Test namespace dropped")
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+            println("✅ Catalog cleaned up")
+        end
+    end
+
+    println("\n✅ write_columns decimal nullable tests completed!")
+end
