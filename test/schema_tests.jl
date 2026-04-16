@@ -348,4 +348,79 @@ end
     end
 end
 
+@testset "schema_from_table" begin
+    @testset "basic round-trip" begin
+        original = Schema([
+            Field(Int32(1), "id", IcebergLong(); required=true),
+            Field(Int32(2), "name", IcebergString()),
+            Field(Int32(3), "amount", IcebergDecimal(38, 18)),
+        ])
+        schema = RustyIceberg._schema_from_json(schema_to_json(original))
+        @test length(schema.fields) == 3
+        @test schema.fields[1].id == Int32(1)
+        @test schema.fields[1].name == "id"
+        @test schema.fields[1].type isa IcebergLong
+        @test schema.fields[1].required == true
+        @test schema.fields[2].name == "name"
+        @test schema.fields[2].type isa IcebergString
+        @test schema.fields[2].required == false
+        @test schema.fields[3].type isa IcebergDecimal
+        @test schema.fields[3].type.precision == 38
+        @test schema.fields[3].type.scale == 18
+    end
+
+    @testset "identifier field IDs preserved" begin
+        original = Schema(
+            [Field(Int32(1), "id", IcebergLong(); required=true)];
+            identifier_field_ids=Int32[1]
+        )
+        schema = RustyIceberg._schema_from_json(schema_to_json(original))
+        @test schema.identifier_field_ids == Int32[1]
+    end
+
+    @testset "no identifier field IDs" begin
+        original = Schema([Field(Int32(1), "x", IcebergInt())])
+        schema = RustyIceberg._schema_from_json(schema_to_json(original))
+        @test isempty(schema.identifier_field_ids)
+    end
+
+    @testset "doc field preserved" begin
+        original = Schema([
+            Field(Int32(1), "ts", IcebergTimestamp(); doc="creation time"),
+        ])
+        schema = RustyIceberg._schema_from_json(schema_to_json(original))
+        @test schema.fields[1].doc == "creation time"
+    end
+
+    @testset "all primitive types round-trip" begin
+        fields = [
+            Field(Int32(1),  "a", IcebergBoolean()),
+            Field(Int32(2),  "b", IcebergInt()),
+            Field(Int32(3),  "c", IcebergLong()),
+            Field(Int32(4),  "d", IcebergFloat()),
+            Field(Int32(5),  "e", IcebergDouble()),
+            Field(Int32(6),  "f", IcebergDate()),
+            Field(Int32(7),  "g", IcebergTime()),
+            Field(Int32(8),  "h", IcebergTimestamp()),
+            Field(Int32(9),  "i", IcebergTimestamptz()),
+            Field(Int32(10), "j", IcebergTimestampNs()),
+            Field(Int32(11), "k", IcebergTimestamptzNs()),
+            Field(Int32(12), "l", IcebergString()),
+            Field(Int32(13), "m", IcebergUuid()),
+            Field(Int32(14), "n", IcebergBinary()),
+            Field(Int32(15), "o", IcebergDecimal(10, 2)),
+        ]
+        schema = RustyIceberg._schema_from_json(schema_to_json(Schema(fields)))
+        expected_types = [
+            IcebergBoolean, IcebergInt, IcebergLong, IcebergFloat, IcebergDouble,
+            IcebergDate, IcebergTime, IcebergTimestamp, IcebergTimestamptz,
+            IcebergTimestampNs, IcebergTimestamptzNs, IcebergString, IcebergUuid,
+            IcebergBinary, IcebergDecimal,
+        ]
+        for (field, T) in zip(schema.fields, expected_types)
+            @test field.type isa T
+        end
+    end
+end
+
 println("All schema tests passed!")
