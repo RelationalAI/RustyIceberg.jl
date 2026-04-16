@@ -22,6 +22,7 @@ export Catalog, catalog_create_rest, free_catalog
 export load_table, list_tables, list_namespaces, table_exists, create_table, drop_table, drop_namespace, create_namespace
 export Field, Schema, PartitionField, PartitionSpec, SortField, SortOrder
 export SchemaBuilder, add_field, with_identifier, build
+export schema_from_table
 export schema_to_json, partition_spec_to_json, sort_order_to_json
 export iceberg_type_to_arrow_type, arrow_type, arrow_types, iceberg_column_type
 # Iceberg type system
