@@ -15,9 +15,15 @@ export new_incremental_scan, free_incremental_scan!
 export table_open, free_table, new_scan, free_scan!
 export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_schema
 export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
-export with_file_column!, with_pos_column!
+export with_file_column!, with_pos_column!, with_prefetch_depth!, with_task_prefetch_depth!
 export scan!, next_batch, free_batch, free_stream
 export FILE_COLUMN, POS_COLUMN
+export ArrowReaderContext, FileScanTaskStream, FileScanTaskHandle
+export IncrementalFileScanTaskStreams, AppendTaskHandle, DeleteTaskHandle
+export plan_files, create_reader, next_task, read_task
+export next_append_task, next_delete_task, read_append_task, read_delete_task
+export free_reader, free_task_stream, free_task
+export task_data_file_path, task_record_count
 export Catalog, catalog_create_rest, free_catalog
 export load_table, list_tables, list_namespaces, table_exists, create_table, drop_table, drop_namespace, create_namespace
 export Field, Schema, PartitionField, PartitionSpec, SortField, SortOrder
@@ -54,7 +60,9 @@ Value of 0 means use all CPU cores, regardless of the number of threads in the J
 """
 struct StaticConfig
     n_threads::Culonglong
+    max_blocking_threads::Culonglong
 end
+StaticConfig(n_threads::Integer) = StaticConfig(n_threads, 0)
 
 function default_panic_hook()
     println("Rust thread panicked, exiting the process")

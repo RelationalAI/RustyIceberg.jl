@@ -235,6 +235,42 @@ function with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
 end
 
 """
+    with_prefetch_depth!(scan::IncrementalScan, n::UInt)
+
+Set the number of serialized batches buffered ahead of the consumer for each stream.
+See `with_prefetch_depth!(::Scan, ::UInt)` for details.
+"""
+function with_prefetch_depth!(scan::IncrementalScan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set prefetch depth for incremental scan", result))
+    end
+    return nothing
+end
+
+"""
+    with_task_prefetch_depth!(scan::IncrementalScan, n::UInt)
+
+Set the number of file scan tasks buffered ahead of the consumer.
+See `with_task_prefetch_depth!(::Scan, ::UInt)` for details.
+"""
+function with_task_prefetch_depth!(scan::IncrementalScan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_task_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set task prefetch depth for incremental scan", result))
+    end
+    return nothing
+end
+
+"""
     with_pos_column!(scan::IncrementalScan)
 
 Add the _pos metadata column to the incremental scan.
@@ -318,4 +354,123 @@ function free_incremental_scan!(scan::IncrementalScan)
     GC.@preserve scan @ccall rust_lib.iceberg_free_incremental_scan(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cvoid
+end
+
+# ---------------------------------------------------------------------------
+# Split-scan API for incremental scans
+#
+# Same pattern as full scans but with separate append/delete streams.
+# ---------------------------------------------------------------------------
+
+"""
+    plan_files(scan::IncrementalScan)::IncrementalFileScanTaskStreams
+
+Plan files for incremental scan. Returns two sub-streams (appends + deletes)
+for use with `next_append_task` / `next_delete_task`.
+"""
+function plan_files(scan::IncrementalScan)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_incremental_plan_files(
+            scan.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_incremental_plan_files", IcebergException)
+    return IncrementalFileScanTaskStreams(response.value)
+end
+
+"""
+    create_reader(scan::IncrementalScan; reader_concurrency::UInt=UInt(0))::ArrowReaderContext
+
+Create a shared reader context from the incremental scan's configuration.
+
+`reader_concurrency` sets the data-file concurrency for the reader.
+- `0`: Use the scan-level `data_file_concurrency_limit` (default)
+- `> 0`: Override with this value
+"""
+function create_reader(scan::IncrementalScan; reader_concurrency::UInt=UInt(0))
+    ptr = @ccall rust_lib.iceberg_create_incremental_reader(
+        scan.ptr::Ptr{Cvoid},
+        reader_concurrency::Csize_t,
+    )::Ptr{Cvoid}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to create reader from incremental scan"))
+    end
+    return ArrowReaderContext(ptr)
+end
+
+"""
+    next_append_task(streams::IncrementalFileScanTaskStreams)::Union{AppendTaskHandle, Nothing}
+
+Pull next append task. Returns `nothing` when exhausted.
+"""
+function next_append_task(streams::IncrementalFileScanTaskStreams)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_append_task(
+            streams.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_next_append_task", IcebergException)
+    return response.value == C_NULL ? nothing : AppendTaskHandle(response.value)
+end
+
+"""
+    next_delete_task(streams::IncrementalFileScanTaskStreams)::Union{DeleteTaskHandle, Nothing}
+
+Pull next delete task. Returns `nothing` when exhausted.
+"""
+function next_delete_task(streams::IncrementalFileScanTaskStreams)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_delete_task(
+            streams.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_next_delete_task", IcebergException)
+    return response.value == C_NULL ? nothing : DeleteTaskHandle(response.value)
+end
+
+"""
+    read_append_task(reader::ArrowReaderContext, task::AppendTaskHandle)::ArrowStream
+
+Read a single append task. **Consumes the task.**
+"""
+function read_append_task(reader::ArrowReaderContext, task::AppendTaskHandle)
+    response = ArrowStreamResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_read_append_task(
+            reader.ptr::Ptr{Cvoid},
+            task.ptr::Ptr{Cvoid},
+            response::Ref{ArrowStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_read_append_task", IcebergException)
+    return response.value
+end
+
+"""
+    read_delete_task(reader::ArrowReaderContext, task::DeleteTaskHandle)::ArrowStream
+
+Read a single delete task. **Consumes the task.**
+"""
+function read_delete_task(reader::ArrowReaderContext, task::DeleteTaskHandle)
+    response = ArrowStreamResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_read_delete_task(
+            reader.ptr::Ptr{Cvoid},
+            task.ptr::Ptr{Cvoid},
+            response::Ref{ArrowStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_read_delete_task", IcebergException)
+    return response.value
 end

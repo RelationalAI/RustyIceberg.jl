@@ -13,13 +13,11 @@ macro_rules! impl_select_columns {
             }
 
             let mut columns = Vec::new();
-
             for i in 0..num_columns {
                 let col_ptr = unsafe { *column_names.add(i) };
                 if col_ptr.is_null() {
                     return CResult::Error;
                 }
-
                 let col_str = unsafe {
                     match CStr::from_ptr(col_ptr).to_str() {
                         Ok(s) => s,
@@ -29,17 +27,14 @@ macro_rules! impl_select_columns {
                 columns.push(col_str.to_string());
             }
 
-            let scan_ref = unsafe { Box::from_raw(*scan) };
-
-            if scan_ref.builder.is_none() {
+            // Move value out of Box, mutate, re-box (field-agnostic pattern)
+            let mut scan_val = *unsafe { Box::from_raw(*scan) };
+            if scan_val.builder.is_none() {
+                *scan = Box::into_raw(Box::new(scan_val));
                 return CResult::Error;
             }
-            *scan = Box::into_raw(Box::new($scan_type {
-                builder: scan_ref.builder.map(|b| b.select(columns)),
-                scan: scan_ref.scan,
-                serialization_concurrency: scan_ref.serialization_concurrency,
-            }));
-
+            scan_val.builder = scan_val.builder.map(|b| b.select(columns));
+            *scan = Box::into_raw(Box::new(scan_val));
             CResult::Ok
         }
     };
@@ -74,18 +69,13 @@ macro_rules! impl_scan_builder_method {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
-            let scan_ref = unsafe { Box::from_raw(*scan) };
-
-            if scan_ref.builder.is_none() {
+            let mut scan_val = *unsafe { Box::from_raw(*scan) };
+            if scan_val.builder.is_none() {
+                *scan = Box::into_raw(Box::new(scan_val));
                 return CResult::Error;
             }
-
-            *scan = Box::into_raw(Box::new($scan_type {
-                builder: scan_ref.builder.map(|b| b.$builder_method($($param),*)),
-                scan: scan_ref.scan,
-                serialization_concurrency: scan_ref.serialization_concurrency,
-            }));
-
+            scan_val.builder = scan_val.builder.map(|b| b.$builder_method($($param),*));
+            *scan = Box::into_raw(Box::new(scan_val));
             CResult::Ok
         }
     };
@@ -99,20 +89,16 @@ macro_rules! impl_with_batch_size {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
-            let scan_ref = unsafe { Box::from_raw(*scan) };
-
-            if scan_ref.builder.is_none() {
+            let mut scan_val = *unsafe { Box::from_raw(*scan) };
+            if scan_val.builder.is_none() {
+                *scan = Box::into_raw(Box::new(scan_val));
                 return CResult::Error;
             }
-
-            assert!(scan_ref.scan.is_none());
-
-            *scan = Box::into_raw(Box::new($scan_type {
-                builder: scan_ref.builder.map(|b| b.with_batch_size(Some(n))),
-                scan: None,
-                serialization_concurrency: scan_ref.serialization_concurrency,
-            }));
-
+            assert!(scan_val.scan.is_none());
+            scan_val.builder = scan_val.builder.map(|b| b.with_batch_size(Some(n)));
+            // Store for create_reader to use later
+            scan_val.batch_size = n;
+            *scan = Box::into_raw(Box::new(scan_val));
             CResult::Ok
         }
     };
@@ -126,22 +112,22 @@ macro_rules! impl_scan_build {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
-            let scan_ref = unsafe { Box::from_raw(*scan) };
-            if scan_ref.builder.is_none() {
+            let mut scan_val = *unsafe { Box::from_raw(*scan) };
+            if scan_val.builder.is_none() {
+                *scan = Box::into_raw(Box::new(scan_val));
                 return CResult::Error;
             }
-            let builder = scan_ref.builder.unwrap();
-
+            let builder = scan_val.builder.take().unwrap();
             match builder.build() {
                 Ok(built_scan) => {
-                    *scan = Box::into_raw(Box::new($scan_type {
-                        builder: None,
-                        scan: Some(built_scan),
-                        serialization_concurrency: scan_ref.serialization_concurrency,
-                    }));
+                    scan_val.scan = Some(built_scan);
+                    *scan = Box::into_raw(Box::new(scan_val));
                     CResult::Ok
                 }
-                Err(_) => CResult::Error,
+                Err(_) => {
+                    *scan = Box::into_raw(Box::new(scan_val));
+                    CResult::Error
+                }
             }
         }
     };
@@ -170,9 +156,41 @@ macro_rules! impl_with_serialization_concurrency_limit {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
-            let mut scan_ref = unsafe { Box::from_raw(*scan) };
-            scan_ref.serialization_concurrency = n;
-            *scan = Box::into_raw(scan_ref);
+            let mut scan_val = *unsafe { Box::from_raw(*scan) };
+            scan_val.serialization_concurrency = n;
+            *scan = Box::into_raw(Box::new(scan_val));
+            CResult::Ok
+        }
+    };
+}
+
+/// Macro to generate with_prefetch_depth function for any scan type
+macro_rules! impl_with_prefetch_depth {
+    ($fn_name:ident, $scan_type:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type, n: usize) -> CResult {
+            if scan.is_null() || (*scan).is_null() {
+                return CResult::Error;
+            }
+            let mut scan_val = *unsafe { Box::from_raw(*scan) };
+            scan_val.prefetch_depth = n;
+            *scan = Box::into_raw(Box::new(scan_val));
+            CResult::Ok
+        }
+    };
+}
+
+/// Macro to generate with_task_prefetch_depth function for any scan type
+macro_rules! impl_with_task_prefetch_depth {
+    ($fn_name:ident, $scan_type:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type, n: usize) -> CResult {
+            if scan.is_null() || (*scan).is_null() {
+                return CResult::Error;
+            }
+            let mut scan_val = *unsafe { Box::from_raw(*scan) };
+            scan_val.task_prefetch_depth = n;
+            *scan = Box::into_raw(Box::new(scan_val));
             CResult::Ok
         }
     };
@@ -184,4 +202,6 @@ pub(crate) use impl_scan_builder_method;
 pub(crate) use impl_scan_free;
 pub(crate) use impl_select_columns;
 pub(crate) use impl_with_batch_size;
+pub(crate) use impl_with_prefetch_depth;
 pub(crate) use impl_with_serialization_concurrency_limit;
+pub(crate) use impl_with_task_prefetch_depth;

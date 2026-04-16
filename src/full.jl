@@ -207,6 +207,58 @@ function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
 end
 
 """
+    with_prefetch_depth!(scan::Scan, n::UInt)
+
+Set the number of serialized batches buffered ahead of the consumer.
+
+The Rust FFI layer eagerly drains the serialized batch stream into a bounded
+buffer of this size, decoupling Parquet decode + IPC serialization from Julia's
+pull rate. Higher values hide more latency but consume more memory.
+- `n = 0`: Use the Rust-side default (currently 8)
+- `n > 0`: Use exactly n buffer slots
+
+# Example
+```julia
+scan = new_scan(table)
+with_prefetch_depth!(scan, UInt(16))
+```
+"""
+function with_prefetch_depth!(scan::Scan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set prefetch depth", result))
+    end
+    return nothing
+end
+
+"""
+    with_task_prefetch_depth!(scan::Scan, n::UInt)
+
+Set the number of file scan tasks buffered ahead of the consumer.
+
+The Rust FFI layer eagerly plans file scan tasks into a bounded buffer,
+so task planning runs ahead of Julia's consumption. Only a small number
+of tasks need buffering — planning is cheap compared to reading data.
+- `n = 0`: Use the Rust-side default (currently 4)
+- `n > 0`: Use exactly n buffer slots
+"""
+function with_task_prefetch_depth!(scan::Scan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_task_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+
+    if result != 0
+        throw(IcebergException("Failed to set task prefetch depth", result))
+    end
+    return nothing
+end
+
+"""
     with_snapshot_id!(scan::Scan, snapshot_id::Int64)
 
 Set the snapshot ID for the scan.
@@ -296,4 +348,106 @@ function free_scan!(scan::Scan)
     GC.@preserve scan @ccall rust_lib.iceberg_scan_free(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cvoid
+end
+
+# ---------------------------------------------------------------------------
+# Split-scan API for full scans
+#
+# Usage:
+#   build!(scan)
+#   task_stream = plan_files(scan)
+#   reader = create_reader(scan)
+#   while (task = next_task(task_stream)) !== nothing
+#       stream = read_task(reader, task)  # consumes task
+#       # ... iterate batches with next_batch(stream) ...
+#       free_stream(stream)
+#   end
+#   free_reader(reader)
+#   free_task_stream(task_stream)
+#   free_scan!(scan)
+#
+# Multiple Julia tasks can call next_task concurrently on the same
+# task_stream. Each read_task clones the ArrowReader internally,
+# sharing the delete-file cache.
+# ---------------------------------------------------------------------------
+
+"""
+    plan_files(scan::Scan)::FileScanTaskStream
+
+Plan which files to read. Returns a task stream for use with `next_task`.
+The scan must be built first via `build!`.
+"""
+function plan_files(scan::Scan)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_plan_files(
+            scan.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_plan_files", IcebergException)
+    return FileScanTaskStream(response.value)
+end
+
+"""
+    create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))::ArrowReaderContext
+
+Create a shared reader context from the scan's configuration.
+Pass this to every `read_task` call. The internal ArrowReader is cloned
+per call, sharing the delete-file cache across consumers.
+
+`reader_concurrency` sets the data-file concurrency for the reader (how many
+files the reader can process in parallel within a single `read_task` call).
+- `0`: Use the scan-level `data_file_concurrency_limit` (default)
+- `> 0`: Override with this value
+"""
+function create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))
+    ptr = @ccall rust_lib.iceberg_create_reader(
+        scan.ptr::Ptr{Cvoid},
+        reader_concurrency::Csize_t,
+    )::Ptr{Cvoid}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to create reader from scan"))
+    end
+    return ArrowReaderContext(ptr)
+end
+
+"""
+    next_task(task_stream::FileScanTaskStream)::Union{FileScanTaskHandle, Nothing}
+
+Pull the next task from the stream. Returns `nothing` when exhausted.
+Safe to call concurrently from multiple Julia tasks.
+"""
+function next_task(task_stream::FileScanTaskStream)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_file_scan_task(
+            task_stream.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_next_file_scan_task", IcebergException)
+    return response.value == C_NULL ? nothing : FileScanTaskHandle(response.value)
+end
+
+"""
+    read_task(reader::ArrowReaderContext, task::FileScanTaskHandle)::ArrowStream
+
+Read a single task into an Arrow stream. **Consumes the task** — do not
+call `free_task` afterwards.
+"""
+function read_task(reader::ArrowReaderContext, task::FileScanTaskHandle)
+    response = ArrowStreamResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_read_file_scan_task(
+            reader.ptr::Ptr{Cvoid},
+            task.ptr::Ptr{Cvoid},
+            response::Ref{ArrowStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_read_file_scan_task", IcebergException)
+    return response.value
 end

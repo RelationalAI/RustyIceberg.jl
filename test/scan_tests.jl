@@ -1223,3 +1223,117 @@ end
         end
     end
 end
+
+@testset "Split scan API - full scan" begin
+    snapshot_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
+
+    table = RustyIceberg.table_open(snapshot_path)
+    scan = RustyIceberg.new_scan(table)
+    RustyIceberg.build!(scan)
+
+    task_stream = RustyIceberg.plan_files(scan)
+    @test task_stream isa RustyIceberg.FileScanTaskStream
+
+    reader = RustyIceberg.create_reader(scan)
+    @test reader isa RustyIceberg.ArrowReaderContext
+
+    total_rows = 0
+    task_count = 0
+    while true
+        task = RustyIceberg.next_task(task_stream)
+        if task === nothing
+            break
+        end
+        @test task isa RustyIceberg.FileScanTaskHandle
+        task_count += 1
+
+        # Test record_count — should be available for full file reads
+        rc = RustyIceberg.task_record_count(task)
+        @test rc isa Union{Int64, Nothing}
+
+        # read_task consumes the task — no free_task needed
+        stream = RustyIceberg.read_task(reader, task)
+        @test stream != C_NULL
+
+        while true
+            bp = RustyIceberg.next_batch(stream)
+            if bp == C_NULL
+                break
+            end
+            batch = unsafe_load(bp)
+            arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+            df = DataFrame(arrow_table)
+            total_rows += nrow(df)
+            RustyIceberg.free_batch(bp)
+        end
+        RustyIceberg.free_stream(stream)
+    end
+
+    @test task_count > 0
+    @test total_rows > 0
+    println("✅ Split scan API (full): $task_count tasks, $total_rows rows")
+
+    RustyIceberg.free_reader(reader)
+    RustyIceberg.free_task_stream(task_stream)
+    RustyIceberg.free_scan!(scan)
+    RustyIceberg.free_table(table)
+end
+
+@testset "Split scan API - incremental scan" begin
+    snapshot_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
+
+    table = RustyIceberg.table_open(snapshot_path)
+    scan = RustyIceberg.new_incremental_scan(table, nothing, nothing)
+    RustyIceberg.build!(scan)
+
+    task_streams = RustyIceberg.plan_files(scan)
+    @test task_streams isa RustyIceberg.IncrementalFileScanTaskStreams
+
+    reader = RustyIceberg.create_reader(scan)
+    @test reader isa RustyIceberg.ArrowReaderContext
+
+    # Drain append tasks
+    append_count = 0
+    while true
+        task = RustyIceberg.next_append_task(task_streams)
+        if task === nothing
+            break
+        end
+        append_count += 1
+        rc = RustyIceberg.task_record_count(task)
+        @test rc isa Union{Int64, Nothing}
+        stream = RustyIceberg.read_append_task(reader, task)
+        while true
+            bp = RustyIceberg.next_batch(stream)
+            if bp == C_NULL; break; end
+            RustyIceberg.free_batch(bp)
+        end
+        RustyIceberg.free_stream(stream)
+    end
+
+    # Drain delete tasks
+    delete_count = 0
+    while true
+        task = RustyIceberg.next_delete_task(task_streams)
+        if task === nothing
+            break
+        end
+        delete_count += 1
+        rc = RustyIceberg.task_record_count(task)
+        @test rc isa Union{Int64, Nothing}
+        stream = RustyIceberg.read_delete_task(reader, task)
+        while true
+            bp = RustyIceberg.next_batch(stream)
+            if bp == C_NULL; break; end
+            RustyIceberg.free_batch(bp)
+        end
+        RustyIceberg.free_stream(stream)
+    end
+
+    println("✅ Split scan API (incremental): $append_count appends, $delete_count deletes")
+
+    RustyIceberg.free_reader(reader)
+    RustyIceberg.free_task_stream(task_streams)
+    RustyIceberg.free_incremental_scan!(scan)
+    RustyIceberg.free_table(table)
+end

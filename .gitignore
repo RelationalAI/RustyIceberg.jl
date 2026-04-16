@@ -7,3 +7,4 @@ iceberg_rust_ffi/integration_test
 **/.DS_Store
 Manifest.toml
 LocalPreferences.toml
+.worktrees

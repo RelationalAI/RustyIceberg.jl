@@ -46,8 +46,13 @@ pub use response::{
     IcebergStringListResponse,
 };
 pub use table::{
-    ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse, IcebergTable,
-    IcebergTableResponse,
+    ArrowBatch, IcebergAppendTask, IcebergAppendTaskResponse, IcebergArrowReaderContext,
+    IcebergArrowReaderContextResponse, IcebergArrowStream, IcebergArrowStreamResponse,
+    IcebergBatchResponse, IcebergDeleteTask, IcebergDeleteTaskResponse, IcebergFileScanTask,
+    IcebergFileScanTaskResponse, IcebergFileScanTaskStream, IcebergFileScanTaskStreamResponse,
+    IcebergIncrementalFileScanTaskStreams, IcebergIncrementalFileScanTaskStreamsResponse,
+    IcebergNextAppendTaskResponse, IcebergNextDeleteTaskResponse, IcebergNextFileScanTaskResponse,
+    IcebergTable, IcebergTableResponse,
 };
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
 pub use writer::{
@@ -101,12 +106,14 @@ impl RawResponse for IcebergResponse {
 #[repr(C)]
 pub struct IcebergStaticConfig {
     n_threads: usize,
+    max_blocking_threads: usize,
 }
 
 impl Default for IcebergStaticConfig {
     fn default() -> Self {
         IcebergStaticConfig {
-            n_threads: 0, // 0 means use tokio's default
+            n_threads: 0,          // 0 means use tokio's default
+            max_blocking_threads: 0, // 0 means use tokio's default (512)
         }
     }
 }
@@ -174,7 +181,7 @@ pub(crate) fn transform_stream_with_parallel_serialization(
                 )),
             }
         })
-        .buffer_unordered(concurrency)
+        .buffered(concurrency)
         .boxed()
 }
 
@@ -221,6 +228,10 @@ pub extern "C" fn iceberg_init_runtime(
 
     if config.n_threads > 0 {
         rt_builder.worker_threads(config.n_threads);
+    }
+
+    if config.max_blocking_threads > 0 {
+        rt_builder.max_blocking_threads(config.max_blocking_threads);
     }
 
     let runtime = match rt_builder.build() {
