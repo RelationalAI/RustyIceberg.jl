@@ -257,27 +257,38 @@ impl IcebergCatalog {
         Ok(self)
     }
 
-    /// Create and initialize a memory catalog backed by local-filesystem or
-    /// in-process memory storage.
+    /// Create and initialize a memory catalog with pluggable file storage.
     ///
-    /// `warehouse` is the root path / URI prefix used to derive table locations:
-    /// - For `use_local_fs = true`: a real filesystem path such as `/tmp/warehouse`.
-    ///   Table metadata and data files are written to disk.
-    /// - For `use_local_fs = false`: any string (e.g. `"memory"`). Everything is
-    ///   held in RAM and lost when the catalog is freed.
-    pub async fn create_memory(mut self, warehouse: String, use_local_fs: bool) -> Result<Self> {
-        let factory: Arc<dyn StorageFactory> = if use_local_fs {
-            Arc::new(LocalFsStorageFactory)
-        } else {
-            Arc::new(MemoryStorageFactory)
-        };
+    /// The storage backend is inferred from `warehouse`:
+    ///
+    /// - `"memory"` — everything (metadata + Parquet) lives in RAM.
+    ///   Lost when the catalog is freed. Good for unit tests.
+    /// - `"s3://…"` / `"s3a://…"` — table files are written to S3 (or any
+    ///   S3-compatible store). Credentials are passed in `props` using the
+    ///   standard keys (`s3.access-key-id`, `s3.region`, etc.).
+    ///   The catalog registry still lives in RAM.
+    /// - Any other string (local path) — table files are written to the
+    ///   local filesystem at that path. The catalog registry lives in RAM.
+    pub async fn create_memory(
+        mut self,
+        warehouse: String,
+        props: HashMap<String, String>,
+    ) -> Result<Self> {
+        let factory: Arc<dyn StorageFactory> =
+            if warehouse.starts_with("s3://") || warehouse.starts_with("s3a://") {
+                Arc::new(OpenDalRoutingStorageFactory)
+            } else if warehouse == "memory" {
+                Arc::new(MemoryStorageFactory)
+            } else {
+                Arc::new(LocalFsStorageFactory)
+            };
+
+        let mut catalog_props = props;
+        catalog_props.insert(MEMORY_CATALOG_WAREHOUSE.to_string(), warehouse);
 
         let catalog = MemoryCatalogBuilder::default()
             .with_storage_factory(factory)
-            .load(
-                "memory",
-                HashMap::from([(MEMORY_CATALOG_WAREHOUSE.to_string(), warehouse)]),
-            )
+            .load("memory", catalog_props)
             .await?;
 
         self.kind = Some(CatalogKind::Memory(Arc::new(catalog)));
@@ -878,7 +889,11 @@ export_runtime_op!(
     catalog: *mut IcebergCatalog
 );
 
-// Create a memory catalog (in-process state, local-fs or in-memory file storage)
+// Create a memory catalog.
+// Storage backend is inferred from warehouse_path:
+//   "memory"      → in-process HashMap (everything in RAM)
+//   "s3://…"      → S3-compatible object store (credentials via properties)
+//   anything else → local filesystem at that path
 export_runtime_op!(
     iceberg_memory_catalog_create,
     IcebergCatalogResponse,
@@ -889,16 +904,16 @@ export_runtime_op!(
         // SAFETY: catalog was checked to be non-null above and came from Box::into_raw
         let catalog = unsafe { Box::from_raw(catalog) };
         let warehouse = parse_c_string(warehouse_path, "warehouse_path")?;
-        let storage = parse_c_string(storage_type, "storage_type")?;
-        let use_local_fs = storage != "memory";
-        Ok((*catalog, warehouse, use_local_fs))
+        let props = parse_properties(properties, properties_len)?;
+        Ok((*catalog, warehouse, props))
     },
     args,
     async {
-        let (catalog, warehouse, use_local_fs) = args;
-        catalog.create_memory(warehouse, use_local_fs).await
+        let (catalog, warehouse, props) = args;
+        catalog.create_memory(warehouse, props).await
     },
     catalog: *mut IcebergCatalog,
     warehouse_path: *const c_char,
-    storage_type: *const c_char
+    properties: *const PropertyEntry,
+    properties_len: usize
 );

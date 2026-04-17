@@ -72,7 +72,7 @@ end
     end
 
     @testset "memory storage" begin
-        cat = catalog_create_memory("memory"; storage=:memory)
+        cat = catalog_create_memory("memory")
         try
             @test cat isa Catalog
 
@@ -156,8 +156,72 @@ end
         end
     end
 
+    @testset "S3 storage write and read roundtrip" begin
+        without_aws_env() do
+            s3 = get_s3_config()
+            # Use a unique prefix per test run to avoid cross-test interference
+            warehouse = "s3://warehouse/memory-catalog-test-$(round(Int, time() * 1000))"
+            props = Dict(
+                "s3.endpoint"          => s3["endpoint"],
+                "s3.access-key-id"     => s3["access_key_id"],
+                "s3.secret-access-key" => s3["secret_access_key"],
+                "s3.region"            => s3["region"],
+                "s3.path-style-access" => "true",
+            )
+            cat = catalog_create_memory(warehouse; properties=props)
+            table = C_NULL
+            updated_table = C_NULL
+            data_files = nothing
+            try
+                @test cat isa Catalog
+
+                create_namespace(cat, ["ns"])
+                schema = Schema([
+                    Field(Int32(1), "id",    IcebergLong();   required=true),
+                    Field(Int32(2), "name",  IcebergString(); required=false),
+                    Field(Int32(3), "value", IcebergDouble(); required=false),
+                ])
+                table = create_table(cat, ["ns"], "s3_roundtrip", schema)
+                @test table != C_NULL
+
+                # Write data
+                data_files = RustyIceberg.with_data_file_writer(table) do writer
+                    write(writer, (
+                        id    = Int64[10, 20, 30],
+                        name  = ["x", "y", "z"],
+                        value = [1.5, 2.5, 3.5],
+                    ))
+                end
+                @test data_files !== nothing
+
+                updated_table = RustyIceberg.with_transaction(table, cat) do tx
+                    RustyIceberg.with_fast_append(tx) do action
+                        RustyIceberg.add_data_files(action, data_files)
+                    end
+                end
+
+                # Read back and verify
+                tbl = read_table_data(updated_table)
+                @test tbl !== nothing
+                sorted = sort(collect(zip(tbl.id, tbl.name, tbl.value)))
+                @test length(sorted) == 3
+                @test sorted[1] == (10, "x", 1.5)
+                @test sorted[2] == (20, "y", 2.5)
+                @test sorted[3] == (30, "z", 3.5)
+            finally
+                if updated_table != C_NULL
+                    free_table(updated_table)
+                end
+                if table != C_NULL
+                    free_table(table)
+                end
+                free_catalog!(cat)
+            end
+        end
+    end
+
     @testset "REST-only operations throw on memory catalog" begin
-        cat = catalog_create_memory("memory"; storage=:memory)
+        cat = catalog_create_memory("memory")
         try
             create_namespace(cat, ["ns"])
             create_table(cat, ["ns"], "t", _simple_schema())
