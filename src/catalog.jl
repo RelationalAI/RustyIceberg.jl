@@ -307,6 +307,55 @@ function catalog_create_rest(
 end
 
 """
+    catalog_create_memory(warehouse_path::String; storage::Symbol=:local)::Catalog
+
+Create an in-memory Iceberg catalog.
+
+The catalog registry (which namespaces and tables exist) always lives in memory
+and is lost when the catalog is freed. What varies is where the actual table
+files (metadata JSON, Parquet) go:
+
+- `storage=:local` (default): files are written to `warehouse_path` on the local
+  filesystem. They persist after the catalog is freed.
+- `storage=:memory`: files are stored in RAM alongside the registry. Everything
+  is lost when the catalog is freed. Useful for unit tests.
+
+# Example
+```julia
+# Persist table files to disk
+catalog = catalog_create_memory("/tmp/my_warehouse")
+
+# Fully ephemeral — good for tests
+catalog = catalog_create_memory("memory"; storage=:memory)
+```
+"""
+function catalog_create_memory(
+    warehouse_path::String;
+    storage::Symbol=:local,
+)::Catalog
+    catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
+    if catalog_ptr == C_NULL
+        throw(IcebergException("Failed to create empty catalog"))
+    end
+
+    storage_str = storage == :memory ? "memory" : "local"
+    response = CatalogResponse()
+
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_memory_catalog_create(
+            catalog_ptr::Ptr{Cvoid},
+            warehouse_path::Cstring,
+            storage_str::Cstring,
+            response::Ref{CatalogResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "catalog_create_memory", IcebergException)
+    return Catalog(response.value, nothing)
+end
+
+"""
     free_catalog!(catalog::Catalog)
 
 Free the memory associated with a catalog.
