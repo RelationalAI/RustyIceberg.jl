@@ -7,9 +7,9 @@ use crate::IcebergTable;
 use anyhow::Result;
 use async_trait::async_trait;
 use iceberg::io::{
-    LocalFsStorageFactory, MemoryStorageFactory, OpenDalStorageFactory,
-    OpenDalRoutingStorageFactory, RefreshableStorageFactory, StorageCredential,
-    StorageCredentialsLoader, StorageFactory,
+    LocalFsStorageFactory, MemoryStorageFactory, OpenDalRoutingStorageFactory,
+    OpenDalStorageFactory, RefreshableStorageFactory, StorageCredential, StorageCredentialsLoader,
+    StorageFactory,
 };
 use iceberg::memory::{MemoryCatalogBuilder, MEMORY_CATALOG_WAREHOUSE};
 use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableIdent};
@@ -281,7 +281,11 @@ impl IcebergCatalog {
                 // StorageConfig at build() time, but MemoryCatalog builds its FileIO once
                 // at construction time (before any table exists). Use the pre-configured
                 // S3 variant instead, which reads credentials from catalog props directly.
-                let scheme = if warehouse.starts_with("s3a://") { "s3a" } else { "s3" };
+                let scheme = if warehouse.starts_with("s3a://") {
+                    "s3a"
+                } else {
+                    "s3"
+                };
                 Arc::new(OpenDalStorageFactory::S3 {
                     configured_scheme: scheme.to_string(),
                     customized_credential_load: None,
