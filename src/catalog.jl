@@ -61,6 +61,9 @@
 #   via table_open("s3://bucket/prefix/.../metadata.json"). S3 credentials are
 #   passed via the `properties` keyword argument using the same keys accepted
 #   by catalog_create_rest ("s3.access-key-id", "s3.region", etc.).
+#   Note: uses a pre-configured S3 storage factory (not the routing factory),
+#   because MemoryCatalog builds its FileIO once at construction time — before
+#   any table location is known — so the routing factory cannot be used here.
 #
 # Memory catalog + in-process memory (catalog_create_memory("memory"))
 #   Everything, including Parquet bytes, lives in a HashMap in RAM. Nothing
