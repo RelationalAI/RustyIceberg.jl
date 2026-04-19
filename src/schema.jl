@@ -629,3 +629,39 @@ Build the final Schema from the builder.
 function build(builder::SchemaBuilder)::Schema
     Schema(builder.fields; identifier_field_ids=builder.identifier_field_ids)
 end
+
+function _schema_from_json(json::String)::Schema
+    parsed = JSON.parse(json)
+    fields = Field[
+        Field(
+            Int32(f["id"]),
+            String(f["name"]),
+            String(f["type"]);
+            required = get(f, "required", false),
+            doc = get(f, "doc", nothing),
+        )
+        for f in parsed["fields"]
+    ]
+    identifier_field_ids = Int32[Int32(id) for id in get(parsed, "identifier-field-ids", [])]
+    return Schema(fields; identifier_field_ids=identifier_field_ids)
+end
+
+"""
+    schema_from_table(table::Table)::Schema
+
+Get the current schema of an Iceberg table as a `Schema` object.
+
+Parses the table's JSON schema and constructs a `Schema` with typed `Field` objects.
+
+# Example
+```julia
+table = table_open("s3://bucket/path/metadata/metadata.json")
+schema = schema_from_table(table)
+for field in schema.fields
+    println(field.name, ": ", field.type)
+end
+```
+"""
+function schema_from_table(table::Table)::Schema
+    return _schema_from_json(table_schema(table))
+end
