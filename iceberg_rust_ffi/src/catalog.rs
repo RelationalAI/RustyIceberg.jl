@@ -174,6 +174,11 @@ impl StorageCredentialsLoader for RestCredentialsLoader {
 /// in the `Rest` arm lets us call REST-only methods (vended credentials, token
 /// invalidation) without a downcast while still exposing a `&dyn Catalog` for
 /// all generic operations.
+///
+/// Both arms wrap their catalog in an `Arc` so the value can be shared safely
+/// across async tasks spawned by the Tokio runtime (e.g. credential loaders
+/// that hold a `Weak<RestCatalog>`). Without `Arc` the catalog would need to
+/// be `'static` or cloned on every async boundary.
 enum CatalogKind {
     Rest(Arc<RestCatalog>),
     Memory(Arc<dyn Catalog>),
@@ -183,6 +188,11 @@ enum CatalogKind {
 /// Stores the catalog backend plus any pre-creation configuration (authenticator,
 /// credentials-loader flag).
 pub struct IcebergCatalog {
+    /// `None` while the catalog is being configured (before `create_rest` /
+    /// `create_memory` is called). Using `Option` here rather than adding an
+    /// `Uninitialized` variant to `CatalogKind` keeps the enum focused on
+    /// actual backends and lets the compiler enforce exhaustive matching on
+    /// only the meaningful states.
     kind: Option<CatalogKind>,
     /// Stores a pending authenticator to be applied before first use
     authenticator: Option<Arc<FFITokenAuthenticator>>,
