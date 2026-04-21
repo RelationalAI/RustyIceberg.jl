@@ -7,9 +7,11 @@ use crate::IcebergTable;
 use anyhow::Result;
 use async_trait::async_trait;
 use iceberg::io::{
-    OpenDalRoutingStorageFactory, RefreshableStorageFactory, StorageCredential,
-    StorageCredentialsLoader, StorageFactory,
+    LocalFsStorageFactory, MemoryStorageFactory, OpenDalRoutingStorageFactory,
+    OpenDalStorageFactory, RefreshableStorageFactory, StorageCredential, StorageCredentialsLoader,
+    StorageFactory,
 };
+use iceberg::memory::{MemoryCatalogBuilder, MEMORY_CATALOG_WAREHOUSE};
 use iceberg::{Catalog, CatalogBuilder, Error, ErrorKind, NamespaceIdent, TableIdent};
 use iceberg_catalog_rest::{CustomAuthenticator, RestCatalog, RestCatalogBuilder};
 use std::collections::HashMap;
@@ -168,11 +170,30 @@ impl StorageCredentialsLoader for RestCredentialsLoader {
     }
 }
 
-/// Opaque catalog handle for FFI
-/// Stores a RestCatalog instance wrapped in an Arc for safe memory management.
-/// Also stores the authenticator to allow setting it before catalog creation.
+/// Discriminates between catalog backends. Carrying the concrete `RestCatalog`
+/// in the `Rest` arm lets us call REST-only methods (vended credentials, token
+/// invalidation) without a downcast while still exposing a `&dyn Catalog` for
+/// all generic operations.
+///
+/// Both arms wrap their catalog in an `Arc` so the value can be shared safely
+/// across async tasks spawned by the Tokio runtime (e.g. credential loaders
+/// that hold a `Weak<RestCatalog>`). Without `Arc` the catalog would need to
+/// be `'static` or cloned on every async boundary.
+enum CatalogKind {
+    Rest(Arc<RestCatalog>),
+    Memory(Arc<dyn Catalog>),
+}
+
+/// Opaque catalog handle for FFI.
+/// Stores the catalog backend plus any pre-creation configuration (authenticator,
+/// credentials-loader flag).
 pub struct IcebergCatalog {
-    catalog: Option<Arc<RestCatalog>>,
+    /// `None` while the catalog is being configured (before `create_rest` /
+    /// `create_memory` is called). Using `Option` here rather than adding an
+    /// `Uninitialized` variant to `CatalogKind` keeps the enum focused on
+    /// actual backends and lets the compiler enforce exhaustive matching on
+    /// only the meaningful states.
+    kind: Option<CatalogKind>,
     /// Stores a pending authenticator to be applied before first use
     authenticator: Option<Arc<FFITokenAuthenticator>>,
     /// Whether to attach a storage credentials loader after catalog creation
@@ -190,7 +211,7 @@ unsafe impl Sync for IcebergCatalog {}
 impl Default for IcebergCatalog {
     fn default() -> Self {
         IcebergCatalog {
-            catalog: None,
+            kind: None,
             authenticator: None,
             use_credentials_loader: false,
         }
@@ -242,8 +263,58 @@ impl IcebergCatalog {
             )
         };
 
-        self.catalog = Some(catalog_arc);
+        self.kind = Some(CatalogKind::Rest(catalog_arc));
 
+        Ok(self)
+    }
+
+    /// Create and initialize a memory catalog with pluggable file storage.
+    ///
+    /// The storage backend is inferred from `warehouse`:
+    ///
+    /// - `"memory"` — everything (metadata + Parquet) lives in RAM.
+    ///   Lost when the catalog is freed. Good for unit tests.
+    /// - `"s3://…"` / `"s3a://…"` — table files are written to S3 (or any
+    ///   S3-compatible store). Credentials are passed in `props` using the
+    ///   standard keys (`s3.access-key-id`, `s3.region`, etc.).
+    ///   The catalog registry still lives in RAM.
+    /// - Any other string (local path) — table files are written to the
+    ///   local filesystem at that path. The catalog registry lives in RAM.
+    pub async fn create_memory(
+        mut self,
+        warehouse: String,
+        props: HashMap<String, String>,
+    ) -> Result<Self> {
+        let factory: Arc<dyn StorageFactory> =
+            if warehouse.starts_with("s3://") || warehouse.starts_with("s3a://") {
+                // OpenDalRoutingStorageFactory requires PROP_METADATA_LOCATION in the
+                // StorageConfig at build() time, but MemoryCatalog builds its FileIO once
+                // at construction time (before any table exists). Use the pre-configured
+                // S3 variant instead, which reads credentials from catalog props directly.
+                let scheme = if warehouse.starts_with("s3a://") {
+                    "s3a"
+                } else {
+                    "s3"
+                };
+                Arc::new(OpenDalStorageFactory::S3 {
+                    configured_scheme: scheme.to_string(),
+                    customized_credential_load: None,
+                })
+            } else if warehouse == "memory" {
+                Arc::new(MemoryStorageFactory)
+            } else {
+                Arc::new(LocalFsStorageFactory)
+            };
+
+        let mut catalog_props = props;
+        catalog_props.insert(MEMORY_CATALOG_WAREHOUSE.to_string(), warehouse);
+
+        let catalog = MemoryCatalogBuilder::default()
+            .with_storage_factory(factory)
+            .load("memory", catalog_props)
+            .await?;
+
+        self.kind = Some(CatalogKind::Memory(Arc::new(catalog)));
         Ok(self)
     }
 
@@ -265,21 +336,31 @@ impl IcebergCatalog {
         Ok(())
     }
 
-    /// Get a reference to the underlying RestCatalog.
-    ///
-    /// Returns a reference to the catalog.
-    /// Panics if the catalog has not been initialized via create_rest.
-    fn as_ref(&self) -> &RestCatalog {
-        self.catalog
-            .as_ref()
-            .expect("catalog should be initialized")
+    /// Returns a `&dyn Catalog` for generic operations. Panics if not initialized.
+    fn as_ref(&self) -> &dyn Catalog {
+        match self.kind.as_ref().expect("catalog should be initialized") {
+            CatalogKind::Rest(c) => c.as_ref(),
+            CatalogKind::Memory(c) => c.as_ref(),
+        }
     }
 
-    /// Get a reference to the underlying RestCatalog for transaction commit.
-    ///
-    /// Returns Some(&RestCatalog) if initialized, None otherwise.
-    pub fn get_catalog(&self) -> Option<&RestCatalog> {
-        self.catalog.as_deref()
+    /// Returns `&RestCatalog` for REST-only operations. Errors for other backends.
+    fn as_rest_ref(&self) -> Result<&RestCatalog> {
+        match self.kind.as_ref() {
+            Some(CatalogKind::Rest(c)) => Ok(c.as_ref()),
+            Some(CatalogKind::Memory(_)) => Err(anyhow::anyhow!(
+                "This operation is only supported by REST catalogs"
+            )),
+            None => Err(anyhow::anyhow!("Catalog not initialized")),
+        }
+    }
+
+    /// Returns `&dyn Catalog` for use in transaction commits. None if not initialized.
+    pub fn get_catalog(&self) -> Option<&dyn Catalog> {
+        self.kind.as_ref().map(|k| match k {
+            CatalogKind::Rest(c) => c.as_ref() as &dyn Catalog,
+            CatalogKind::Memory(c) => c.as_ref(),
+        })
     }
 
     /// Load a table by namespace and name
@@ -304,7 +385,7 @@ impl IcebergCatalog {
         let namespace = NamespaceIdent::from_vec(namespace_parts)?;
         let table_ident = TableIdent::new(namespace, table_name);
         let table = self
-            .as_ref()
+            .as_rest_ref()?
             .load_table_with_credentials(&table_ident)
             .await?;
 
@@ -381,7 +462,7 @@ impl IcebergCatalog {
 
         // Call the appropriate catalog method based on load_credentials flag
         let table = if load_credentials {
-            self.as_ref()
+            self.as_rest_ref()?
                 .create_table_with_credentials(&namespace_ident, table_creation)
                 .await?
         } else {
@@ -823,10 +904,39 @@ export_runtime_op!(
     },
     catalog_ref,
     async {
-        if let Some(cat) = &catalog_ref.catalog {
+        if let Some(CatalogKind::Rest(cat)) = &catalog_ref.kind {
             cat.invalidate_token().await?;
         }
         Ok::<bool, anyhow::Error>(true)
     },
     catalog: *mut IcebergCatalog
+);
+
+// Create a memory catalog.
+// Storage backend is inferred from warehouse_path:
+//   "memory"      → in-process HashMap (everything in RAM)
+//   "s3://…"      → S3-compatible object store (credentials via properties)
+//   anything else → local filesystem at that path
+export_runtime_op!(
+    iceberg_memory_catalog_create,
+    IcebergCatalogResponse,
+    || {
+        if catalog.is_null() {
+            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+        }
+        // SAFETY: catalog was checked to be non-null above and came from Box::into_raw
+        let catalog = unsafe { Box::from_raw(catalog) };
+        let warehouse = parse_c_string(warehouse_path, "warehouse_path")?;
+        let props = parse_properties(properties, properties_len)?;
+        Ok((*catalog, warehouse, props))
+    },
+    args,
+    async {
+        let (catalog, warehouse, props) = args;
+        catalog.create_memory(warehouse, props).await
+    },
+    catalog: *mut IcebergCatalog,
+    warehouse_path: *const c_char,
+    properties: *const PropertyEntry,
+    properties_len: usize
 );
