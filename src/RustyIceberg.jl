@@ -20,6 +20,13 @@ export scan!, next_batch, free_batch, free_stream
 export FileScanTaskStream, ArrowReaderContext, FileScanHandle
 export plan_files, create_reader, next_file_scan, read_file_scan
 export file_scan_record_count, free_file_scan_stream, free_reader, free_file_scan
+export IncrementalAppendTaskStream, IncrementalPosDeleteTaskStream
+export IncrementalAppendHandle, IncrementalPosDeleteHandle
+export next_append_task, read_append_task
+export next_pos_delete_task, read_pos_delete_task
+export append_task_record_count
+export free_incremental_append_task_stream, free_incremental_pos_delete_task_stream
+export free_incremental_append_task, free_incremental_pos_delete_task
 export FILE_COLUMN, POS_COLUMN
 export Catalog, catalog_create_rest, catalog_create_memory, free_catalog!
 export load_table, list_tables, list_namespaces, table_exists, create_table, drop_table, drop_namespace, create_namespace

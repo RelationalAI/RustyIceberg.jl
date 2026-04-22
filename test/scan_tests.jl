@@ -1528,3 +1528,252 @@ end
         end
     end
 end
+
+@testset "Split-Scan API - Incremental" begin
+    incremental_path = "s3://warehouse/incremental/test1/metadata/00003-359e8bb8-1e5d-46d2-bcde-fdaeaa41114f.metadata.json"
+    from_snapshot_id = Int64(6540713100348352610)
+    to_snapshot_id   = Int64(6832180054960511692)
+
+    @testset "E2E append + delete streams" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        RustyIceberg.build!(scan)
+
+        reader = RustyIceberg.create_reader(scan)
+        @test reader isa RustyIceberg.ArrowReaderContext
+        append_stream, delete_stream = RustyIceberg.plan_files(scan)
+        @test append_stream isa RustyIceberg.IncrementalAppendTaskStream
+        @test delete_stream isa RustyIceberg.IncrementalPosDeleteTaskStream
+
+        inserts_values = Int64[]
+        append_task_count = 0
+
+        try
+            while true
+                at = RustyIceberg.next_append_task(append_stream)
+                at === nothing && break
+                append_task_count += 1
+                stream = RustyIceberg.read_append_task(reader, at)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        batch = unsafe_load(batch_ptr)
+                        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                        df = DataFrame(arrow_table)
+                        @test "n" in names(df)
+                        append!(inserts_values, df.n)
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+
+            deletes_values = Tuple{String, Int64}[]
+            delete_task_count = 0
+
+            while true
+                dt = RustyIceberg.next_pos_delete_task(delete_stream)
+                dt === nothing && break
+                delete_task_count += 1
+                stream = RustyIceberg.read_pos_delete_task(reader, dt)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        batch = unsafe_load(batch_ptr)
+                        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                        df = DataFrame(arrow_table)
+                        @test names(df) == ["file_path", "pos"]
+                        for row in eachrow(df)
+                            push!(deletes_values, (row.file_path, row.pos))
+                        end
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+
+            @test append_task_count > 0
+            @test length(inserts_values) == 98
+            sort!(inserts_values)
+            @test minimum(inserts_values) == 201
+            @test maximum(inserts_values) == 299
+            @test 250 ∉ inserts_values
+
+            @test length(deletes_values) == 1
+            @test deletes_values[1][2] == 10
+            @test endswith(deletes_values[1][1], ".parquet")
+
+            println("✅ Incremental split-scan E2E test passed ($append_task_count append tasks, $(length(inserts_values)) inserts, $(length(deletes_values)) deletes)")
+        finally
+            RustyIceberg.free_incremental_append_task_stream(append_stream)
+            RustyIceberg.free_incremental_pos_delete_task_stream(delete_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "append_task_record_count" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        RustyIceberg.build!(scan)
+
+        reader = RustyIceberg.create_reader(scan)
+        append_stream, delete_stream = RustyIceberg.plan_files(scan)
+
+        try
+            while true
+                at = RustyIceberg.next_append_task(append_stream)
+                at === nothing && break
+                count = RustyIceberg.append_task_record_count(at)
+                @test count === nothing || count >= 0
+                stream = RustyIceberg.read_append_task(reader, at)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+            while true
+                dt = RustyIceberg.next_pos_delete_task(delete_stream)
+                dt === nothing && break
+                RustyIceberg.free_incremental_pos_delete_task(dt)
+            end
+            println("✅ append_task_record_count test passed")
+        finally
+            RustyIceberg.free_incremental_append_task_stream(append_stream)
+            RustyIceberg.free_incremental_pos_delete_task_stream(delete_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "free_incremental_append_task discards without reading" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        RustyIceberg.build!(scan)
+
+        reader = RustyIceberg.create_reader(scan)
+        append_stream, delete_stream = RustyIceberg.plan_files(scan)
+
+        try
+            at = RustyIceberg.next_append_task(append_stream)
+            if at !== nothing
+                @test_nowarn RustyIceberg.free_incremental_append_task(at)
+            end
+            println("✅ free_incremental_append_task (discard) test passed")
+        finally
+            RustyIceberg.free_incremental_append_task_stream(append_stream)
+            RustyIceberg.free_incremental_pos_delete_task_stream(delete_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "Data matches non-split incremental scan" begin
+        table = RustyIceberg.table_open(incremental_path)
+
+        # Non-split scan
+        scan_ns = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        inserts_ns, deletes_ns = RustyIceberg.scan!(scan_ns)
+        ns_inserts = Int64[]
+        ns_deletes = Tuple{String, Int64}[]
+        try
+            batch_ptr = RustyIceberg.next_batch(inserts_ns)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+                append!(ns_inserts, df.n)
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(inserts_ns)
+            end
+            batch_ptr = RustyIceberg.next_batch(deletes_ns)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+                for row in eachrow(df)
+                    push!(ns_deletes, (row.file_path, row.pos))
+                end
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(deletes_ns)
+            end
+        finally
+            RustyIceberg.free_stream(inserts_ns)
+            RustyIceberg.free_stream(deletes_ns)
+            RustyIceberg.free_incremental_scan!(scan_ns)
+        end
+
+        # Split scan
+        scan_sp = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        RustyIceberg.build!(scan_sp)
+        reader = RustyIceberg.create_reader(scan_sp)
+        append_stream, delete_stream = RustyIceberg.plan_files(scan_sp)
+        sp_inserts = Int64[]
+        sp_deletes = Tuple{String, Int64}[]
+        try
+            while true
+                at = RustyIceberg.next_append_task(append_stream)
+                at === nothing && break
+                stream = RustyIceberg.read_append_task(reader, at)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        batch = unsafe_load(batch_ptr)
+                        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                        df = DataFrame(arrow_table)
+                        append!(sp_inserts, df.n)
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+            while true
+                dt = RustyIceberg.next_pos_delete_task(delete_stream)
+                dt === nothing && break
+                stream = RustyIceberg.read_pos_delete_task(reader, dt)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        batch = unsafe_load(batch_ptr)
+                        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                        df = DataFrame(arrow_table)
+                        for row in eachrow(df)
+                            push!(sp_deletes, (row.file_path, row.pos))
+                        end
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+        finally
+            RustyIceberg.free_incremental_append_task_stream(append_stream)
+            RustyIceberg.free_incremental_pos_delete_task_stream(delete_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_incremental_scan!(scan_sp)
+        end
+
+        RustyIceberg.free_table(table)
+
+        sort!(ns_inserts); sort!(sp_inserts)
+        sort!(ns_deletes); sort!(sp_deletes)
+        @test sp_inserts == ns_inserts
+        @test sp_deletes == ns_deletes
+        println("✅ Incremental split-scan data matches non-split scan")
+    end
+end

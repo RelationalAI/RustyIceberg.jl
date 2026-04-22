@@ -62,27 +62,6 @@ macro_rules! impl_scan_builder_method {
     };
 }
 
-/// Macro to generate with_batch_size function for any scan type.
-/// Only updates the builder; does NOT store the batch size in the scan struct.
-/// For IcebergScan, use the custom iceberg_scan_with_batch_size function instead,
-/// which also stores the value for create_reader.
-macro_rules! impl_with_batch_size {
-    ($fn_name:ident, $scan_type:ident) => {
-        #[no_mangle]
-        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type, n: usize) -> CResult {
-            if scan.is_null() || (*scan).is_null() {
-                return CResult::Error;
-            }
-            let scan_ref = unsafe { &mut **scan };
-            if scan_ref.builder.is_none() {
-                return CResult::Error;
-            }
-            let builder = scan_ref.builder.take();
-            scan_ref.builder = builder.map(|b| b.with_batch_size(Some(n)));
-            CResult::Ok
-        }
-    };
-}
 
 /// Macro to generate build function for any scan type
 macro_rules! impl_scan_build {
@@ -143,5 +122,4 @@ pub(crate) use impl_scan_build;
 pub(crate) use impl_scan_builder_method;
 pub(crate) use impl_scan_free;
 pub(crate) use impl_select_columns;
-pub(crate) use impl_with_batch_size;
 pub(crate) use impl_with_serialization_concurrency_limit;

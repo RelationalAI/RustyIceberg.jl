@@ -40,7 +40,10 @@ mod util;
 // Re-export types and functions from submodules
 pub use catalog::{IcebergBoolResponse, IcebergCatalog, IcebergCatalogResponse};
 pub use full::IcebergScan;
-pub use incremental::{IcebergIncrementalScan, IcebergUnzippedStreamsResponse};
+pub use incremental::{
+    IcebergIncrementalScan, IcebergIncrementalTaskStreamsResponse,
+    IcebergUnzippedStreamsResponse,
+};
 pub use response::{
     IcebergBoxedResponse, IcebergNestedStringListResponse, IcebergPropertyResponse,
     IcebergStringListResponse,
@@ -49,6 +52,9 @@ pub use table::{
     ArrowBatch, IcebergArrowReaderContext, IcebergArrowReaderContextResponse, IcebergArrowStream,
     IcebergArrowStreamResponse, IcebergBatchResponse, IcebergFileScanTask,
     IcebergFileScanTaskResponse, IcebergFileScanTaskStream, IcebergFileScanTaskStreamResponse,
+    IcebergIncrementalAppendTask, IcebergIncrementalAppendTaskResponse,
+    IcebergIncrementalAppendTaskStream, IcebergIncrementalPosDeleteTask,
+    IcebergIncrementalPosDeleteTaskResponse, IcebergIncrementalPosDeleteTaskStream,
     IcebergNextFileScanTaskResponse, IcebergTable, IcebergTableResponse,
 };
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
@@ -178,6 +184,42 @@ pub(crate) fn transform_stream_with_parallel_serialization(
         })
         .buffer_unordered(concurrency)
         .boxed()
+}
+
+/// Build an Arrow record-batch stream from a list of deleted row positions.
+/// Schema: [file_path: Utf8, pos: Int64]. Used by `iceberg_incremental_read_pos_delete_task`.
+pub(crate) fn pos_delete_positions_to_arrow_stream(
+    file_path: String,
+    positions: Vec<u64>,
+    batch_size: usize,
+) -> Result<futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>> {
+    use std::sync::Arc;
+    use arrow_array::{Int64Array, StringArray};
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("file_path", DataType::Utf8, false),
+        Field::new("pos", DataType::Int64, false),
+    ]));
+
+    let stream = futures::stream::iter(
+        positions
+            .chunks(batch_size)
+            .map(|chunk| {
+                let n = chunk.len();
+                let file_array = StringArray::from(vec![file_path.as_str(); n]);
+                let pos_array = Int64Array::from_iter(chunk.iter().map(|&p| Some(p as i64)));
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(file_array), Arc::new(pos_array)],
+                )
+                .map_err(|e| iceberg::Error::new(iceberg::ErrorKind::Unexpected, e.to_string()))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .boxed();
+
+    Ok(stream)
 }
 
 // Initialize runtime - configure RT and RESULT_CB directly

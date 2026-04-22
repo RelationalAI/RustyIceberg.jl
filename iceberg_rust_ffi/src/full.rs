@@ -261,9 +261,12 @@ pub extern "C" fn iceberg_create_reader(
         scan_ptr.serialization_concurrency
     };
 
+    let batch_size = if scan_ptr.batch_size > 0 { Some(scan_ptr.batch_size) } else { None };
+
     Box::into_raw(Box::new(IcebergArrowReaderContext {
         reader: builder.build(),
         serialization_concurrency,
+        batch_size,
     }))
 }
 
