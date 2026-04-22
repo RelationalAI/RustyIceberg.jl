@@ -249,6 +249,18 @@ pub extern "C" fn iceberg_table_last_updated_ms(table: *mut IcebergTable) -> i64
     table_ref.table.metadata().last_updated_ms()
 }
 
+/// Get the current snapshot ID of the table.
+/// Returns the snapshot ID (a non-zero i64) if the table has at least one committed snapshot,
+/// or 0 if the table has no snapshots yet.
+#[no_mangle]
+pub extern "C" fn iceberg_table_current_snapshot_id(table: *mut IcebergTable) -> i64 {
+    if table.is_null() {
+        return 0;
+    }
+    let table_ref = unsafe { &*table };
+    table_ref.table.metadata().current_snapshot_id().unwrap_or(0)
+}
+
 /// Get table current schema as JSON string
 #[no_mangle]
 pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char {
