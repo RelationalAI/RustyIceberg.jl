@@ -1223,3 +1223,308 @@ end
         end
     end
 end
+
+@testset "Split-Scan API" begin
+    nations_path = "s3://warehouse/tpch.sf01/nation/metadata/00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
+    customer_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
+
+    @testset "E2E - Nations Table" begin
+        table = RustyIceberg.table_open(nations_path)
+        scan = RustyIceberg.new_scan(table)
+        RustyIceberg.build!(scan)
+
+        reader = RustyIceberg.create_reader(scan)
+        @test reader isa RustyIceberg.ArrowReaderContext
+        file_stream = RustyIceberg.plan_files(scan)
+        @test file_stream isa RustyIceberg.FileScanTaskStream
+
+        all_rows = Tuple[]
+        task_count = 0
+
+        try
+            while true
+                fs = RustyIceberg.next_file_scan(file_stream)
+                fs === nothing && break
+                task_count += 1
+                stream = RustyIceberg.read_file_scan(reader, fs)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        batch = unsafe_load(batch_ptr)
+                        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                        df = DataFrame(arrow_table)
+                        for row in eachrow(df)
+                            push!(all_rows, Tuple(row))
+                        end
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+
+            sort!(all_rows, by = x -> x[1])
+            @test task_count > 0
+            @test length(all_rows) == 25
+            @test all_rows[1] == (0, "ALGERIA", 0, "furiously regular requests. platelets affix furious")
+            @test all_rows[end] == (24, "UNITED STATES", 1, "ly ironic requests along the slyly bold ideas hang after the blithely special notornis; blithely even accounts")
+            println("✅ Split-scan E2E test passed ($task_count tasks, $(length(all_rows)) rows)")
+        finally
+            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "Data matches full scan" begin
+        table = RustyIceberg.table_open(nations_path)
+
+        # Full scan
+        scan_full = RustyIceberg.new_scan(table)
+        stream_full = RustyIceberg.scan!(scan_full)
+        full_rows = Tuple[]
+        try
+            batch_ptr = RustyIceberg.next_batch(stream_full)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
+                for row in eachrow(df)
+                    push!(full_rows, Tuple(row))
+                end
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream_full)
+            end
+        finally
+            RustyIceberg.free_stream(stream_full)
+            RustyIceberg.free_scan!(scan_full)
+        end
+
+        # Split scan
+        scan_split = RustyIceberg.new_scan(table)
+        RustyIceberg.build!(scan_split)
+        reader = RustyIceberg.create_reader(scan_split)
+        file_stream = RustyIceberg.plan_files(scan_split)
+        split_rows = Tuple[]
+        try
+            while true
+                fs = RustyIceberg.next_file_scan(file_stream)
+                fs === nothing && break
+                stream = RustyIceberg.read_file_scan(reader, fs)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        batch = unsafe_load(batch_ptr)
+                        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                        df = DataFrame(arrow_table)
+                        for row in eachrow(df)
+                            push!(split_rows, Tuple(row))
+                        end
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+        finally
+            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_scan!(scan_split)
+        end
+
+        RustyIceberg.free_table(table)
+
+        sort!(full_rows, by = x -> x[1])
+        sort!(split_rows, by = x -> x[1])
+        @test split_rows == full_rows
+        println("✅ Split-scan data matches full scan ($(length(split_rows)) rows)")
+    end
+
+    @testset "Column selection" begin
+        table = RustyIceberg.table_open(nations_path)
+        scan = RustyIceberg.new_scan(table)
+        RustyIceberg.select_columns!(scan, ["n_nationkey", "n_name"])
+        RustyIceberg.build!(scan)
+
+        reader = RustyIceberg.create_reader(scan)
+        file_stream = RustyIceberg.plan_files(scan)
+
+        try
+            while true
+                fs = RustyIceberg.next_file_scan(file_stream)
+                fs === nothing && break
+                stream = RustyIceberg.read_file_scan(reader, fs)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        batch = unsafe_load(batch_ptr)
+                        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                        df = DataFrame(arrow_table)
+                        @test names(df) == ["n_nationkey", "n_name"]
+                        @test !isempty(df)
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+            println("✅ Split-scan column selection test passed")
+        finally
+            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "file_scan_record_count" begin
+        table = RustyIceberg.table_open(nations_path)
+        scan = RustyIceberg.new_scan(table)
+        RustyIceberg.build!(scan)
+
+        reader = RustyIceberg.create_reader(scan)
+        file_stream = RustyIceberg.plan_files(scan)
+        total_from_counts = 0
+
+        try
+            while true
+                fs = RustyIceberg.next_file_scan(file_stream)
+                fs === nothing && break
+
+                count = RustyIceberg.file_scan_record_count(fs)
+                @test count === nothing || count >= 0
+                if count !== nothing
+                    total_from_counts += count
+                end
+
+                stream = RustyIceberg.read_file_scan(reader, fs)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+            if total_from_counts > 0
+                @test total_from_counts == 25
+            end
+            println("✅ file_scan_record_count test passed (total=$total_from_counts)")
+        finally
+            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "free_file_scan discards task without reading" begin
+        table = RustyIceberg.table_open(nations_path)
+        scan = RustyIceberg.new_scan(table)
+        RustyIceberg.build!(scan)
+
+        reader = RustyIceberg.create_reader(scan)
+        file_stream = RustyIceberg.plan_files(scan)
+
+        try
+            fs = RustyIceberg.next_file_scan(file_stream)
+            if fs !== nothing
+                @test_nowarn RustyIceberg.free_file_scan(fs)
+            end
+            println("✅ free_file_scan (discard without reading) test passed")
+        finally
+            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "create_reader with reader_concurrency override" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+        RustyIceberg.select_columns!(scan, ["c_custkey"])
+        RustyIceberg.build!(scan)
+
+        reader = RustyIceberg.create_reader(scan; reader_concurrency=UInt(4))
+        @test reader isa RustyIceberg.ArrowReaderContext
+
+        file_stream = RustyIceberg.plan_files(scan)
+        total_rows = 0
+
+        try
+            while true
+                fs = RustyIceberg.next_file_scan(file_stream)
+                fs === nothing && break
+                stream = RustyIceberg.read_file_scan(reader, fs)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        batch = unsafe_load(batch_ptr)
+                        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                        total_rows += length(arrow_table)
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+            @test total_rows > 0
+            println("✅ create_reader with reader_concurrency=4 test passed ($total_rows rows)")
+        finally
+            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+
+    @testset "Multi-file with batch_size" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(100))
+        RustyIceberg.build!(scan)
+
+        reader = RustyIceberg.create_reader(scan)
+        file_stream = RustyIceberg.plan_files(scan)
+        task_count = 0
+        total_rows = 0
+
+        try
+            while true
+                fs = RustyIceberg.next_file_scan(file_stream)
+                fs === nothing && break
+                task_count += 1
+                stream = RustyIceberg.read_file_scan(reader, fs)
+                try
+                    batch_ptr = RustyIceberg.next_batch(stream)
+                    while batch_ptr != C_NULL
+                        batch = unsafe_load(batch_ptr)
+                        arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                        @test length(arrow_table) <= 100
+                        total_rows += length(arrow_table)
+                        RustyIceberg.free_batch(batch_ptr)
+                        batch_ptr = RustyIceberg.next_batch(stream)
+                    end
+                finally
+                    RustyIceberg.free_stream(stream)
+                end
+            end
+            @test task_count >= 1
+            @test total_rows > 0
+            println("✅ Split-scan multi-file test passed ($task_count tasks, $total_rows rows)")
+        finally
+            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_reader(reader)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+    end
+end
