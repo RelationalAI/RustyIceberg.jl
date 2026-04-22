@@ -46,8 +46,10 @@ pub use response::{
     IcebergStringListResponse,
 };
 pub use table::{
-    ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse, IcebergTable,
-    IcebergTableResponse,
+    ArrowBatch, IcebergArrowReaderContext, IcebergArrowReaderContextResponse, IcebergArrowStream,
+    IcebergArrowStreamResponse, IcebergBatchResponse, IcebergFileScanTask,
+    IcebergFileScanTaskResponse, IcebergFileScanTaskStream, IcebergFileScanTaskStreamResponse,
+    IcebergNextFileScanTaskResponse, IcebergTable, IcebergTableResponse,
 };
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
 pub use writer::{

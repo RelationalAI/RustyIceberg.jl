@@ -1,5 +1,7 @@
 /// Common macros for scan builder methods shared between regular and incremental scans
-/// Macro to generate select_columns function for any scan type
+
+/// Macro to generate select_columns function for any scan type.
+/// Uses in-place mutation so it works regardless of how many fields the scan struct has.
 macro_rules! impl_select_columns {
     ($fn_name:ident, $scan_type:ident) => {
         #[no_mangle]
@@ -29,44 +31,19 @@ macro_rules! impl_select_columns {
                 columns.push(col_str.to_string());
             }
 
-            let scan_ref = unsafe { Box::from_raw(*scan) };
-
-            if scan_ref.builder.is_none() {
+            let scan_ref = unsafe { &mut **scan };
+            let builder = scan_ref.builder.take();
+            if builder.is_none() {
                 return CResult::Error;
             }
-            *scan = Box::into_raw(Box::new($scan_type {
-                builder: scan_ref.builder.map(|b| b.select(columns)),
-                scan: scan_ref.scan,
-                serialization_concurrency: scan_ref.serialization_concurrency,
-            }));
-
+            scan_ref.builder = builder.map(|b| b.select(columns));
             CResult::Ok
         }
     };
 }
 
-/// Macro to generate scan builder methods with zero or more parameters
-///
-/// # Examples
-///
-/// With single parameter:
-/// ```ignore
-/// impl_scan_builder_method!(
-///     iceberg_scan_with_data_file_concurrency_limit,
-///     IcebergScan,
-///     with_data_file_concurrency_limit,
-///     n: usize
-/// );
-/// ```
-///
-/// Without parameters:
-/// ```ignore
-/// impl_scan_builder_method!(
-///     iceberg_scan_with_file_column,
-///     IcebergScan,
-///     with_file_column
-/// );
-/// ```
+/// Macro to generate scan builder methods with zero or more parameters.
+/// Uses in-place mutation so it works with any struct that has `builder` and `scan` fields.
 macro_rules! impl_scan_builder_method {
     ($fn_name:ident, $scan_type:ident, $builder_method:ident $(, $param:ident: $param_type:ty)*) => {
         #[no_mangle]
@@ -74,24 +51,21 @@ macro_rules! impl_scan_builder_method {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
-            let scan_ref = unsafe { Box::from_raw(*scan) };
-
-            if scan_ref.builder.is_none() {
+            let scan_ref = unsafe { &mut **scan };
+            let builder = scan_ref.builder.take();
+            if builder.is_none() {
                 return CResult::Error;
             }
-
-            *scan = Box::into_raw(Box::new($scan_type {
-                builder: scan_ref.builder.map(|b| b.$builder_method($($param),*)),
-                scan: scan_ref.scan,
-                serialization_concurrency: scan_ref.serialization_concurrency,
-            }));
-
+            scan_ref.builder = builder.map(|b| b.$builder_method($($param),*));
             CResult::Ok
         }
     };
 }
 
-/// Macro to generate with_batch_size function for any scan type
+/// Macro to generate with_batch_size function for any scan type.
+/// Only updates the builder; does NOT store the batch size in the scan struct.
+/// For IcebergScan, use the custom iceberg_scan_with_batch_size function instead,
+/// which also stores the value for create_reader.
 macro_rules! impl_with_batch_size {
     ($fn_name:ident, $scan_type:ident) => {
         #[no_mangle]
@@ -99,20 +73,12 @@ macro_rules! impl_with_batch_size {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
-            let scan_ref = unsafe { Box::from_raw(*scan) };
-
+            let scan_ref = unsafe { &mut **scan };
             if scan_ref.builder.is_none() {
                 return CResult::Error;
             }
-
-            assert!(scan_ref.scan.is_none());
-
-            *scan = Box::into_raw(Box::new($scan_type {
-                builder: scan_ref.builder.map(|b| b.with_batch_size(Some(n))),
-                scan: None,
-                serialization_concurrency: scan_ref.serialization_concurrency,
-            }));
-
+            let builder = scan_ref.builder.take();
+            scan_ref.builder = builder.map(|b| b.with_batch_size(Some(n)));
             CResult::Ok
         }
     };
@@ -126,19 +92,14 @@ macro_rules! impl_scan_build {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
-            let scan_ref = unsafe { Box::from_raw(*scan) };
-            if scan_ref.builder.is_none() {
+            let scan_ref = unsafe { &mut **scan };
+            let builder = scan_ref.builder.take();
+            if builder.is_none() {
                 return CResult::Error;
             }
-            let builder = scan_ref.builder.unwrap();
-
-            match builder.build() {
+            match builder.unwrap().build() {
                 Ok(built_scan) => {
-                    *scan = Box::into_raw(Box::new($scan_type {
-                        builder: None,
-                        scan: Some(built_scan),
-                        serialization_concurrency: scan_ref.serialization_concurrency,
-                    }));
+                    scan_ref.scan = Some(built_scan);
                     CResult::Ok
                 }
                 Err(_) => CResult::Error,
@@ -170,9 +131,8 @@ macro_rules! impl_with_serialization_concurrency_limit {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
-            let mut scan_ref = unsafe { Box::from_raw(*scan) };
+            let scan_ref = unsafe { &mut **scan };
             scan_ref.serialization_concurrency = n;
-            *scan = Box::into_raw(scan_ref);
             CResult::Ok
         }
     };

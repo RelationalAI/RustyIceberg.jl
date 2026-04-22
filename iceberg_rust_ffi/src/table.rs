@@ -1,7 +1,9 @@
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
+use iceberg::arrow::ArrowReader;
 use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
+use iceberg::scan::{FileScanTask, FileScanTaskStream};
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
 use iceberg::TableIdent;
@@ -44,9 +46,107 @@ pub struct ArrowBatch {
 // making it safe to send between threads.
 unsafe impl Send for ArrowBatch {}
 
+/// Default task prefetch depth for IcebergFileScanTaskStream producers.
+pub(crate) const DEFAULT_TASK_PREFETCH_DEPTH: usize = 4;
+
+// ---------------------------------------------------------------------------
+// Split-scan API types
+// ---------------------------------------------------------------------------
+
+/// Shared ArrowReader context — created once via `create_reader`, then passed
+/// to every `read_file_scan` call. Cloning the reader is cheap: the internal
+/// CachingDeleteFileLoader is shared via Arc.
+pub struct IcebergArrowReaderContext {
+    pub reader: ArrowReader,
+    pub serialization_concurrency: usize,
+}
+
+unsafe impl Send for IcebergArrowReaderContext {}
+
+/// A single file scan task (byte range of a Parquet file) returned by next_file_scan.
+pub struct IcebergFileScanTask {
+    pub task: FileScanTask,
+}
+
+unsafe impl Send for IcebergFileScanTask {}
+
+/// Stream of file scan tasks produced by plan_files. Eagerly drains the
+/// planning stream into a bounded channel so task planning runs ahead of
+/// Julia's consumption.
+pub struct IcebergFileScanTaskStream {
+    receiver: AsyncMutex<tokio::sync::mpsc::Receiver<Result<FileScanTask, iceberg::Error>>>,
+    producer_handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+unsafe impl Send for IcebergFileScanTaskStream {}
+
+impl IcebergFileScanTaskStream {
+    pub fn new(stream: FileScanTaskStream, prefetch_depth: usize) -> Self {
+        use futures::StreamExt;
+        let (tx, rx) = tokio::sync::mpsc::channel(prefetch_depth);
+        let handle = tokio::spawn(async move {
+            futures::pin_mut!(stream);
+            while let Some(item) = stream.next().await {
+                let is_err = item.is_err();
+                if tx.send(item).await.is_err() {
+                    break;
+                }
+                if is_err {
+                    break;
+                }
+            }
+        });
+        Self {
+            receiver: AsyncMutex::new(rx),
+            producer_handle: AsyncMutex::new(Some(handle)),
+        }
+    }
+
+    pub async fn next(&self) -> Result<Option<IcebergFileScanTask>, anyhow::Error> {
+        let mut rx = self.receiver.lock().await;
+        match rx.recv().await {
+            Some(Ok(task)) => Ok(Some(IcebergFileScanTask { task })),
+            Some(Err(e)) => Err(anyhow::anyhow!("Task planning error: {}", e)),
+            None => {
+                let mut handle_guard = self.producer_handle.lock().await;
+                if let Some(handle) = handle_guard.take() {
+                    match handle.await {
+                        Ok(()) => Ok(None),
+                        Err(e) => Err(anyhow::anyhow!("Task planner panicked: {}", e)),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
 /// Type aliases for response types
 pub type IcebergTableResponse = IcebergBoxedResponse<IcebergTable>;
 pub type IcebergArrowStreamResponse = IcebergBoxedResponse<IcebergArrowStream>;
+pub type IcebergArrowReaderContextResponse = IcebergBoxedResponse<IcebergArrowReaderContext>;
+pub type IcebergFileScanTaskStreamResponse = IcebergBoxedResponse<IcebergFileScanTaskStream>;
+pub type IcebergFileScanTaskResponse = IcebergBoxedResponse<IcebergFileScanTask>;
+
+/// Response for next_file_scan — null value pointer means end-of-stream.
+#[repr(transparent)]
+pub struct IcebergNextFileScanTaskResponse(pub IcebergBoxedResponse<IcebergFileScanTask>);
+
+unsafe impl Send for IcebergNextFileScanTaskResponse {}
+
+impl RawResponse for IcebergNextFileScanTaskResponse {
+    type Payload = Option<IcebergFileScanTask>;
+    fn result_mut(&mut self) -> &mut CResult { &mut self.0.result }
+    fn context_mut(&mut self) -> &mut *const Context { &mut self.0.context }
+    fn error_message_mut(&mut self) -> &mut *mut c_char { &mut self.0.error_message }
+    fn set_payload(&mut self, payload: Option<Self::Payload>) {
+        match payload.flatten() {
+            Some(task) => self.0.value = Box::into_raw(Box::new(task)),
+            None => self.0.value = ptr::null_mut(),
+        }
+    }
+}
 
 /// Batch response - same memory layout as IcebergBoxedResponse<ArrowBatch>
 /// but with Option<ArrowBatch> payload to handle end-of-stream (None) case.
@@ -111,6 +211,28 @@ pub extern "C" fn iceberg_arrow_stream_free(stream: *mut IcebergArrowStream) {
         unsafe {
             let _ = Box::from_raw(stream);
         }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn iceberg_arrow_reader_context_free(ctx: *mut IcebergArrowReaderContext) {
+    if !ctx.is_null() {
+        unsafe { let _ = Box::from_raw(ctx); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_task_stream_free(stream: *mut IcebergFileScanTaskStream) {
+    if !stream.is_null() {
+        unsafe { let _ = Box::from_raw(stream); }
+    }
+}
+
+/// Free a file scan task. Do NOT call after passing it to read_file_scan — that consumes it.
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_task_free(task: *mut IcebergFileScanTask) {
+    if !task.is_null() {
+        unsafe { let _ = Box::from_raw(task); }
     }
 }
 

@@ -297,3 +297,145 @@ function free_scan!(scan::Scan)
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cvoid
 end
+
+# ---------------------------------------------------------------------------
+# Split-scan API
+#
+# Usage:
+#   build!(scan)
+#   reader = create_reader(scan)
+#   file_stream = plan_files(scan)
+#   while (fs = next_file_scan(file_stream)) !== nothing
+#       stream = read_file_scan(reader, fs)   # consumes fs
+#       while (bp = next_batch(stream)) != C_NULL
+#           # ... process batch ...
+#           free_batch(bp)
+#       end
+#       free_stream(stream)
+#   end
+#   free_file_scan_stream(file_stream)
+#   free_reader(reader)
+# ---------------------------------------------------------------------------
+
+"""Opaque pointer to a stream of FileScanTasks."""
+mutable struct FileScanTaskStream
+    ptr::Ptr{Cvoid}
+end
+
+"""Shared ArrowReader context — pass to every read_file_scan call."""
+mutable struct ArrowReaderContext
+    ptr::Ptr{Cvoid}
+end
+
+"""Handle to a single file scan task returned by next_file_scan."""
+mutable struct FileScanHandle
+    ptr::Ptr{Cvoid}
+end
+
+const OpaqueResponse = Response{Ptr{Cvoid}}
+OpaqueResponse() = Response{Ptr{Cvoid}}(-1, C_NULL, C_NULL, C_NULL)
+
+"""
+    plan_files(scan::Scan)::FileScanTaskStream
+
+Plan which files to read. Returns a concurrent-safe task stream.
+The scan must be built first via `build!`.
+"""
+function plan_files(scan::Scan)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_plan_files(
+            scan.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_plan_files", IcebergException)
+    return FileScanTaskStream(response.value)
+end
+
+"""
+    create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))::ArrowReaderContext
+
+Create a shared reader context from the scan's configuration.
+Pass this to every `read_file_scan` call.
+`reader_concurrency` overrides the scan-level data_file_concurrency_limit when > 0.
+"""
+function create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))
+    ptr = @ccall rust_lib.iceberg_create_reader(
+        scan.ptr::Ptr{Cvoid},
+        reader_concurrency::Csize_t
+    )::Ptr{Cvoid}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to create reader from scan"))
+    end
+    return ArrowReaderContext(ptr)
+end
+
+"""
+    next_file_scan(stream::FileScanTaskStream)::Union{FileScanHandle, Nothing}
+
+Pull the next file scan from the stream. Returns `nothing` at end-of-stream.
+"""
+function next_file_scan(stream::FileScanTaskStream)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_file_scan_task(
+            stream.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_next_file_scan_task", IcebergException)
+    return response.value == C_NULL ? nothing : FileScanHandle(response.value)
+end
+
+"""
+    read_file_scan(reader::ArrowReaderContext, fs::FileScanHandle)::ArrowStream
+
+Read a single file scan into an Arrow stream. **Consumes `fs`** — do not call
+`free_file_scan` afterwards.
+"""
+function read_file_scan(reader::ArrowReaderContext, fs::FileScanHandle)
+    response = ArrowStreamResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_read_file_scan_task(
+            reader.ptr::Ptr{Cvoid},
+            fs.ptr::Ptr{Cvoid},
+            response::Ref{ArrowStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_read_file_scan_task", IcebergException)
+    return response.value
+end
+
+"""
+    file_scan_record_count(fs::FileScanHandle)::Union{Int64, Nothing}
+
+Return the record count for this file scan, or `nothing` if not available.
+"""
+function file_scan_record_count(fs::FileScanHandle)
+    count = @ccall rust_lib.iceberg_file_scan_task_record_count(
+        fs.ptr::Ptr{Cvoid}
+    )::Int64
+    return count == -1 ? nothing : count
+end
+
+"""Free a file scan stream (from plan_files)."""
+function free_file_scan_stream(stream::FileScanTaskStream)
+    @ccall rust_lib.iceberg_file_scan_task_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
+end
+
+"""Free an ArrowReaderContext (from create_reader)."""
+function free_reader(reader::ArrowReaderContext)
+    @ccall rust_lib.iceberg_arrow_reader_context_free(reader.ptr::Ptr{Cvoid})::Cvoid
+end
+
+"""
+Free a FileScanHandle. Only call this if the handle was NOT passed to read_file_scan,
+since read_file_scan consumes the handle.
+"""
+function free_file_scan(fs::FileScanHandle)
+    @ccall rust_lib.iceberg_file_scan_task_free(fs.ptr::Ptr{Cvoid})::Cvoid
+end
