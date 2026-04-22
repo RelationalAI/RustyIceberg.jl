@@ -258,7 +258,11 @@ pub extern "C" fn iceberg_table_current_snapshot_id(table: *mut IcebergTable) ->
         return 0;
     }
     let table_ref = unsafe { &*table };
-    table_ref.table.metadata().current_snapshot_id().unwrap_or(0)
+    table_ref
+        .table
+        .metadata()
+        .current_snapshot_id()
+        .unwrap_or(0)
 }
 
 /// Get table current schema as JSON string
