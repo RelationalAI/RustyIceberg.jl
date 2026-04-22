@@ -499,7 +499,7 @@ if the table has no snapshots yet (e.g. immediately after creation, before any c
 """
 function table_current_snapshot_id(table::Table)::Union{Int64,Nothing}
     id = @ccall rust_lib.iceberg_table_current_snapshot_id(table::Table)::Int64
-    return id == 0 ? nothing : id
+    return id == -1 ? nothing : id
 end
 
 """
