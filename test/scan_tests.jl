@@ -330,7 +330,7 @@ end
             # Clean up
             RustyIceberg.free_stream(inserts_stream)
             RustyIceberg.free_stream(deletes_stream)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             println("✅ Resources cleaned up")
         end
     end
@@ -362,7 +362,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_stream2)
             RustyIceberg.free_stream(deletes_stream2)
-            RustyIceberg.free_incremental_scan!(scan2)
+            RustyIceberg.free_scan!(scan2)
         end
     end
 
@@ -456,7 +456,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_stream3)
             RustyIceberg.free_stream(deletes_stream3)
-            RustyIceberg.free_incremental_scan!(scan3)
+            RustyIceberg.free_scan!(scan3)
         end
     end
 
@@ -526,7 +526,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_stream)
             RustyIceberg.free_stream(deletes_stream)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
@@ -581,7 +581,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_stream)
             RustyIceberg.free_stream(deletes_stream)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
@@ -625,7 +625,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_stream)
             RustyIceberg.free_stream(deletes_stream)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
@@ -691,7 +691,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_stream)
             RustyIceberg.free_stream(deletes_stream)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
@@ -764,7 +764,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_stream)
             RustyIceberg.free_stream(deletes_stream)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
@@ -846,7 +846,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_stream)
             RustyIceberg.free_stream(deletes_stream)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
@@ -1020,7 +1020,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_stream)
             RustyIceberg.free_stream(deletes_stream)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
@@ -1271,7 +1271,7 @@ end
             @test all_rows[end] == (24, "UNITED STATES", 1, "ly ironic requests along the slyly bold ideas hang after the blithely special notornis; blithely even accounts")
             println("✅ Split-scan E2E test passed ($task_count tasks, $(length(all_rows)) rows)")
         finally
-            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_file_stream(file_stream)
             RustyIceberg.free_reader(reader)
             RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
@@ -1330,7 +1330,7 @@ end
                 end
             end
         finally
-            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_file_stream(file_stream)
             RustyIceberg.free_reader(reader)
             RustyIceberg.free_scan!(scan_split)
         end
@@ -1374,14 +1374,14 @@ end
             end
             println("✅ Split-scan column selection test passed")
         finally
-            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_file_stream(file_stream)
             RustyIceberg.free_reader(reader)
             RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
 
-    @testset "file_scan_record_count" begin
+    @testset "record_count" begin
         table = RustyIceberg.table_open(nations_path)
         scan = RustyIceberg.new_scan(table)
         RustyIceberg.build!(scan)
@@ -1395,7 +1395,7 @@ end
                 fs = RustyIceberg.next_file_scan(file_stream)
                 fs === nothing && break
 
-                count = RustyIceberg.file_scan_record_count(fs)
+                count = RustyIceberg.record_count(fs)
                 @test count === nothing || count >= 0
                 if count !== nothing
                     total_from_counts += count
@@ -1415,16 +1415,16 @@ end
             if total_from_counts > 0
                 @test total_from_counts == 25
             end
-            println("✅ file_scan_record_count test passed (total=$total_from_counts)")
+            println("✅ record_count test passed (total=$total_from_counts)")
         finally
-            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_file_stream(file_stream)
             RustyIceberg.free_reader(reader)
             RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
 
-    @testset "free_file_scan discards task without reading" begin
+    @testset "free_file discards task without reading" begin
         table = RustyIceberg.table_open(nations_path)
         scan = RustyIceberg.new_scan(table)
         RustyIceberg.build!(scan)
@@ -1435,11 +1435,11 @@ end
         try
             fs = RustyIceberg.next_file_scan(file_stream)
             if fs !== nothing
-                @test_nowarn RustyIceberg.free_file_scan(fs)
+                @test_nowarn RustyIceberg.free_file(fs)
             end
-            println("✅ free_file_scan (discard without reading) test passed")
+            println("✅ free_file (discard without reading) test passed")
         finally
-            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_file_stream(file_stream)
             RustyIceberg.free_reader(reader)
             RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
@@ -1479,7 +1479,7 @@ end
             @test total_rows > 0
             println("✅ create_reader with reader_concurrency=4 test passed ($total_rows rows)")
         finally
-            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_file_stream(file_stream)
             RustyIceberg.free_reader(reader)
             RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
@@ -1521,7 +1521,7 @@ end
             @test total_rows > 0
             println("✅ Split-scan multi-file test passed ($task_count tasks, $total_rows rows)")
         finally
-            RustyIceberg.free_file_scan_stream(file_stream)
+            RustyIceberg.free_file_stream(file_stream)
             RustyIceberg.free_reader(reader)
             RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
@@ -1542,18 +1542,18 @@ end
         reader = RustyIceberg.create_reader(scan)
         @test reader isa RustyIceberg.ArrowReaderContext
         append_stream, delete_stream = RustyIceberg.plan_files(scan)
-        @test append_stream isa RustyIceberg.IncrementalAppendTaskStream
-        @test delete_stream isa RustyIceberg.IncrementalPosDeleteTaskStream
+        @test append_stream isa RustyIceberg.IncrementalAppendFileStream
+        @test delete_stream isa RustyIceberg.IncrementalPosDeleteFileStream
 
         inserts_values = Int64[]
         append_task_count = 0
 
         try
             while true
-                at = RustyIceberg.next_append_task(append_stream)
+                at = RustyIceberg.next_append_file(append_stream)
                 at === nothing && break
                 append_task_count += 1
-                stream = RustyIceberg.read_append_task(reader, at)
+                stream = RustyIceberg.read_append_file(reader, at)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1574,10 +1574,10 @@ end
             delete_task_count = 0
 
             while true
-                dt = RustyIceberg.next_pos_delete_task(delete_stream)
+                dt = RustyIceberg.next_pos_delete_file(delete_stream)
                 dt === nothing && break
                 delete_task_count += 1
-                stream = RustyIceberg.read_pos_delete_task(reader, dt)
+                stream = RustyIceberg.read_pos_delete_file(reader, dt)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1609,15 +1609,15 @@ end
 
             println("✅ Incremental split-scan E2E test passed ($append_task_count append tasks, $(length(inserts_values)) inserts, $(length(deletes_values)) deletes)")
         finally
-            RustyIceberg.free_incremental_append_task_stream(append_stream)
-            RustyIceberg.free_incremental_pos_delete_task_stream(delete_stream)
+            RustyIceberg.free_file_stream(append_stream)
+            RustyIceberg.free_file_stream(delete_stream)
             RustyIceberg.free_reader(reader)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
 
-    @testset "append_task_record_count" begin
+    @testset "record_count" begin
         table = RustyIceberg.table_open(incremental_path)
         scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
         RustyIceberg.build!(scan)
@@ -1627,11 +1627,11 @@ end
 
         try
             while true
-                at = RustyIceberg.next_append_task(append_stream)
+                at = RustyIceberg.next_append_file(append_stream)
                 at === nothing && break
-                count = RustyIceberg.append_task_record_count(at)
+                count = RustyIceberg.record_count(at)
                 @test count === nothing || count >= 0
-                stream = RustyIceberg.read_append_task(reader, at)
+                stream = RustyIceberg.read_append_file(reader, at)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1643,21 +1643,21 @@ end
                 end
             end
             while true
-                dt = RustyIceberg.next_pos_delete_task(delete_stream)
+                dt = RustyIceberg.next_pos_delete_file(delete_stream)
                 dt === nothing && break
-                RustyIceberg.free_incremental_pos_delete_task(dt)
+                RustyIceberg.free_file(dt)
             end
-            println("✅ append_task_record_count test passed")
+            println("✅ record_count test passed")
         finally
-            RustyIceberg.free_incremental_append_task_stream(append_stream)
-            RustyIceberg.free_incremental_pos_delete_task_stream(delete_stream)
+            RustyIceberg.free_file_stream(append_stream)
+            RustyIceberg.free_file_stream(delete_stream)
             RustyIceberg.free_reader(reader)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
 
-    @testset "free_incremental_append_task discards without reading" begin
+    @testset "free_file discards without reading" begin
         table = RustyIceberg.table_open(incremental_path)
         scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
         RustyIceberg.build!(scan)
@@ -1666,16 +1666,16 @@ end
         append_stream, delete_stream = RustyIceberg.plan_files(scan)
 
         try
-            at = RustyIceberg.next_append_task(append_stream)
+            at = RustyIceberg.next_append_file(append_stream)
             if at !== nothing
-                @test_nowarn RustyIceberg.free_incremental_append_task(at)
+                @test_nowarn RustyIceberg.free_file(at)
             end
-            println("✅ free_incremental_append_task (discard) test passed")
+            println("✅ free_file (discard) test passed")
         finally
-            RustyIceberg.free_incremental_append_task_stream(append_stream)
-            RustyIceberg.free_incremental_pos_delete_task_stream(delete_stream)
+            RustyIceberg.free_file_stream(append_stream)
+            RustyIceberg.free_file_stream(delete_stream)
             RustyIceberg.free_reader(reader)
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
     end
@@ -1712,7 +1712,7 @@ end
         finally
             RustyIceberg.free_stream(inserts_ns)
             RustyIceberg.free_stream(deletes_ns)
-            RustyIceberg.free_incremental_scan!(scan_ns)
+            RustyIceberg.free_scan!(scan_ns)
         end
 
         # Split scan
@@ -1724,9 +1724,9 @@ end
         sp_deletes = Tuple{String, Int64}[]
         try
             while true
-                at = RustyIceberg.next_append_task(append_stream)
+                at = RustyIceberg.next_append_file(append_stream)
                 at === nothing && break
-                stream = RustyIceberg.read_append_task(reader, at)
+                stream = RustyIceberg.read_append_file(reader, at)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1742,9 +1742,9 @@ end
                 end
             end
             while true
-                dt = RustyIceberg.next_pos_delete_task(delete_stream)
+                dt = RustyIceberg.next_pos_delete_file(delete_stream)
                 dt === nothing && break
-                stream = RustyIceberg.read_pos_delete_task(reader, dt)
+                stream = RustyIceberg.read_pos_delete_file(reader, dt)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1762,10 +1762,10 @@ end
                 end
             end
         finally
-            RustyIceberg.free_incremental_append_task_stream(append_stream)
-            RustyIceberg.free_incremental_pos_delete_task_stream(delete_stream)
+            RustyIceberg.free_file_stream(append_stream)
+            RustyIceberg.free_file_stream(delete_stream)
             RustyIceberg.free_reader(reader)
-            RustyIceberg.free_incremental_scan!(scan_sp)
+            RustyIceberg.free_scan!(scan_sp)
         end
 
         RustyIceberg.free_table(table)

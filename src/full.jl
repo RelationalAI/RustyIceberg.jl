@@ -313,7 +313,7 @@ end
 #       end
 #       free_stream(stream)
 #   end
-#   free_file_scan_stream(file_stream)
+#   free_file_stream(file_stream)
 #   free_reader(reader)
 # ---------------------------------------------------------------------------
 
@@ -332,8 +332,6 @@ mutable struct FileScanHandle
     ptr::Ptr{Cvoid}
 end
 
-const OpaqueResponse = Response{Ptr{Cvoid}}
-OpaqueResponse() = Response{Ptr{Cvoid}}(-1, C_NULL, C_NULL, C_NULL)
 
 """
     plan_files(scan::Scan)::FileScanTaskStream
@@ -394,7 +392,7 @@ end
     read_file_scan(reader::ArrowReaderContext, fs::FileScanHandle)::ArrowStream
 
 Read a single file scan into an Arrow stream. **Consumes `fs`** — do not call
-`free_file_scan` afterwards.
+`free_file` afterwards.
 """
 function read_file_scan(reader::ArrowReaderContext, fs::FileScanHandle)
     response = ArrowStreamResponse()
@@ -411,19 +409,34 @@ function read_file_scan(reader::ArrowReaderContext, fs::FileScanHandle)
 end
 
 """
-    file_scan_record_count(fs::FileScanHandle)::Union{Int64, Nothing}
+    record_count(fs::FileScanHandle)::Union{Int64, Nothing}
 
 Return the record count for this file scan, or `nothing` if not available.
 """
-function file_scan_record_count(fs::FileScanHandle)
+function record_count(fs::FileScanHandle)
     count = @ccall rust_lib.iceberg_file_scan_task_record_count(
         fs.ptr::Ptr{Cvoid}
     )::Int64
     return count == -1 ? nothing : count
 end
 
+"""
+    file_path(fs::FileScanHandle)::String
+
+Return the data file path for this file scan task.
+"""
+function file_path(fs::FileScanHandle)
+    ptr = @ccall rust_lib.iceberg_file_scan_task_file_path(
+        fs.ptr::Ptr{Cvoid}
+    )::Ptr{Cchar}
+    ptr == C_NULL && throw(IcebergException("Failed to get file path"))
+    path = unsafe_string(ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
+    return path
+end
+
 """Free a file scan stream (from plan_files)."""
-function free_file_scan_stream(stream::FileScanTaskStream)
+function free_file_stream(stream::FileScanTaskStream)
     @ccall rust_lib.iceberg_file_scan_task_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
 end
 
@@ -436,6 +449,6 @@ end
 Free a FileScanHandle. Only call this if the handle was NOT passed to read_file_scan,
 since read_file_scan consumes the handle.
 """
-function free_file_scan(fs::FileScanHandle)
+function free_file(fs::FileScanHandle)
     @ccall rust_lib.iceberg_file_scan_task_free(fs.ptr::Ptr{Cvoid})::Cvoid
 end

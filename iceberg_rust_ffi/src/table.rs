@@ -131,32 +131,32 @@ impl IcebergFileScanTaskStream {
 // Incremental split-scan API types
 // ---------------------------------------------------------------------------
 
-/// A single appended file scan task returned by `iceberg_incremental_next_append_task`.
-pub struct IcebergIncrementalAppendTask {
+/// A single appended file scan task returned by `iceberg_incremental_next_append_file`.
+pub struct IcebergIncrementalAppendFile {
     pub task: AppendedFileScanTask,
 }
 
-unsafe impl Send for IcebergIncrementalAppendTask {}
+unsafe impl Send for IcebergIncrementalAppendFile {}
 
 /// A single positional-delete task: a set of deleted row positions within one data file.
-/// Produced by `iceberg_incremental_next_pos_delete_task`; skips DeletedFile/EqualityDeletes.
-pub struct IcebergIncrementalPosDeleteTask {
+/// Produced by `iceberg_incremental_next_pos_delete_file`; skips DeletedFile/EqualityDeletes.
+pub struct IcebergIncrementalPosDeleteFile {
     pub file_path: String,
     pub positions: Vec<u64>,
 }
 
-unsafe impl Send for IcebergIncrementalPosDeleteTask {}
+unsafe impl Send for IcebergIncrementalPosDeleteFile {}
 
 /// Buffered stream of `AppendedFileScanTask` items produced by incremental `plan_files`.
-pub struct IcebergIncrementalAppendTaskStream {
+pub struct IcebergIncrementalAppendFileStream {
     pub(crate) receiver:
         AsyncMutex<tokio::sync::mpsc::Receiver<Result<AppendedFileScanTask, iceberg::Error>>>,
     pub(crate) producer_handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-unsafe impl Send for IcebergIncrementalAppendTaskStream {}
+unsafe impl Send for IcebergIncrementalAppendFileStream {}
 
-impl IcebergIncrementalAppendTaskStream {
+impl IcebergIncrementalAppendFileStream {
     pub fn new(
         stream: futures::stream::BoxStream<'static, Result<AppendedFileScanTask, iceberg::Error>>,
         prefetch_depth: usize,
@@ -183,10 +183,10 @@ impl IcebergIncrementalAppendTaskStream {
 
     pub async fn next(
         &self,
-    ) -> Result<Option<IcebergIncrementalAppendTask>, anyhow::Error> {
+    ) -> Result<Option<IcebergIncrementalAppendFile>, anyhow::Error> {
         let mut rx = self.receiver.lock().await;
         match rx.recv().await {
-            Some(Ok(task)) => Ok(Some(IcebergIncrementalAppendTask { task })),
+            Some(Ok(task)) => Ok(Some(IcebergIncrementalAppendFile { task })),
             Some(Err(e)) => Err(anyhow::anyhow!("Append task planning error: {}", e)),
             None => {
                 let mut h = self.producer_handle.lock().await;
@@ -201,16 +201,16 @@ impl IcebergIncrementalAppendTaskStream {
 
 /// Buffered stream of positional-delete tasks produced by incremental `plan_files`.
 /// Only `DeleteScanTask::PositionalDeletes` variants are forwarded; others are dropped.
-pub struct IcebergIncrementalPosDeleteTaskStream {
+pub struct IcebergIncrementalPosDeleteFileStream {
     pub(crate) receiver: AsyncMutex<
-        tokio::sync::mpsc::Receiver<Result<IcebergIncrementalPosDeleteTask, anyhow::Error>>,
+        tokio::sync::mpsc::Receiver<Result<IcebergIncrementalPosDeleteFile, anyhow::Error>>,
     >,
     pub(crate) producer_handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-unsafe impl Send for IcebergIncrementalPosDeleteTaskStream {}
+unsafe impl Send for IcebergIncrementalPosDeleteFileStream {}
 
-impl IcebergIncrementalPosDeleteTaskStream {
+impl IcebergIncrementalPosDeleteFileStream {
     pub fn new(
         stream: futures::stream::BoxStream<'static, Result<DeleteScanTask, iceberg::Error>>,
         prefetch_depth: usize,
@@ -224,7 +224,7 @@ impl IcebergIncrementalPosDeleteTaskStream {
                     Ok(DeleteScanTask::PositionalDeletes(file_path, dv)) => {
                         let positions: Vec<u64> = dv.iter().collect();
                         let task =
-                            IcebergIncrementalPosDeleteTask { file_path, positions };
+                            IcebergIncrementalPosDeleteFile { file_path, positions };
                         if tx.send(Ok(task)).await.is_err() {
                             break;
                         }
@@ -245,7 +245,7 @@ impl IcebergIncrementalPosDeleteTaskStream {
 
     pub async fn next(
         &self,
-    ) -> Result<Option<IcebergIncrementalPosDeleteTask>, anyhow::Error> {
+    ) -> Result<Option<IcebergIncrementalPosDeleteFile>, anyhow::Error> {
         let mut rx = self.receiver.lock().await;
         match rx.recv().await {
             Some(Ok(task)) => Ok(Some(task)),
@@ -263,7 +263,7 @@ impl IcebergIncrementalPosDeleteTaskStream {
 
 /// Read a single `AppendedFileScanTask` into an Arrow record-batch stream.
 /// Wraps the task in a one-element stream and calls the iceberg `StreamsInto` machinery.
-pub(crate) fn read_incremental_append_task(
+pub(crate) fn read_incremental_append_file(
     reader: ArrowReader,
     task: AppendedFileScanTask,
 ) -> iceberg::Result<iceberg::scan::ArrowRecordBatchStream> {
@@ -283,10 +283,10 @@ pub type IcebergArrowStreamResponse = IcebergBoxedResponse<IcebergArrowStream>;
 pub type IcebergArrowReaderContextResponse = IcebergBoxedResponse<IcebergArrowReaderContext>;
 pub type IcebergFileScanTaskStreamResponse = IcebergBoxedResponse<IcebergFileScanTaskStream>;
 pub type IcebergFileScanTaskResponse = IcebergBoxedResponse<IcebergFileScanTask>;
-pub type IcebergIncrementalAppendTaskResponse =
-    IcebergBoxedResponse<IcebergIncrementalAppendTask>;
-pub type IcebergIncrementalPosDeleteTaskResponse =
-    IcebergBoxedResponse<IcebergIncrementalPosDeleteTask>;
+pub type IcebergIncrementalAppendFileResponse =
+    IcebergBoxedResponse<IcebergIncrementalAppendFile>;
+pub type IcebergIncrementalPosDeleteFileResponse =
+    IcebergBoxedResponse<IcebergIncrementalPosDeleteFile>;
 
 /// Response for next_file_scan — null value pointer means end-of-stream.
 #[repr(transparent)]
@@ -396,8 +396,8 @@ pub extern "C" fn iceberg_file_scan_task_free(task: *mut IcebergFileScanTask) {
 }
 
 #[no_mangle]
-pub extern "C" fn iceberg_incremental_append_task_stream_free(
-    stream: *mut IcebergIncrementalAppendTaskStream,
+pub extern "C" fn iceberg_incremental_append_file_stream_free(
+    stream: *mut IcebergIncrementalAppendFileStream,
 ) {
     if !stream.is_null() {
         unsafe { let _ = Box::from_raw(stream); }
@@ -405,28 +405,28 @@ pub extern "C" fn iceberg_incremental_append_task_stream_free(
 }
 
 #[no_mangle]
-pub extern "C" fn iceberg_incremental_pos_delete_task_stream_free(
-    stream: *mut IcebergIncrementalPosDeleteTaskStream,
+pub extern "C" fn iceberg_incremental_pos_delete_file_stream_free(
+    stream: *mut IcebergIncrementalPosDeleteFileStream,
 ) {
     if !stream.is_null() {
         unsafe { let _ = Box::from_raw(stream); }
     }
 }
 
-/// Free an append task. Do NOT call after passing it to read_append_task — that consumes it.
+/// Free an append file. Do NOT call after passing it to read_append_file — that consumes it.
 #[no_mangle]
-pub extern "C" fn iceberg_incremental_append_task_free(
-    task: *mut IcebergIncrementalAppendTask,
+pub extern "C" fn iceberg_incremental_append_file_free(
+    task: *mut IcebergIncrementalAppendFile,
 ) {
     if !task.is_null() {
         unsafe { let _ = Box::from_raw(task); }
     }
 }
 
-/// Free a positional-delete task. Do NOT call after passing to read_pos_delete_task.
+/// Free a positional-delete file. Do NOT call after passing to read_pos_delete_file.
 #[no_mangle]
-pub extern "C" fn iceberg_incremental_pos_delete_task_free(
-    task: *mut IcebergIncrementalPosDeleteTask,
+pub extern "C" fn iceberg_incremental_pos_delete_file_free(
+    task: *mut IcebergIncrementalPosDeleteFile,
 ) {
     if !task.is_null() {
         unsafe { let _ = Box::from_raw(task); }

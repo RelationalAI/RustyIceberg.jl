@@ -339,3 +339,19 @@ pub extern "C" fn iceberg_file_scan_task_record_count(
     let task_ref = unsafe { &*task };
     task_ref.task.record_count.map_or(-1, |n| n as i64)
 }
+
+/// Returns the data file path for a file scan task as an allocated C string.
+/// Caller must free with `iceberg_destroy_cstring`.
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_task_file_path(
+    task: *const IcebergFileScanTask,
+) -> *mut std::ffi::c_char {
+    if task.is_null() {
+        return std::ptr::null_mut();
+    }
+    let task_ref = unsafe { &*task };
+    match std::ffi::CString::new(task_ref.task.data_file_path.as_str()) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}

@@ -52,9 +52,9 @@ pub use table::{
     ArrowBatch, IcebergArrowReaderContext, IcebergArrowReaderContextResponse, IcebergArrowStream,
     IcebergArrowStreamResponse, IcebergBatchResponse, IcebergFileScanTask,
     IcebergFileScanTaskResponse, IcebergFileScanTaskStream, IcebergFileScanTaskStreamResponse,
-    IcebergIncrementalAppendTask, IcebergIncrementalAppendTaskResponse,
-    IcebergIncrementalAppendTaskStream, IcebergIncrementalPosDeleteTask,
-    IcebergIncrementalPosDeleteTaskResponse, IcebergIncrementalPosDeleteTaskStream,
+    IcebergIncrementalAppendFile, IcebergIncrementalAppendFileResponse,
+    IcebergIncrementalAppendFileStream, IcebergIncrementalPosDeleteFile,
+    IcebergIncrementalPosDeleteFileResponse, IcebergIncrementalPosDeleteFileStream,
     IcebergNextFileScanTaskResponse, IcebergTable, IcebergTableResponse,
 };
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
@@ -187,7 +187,7 @@ pub(crate) fn transform_stream_with_parallel_serialization(
 }
 
 /// Build an Arrow record-batch stream from a list of deleted row positions.
-/// Schema: [file_path: Utf8, pos: Int64]. Used by `iceberg_incremental_read_pos_delete_task`.
+/// Schema: [file_path: Utf8, pos: Int64]. Used by `iceberg_incremental_read_pos_delete_file`.
 pub(crate) fn pos_delete_positions_to_arrow_stream(
     file_path: String,
     positions: Vec<u64>,

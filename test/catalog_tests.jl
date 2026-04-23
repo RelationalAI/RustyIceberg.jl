@@ -965,7 +965,7 @@ end
             RustyIceberg.free_stream(deletes_stream)
         end
         if scan != C_NULL
-            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_scan!(scan)
         end
         if table != C_NULL
             RustyIceberg.free_table(table)

@@ -90,3 +90,5 @@ Free the memory associated with an Arrow stream.
 function free_stream(stream::ArrowStream)
     @ccall rust_lib.iceberg_arrow_stream_free(stream::ArrowStream)::Cvoid
 end
+
+const OpaqueResponse = Response{Ptr{Cvoid}}
