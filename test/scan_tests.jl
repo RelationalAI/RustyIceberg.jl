@@ -1642,12 +1642,17 @@ end
                     RustyIceberg.free_stream(stream)
                 end
             end
+            total_delete_positions = 0
             while true
                 dt = RustyIceberg.next_pos_delete_file(delete_stream)
                 dt === nothing && break
+                n = RustyIceberg.record_count(dt)
+                @test n >= 0
+                total_delete_positions += n
                 RustyIceberg.free_file(dt)
             end
-            println("✅ record_count test passed")
+            @test total_delete_positions == 1
+            println("✅ record_count test passed (delete positions=$total_delete_positions)")
         finally
             RustyIceberg.free_file_stream(append_stream)
             RustyIceberg.free_file_stream(delete_stream)

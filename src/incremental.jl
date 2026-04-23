@@ -503,6 +503,18 @@ function record_count(task::IncrementalAppendFileHandle)
 end
 
 """
+    record_count(task::IncrementalPosDeleteFileHandle) -> Int64
+
+Return the number of deleted row positions in this positional-delete file.
+"""
+function record_count(task::IncrementalPosDeleteFileHandle)
+    count = @ccall rust_lib.iceberg_incremental_pos_delete_file_record_count(
+        task.ptr::Ptr{Cvoid}
+    )::Int64
+    return count
+end
+
+"""
     file_path(fs::IncrementalAppendFileHandle)::String
 
 Return the data file path for this incremental append file.

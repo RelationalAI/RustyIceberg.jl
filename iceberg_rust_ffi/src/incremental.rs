@@ -530,6 +530,18 @@ pub extern "C" fn iceberg_incremental_append_file_record_count(
     task_ref.task.base.record_count.map_or(-1, |n| n as i64)
 }
 
+/// Returns the number of deleted row positions in a positional-delete file.
+#[no_mangle]
+pub extern "C" fn iceberg_incremental_pos_delete_file_record_count(
+    task: *const IcebergIncrementalPosDeleteFile,
+) -> i64 {
+    if task.is_null() {
+        return -1;
+    }
+    let task_ref = unsafe { &*task };
+    task_ref.positions.len() as i64
+}
+
 /// Returns the data file path for an incremental append file as an allocated C string.
 /// Caller must free with `iceberg_destroy_cstring`.
 #[no_mangle]
