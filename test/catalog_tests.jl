@@ -146,10 +146,10 @@ end
                 @test sorted[3] == (3, "carol",  3.3)
             finally
                 if updated_table != C_NULL
-                    free_table(updated_table)
+                    free_table!(updated_table)
                 end
                 if table != C_NULL
-                    free_table(table)
+                    free_table!(table)
                 end
                 free_catalog!(cat)
             end
@@ -210,10 +210,10 @@ end
                 @test sorted[3] == (30, "z", 3.5)
             finally
                 if updated_table != C_NULL
-                    free_table(updated_table)
+                    free_table!(updated_table)
                 end
                 if table != C_NULL
-                    free_table(table)
+                    free_table!(table)
                 end
                 free_catalog!(cat)
             end
@@ -600,19 +600,19 @@ end
                 println("✅ Batch contains valid Arrow data from catalog-loaded customer table")
 
                 # Clean up the batch
-                RustyIceberg.free_batch(batch_ptr)
+                RustyIceberg.free_batch!(batch_ptr)
             end
         end
     finally
         # Clean up all resources in reverse order
         if stream != C_NULL
-            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_stream!(stream)
         end
         if scan != C_NULL
             RustyIceberg.free_scan!(scan)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
         end
         if catalog !== nothing
             RustyIceberg.free_catalog!(catalog)
@@ -687,19 +687,19 @@ end
                 println("✅ Batch contains valid Arrow data from catalog-loaded customer table with vended credentials")
 
                 # Clean up the batch
-                RustyIceberg.free_batch(batch_ptr)
+                RustyIceberg.free_batch!(batch_ptr)
             end
         end
     finally
         # Clean up all resources in reverse order
         if stream != C_NULL
-            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_stream!(stream)
         end
         if scan != C_NULL
             RustyIceberg.free_scan!(scan)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
         end
         if catalog !== nothing
             RustyIceberg.free_catalog!(catalog)
@@ -753,13 +753,13 @@ end
             @test credential_error_caught
         finally
             if stream != C_NULL
-                RustyIceberg.free_stream(stream)
+                RustyIceberg.free_stream!(stream)
             end
             if scan != C_NULL
                 RustyIceberg.free_scan!(scan)
             end
             if table != C_NULL
-                RustyIceberg.free_table(table)
+                RustyIceberg.free_table!(table)
             end
             if catalog !== nothing
                 RustyIceberg.free_catalog!(catalog)
@@ -832,18 +832,18 @@ end
                     @test batch.length > 0
                     println("✅ Batch contains valid Arrow data - storage credentials loader worked!")
 
-                    RustyIceberg.free_batch(batch_ptr)
+                    RustyIceberg.free_batch!(batch_ptr)
                 end
             end
         finally
             if stream != C_NULL
-                RustyIceberg.free_stream(stream)
+                RustyIceberg.free_stream!(stream)
             end
             if scan != C_NULL
                 RustyIceberg.free_scan!(scan)
             end
             if table != C_NULL
-                RustyIceberg.free_table(table)
+                RustyIceberg.free_table!(table)
             end
             if catalog !== nothing
                 RustyIceberg.free_catalog!(catalog)
@@ -921,7 +921,7 @@ end
                     println("  Batch $inserts_count: $(nrow(df)) rows")
                 end
             end
-            RustyIceberg.free_batch(batch_ptr)
+            RustyIceberg.free_batch!(batch_ptr)
             batch_ptr = RustyIceberg.next_batch(inserts_stream)
         end
 
@@ -944,7 +944,7 @@ end
                     println("  Batch $deletes_count: $(nrow(df)) rows")
                 end
             end
-            RustyIceberg.free_batch(batch_ptr)
+            RustyIceberg.free_batch!(batch_ptr)
             batch_ptr = RustyIceberg.next_batch(deletes_stream)
         end
 
@@ -959,16 +959,16 @@ end
     finally
         # Clean up all resources in reverse order
         if inserts_stream != C_NULL
-            RustyIceberg.free_stream(inserts_stream)
+            RustyIceberg.free_stream!(inserts_stream)
         end
         if deletes_stream != C_NULL
-            RustyIceberg.free_stream(deletes_stream)
+            RustyIceberg.free_stream!(deletes_stream)
         end
         if scan != C_NULL
             RustyIceberg.free_scan!(scan)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
         end
         if catalog !== nothing
             RustyIceberg.free_catalog!(catalog)
@@ -1079,7 +1079,7 @@ end
         println("✅ Table schema retrieved: $(length(parsed_schema["fields"])) fields")
 
         # Clean up first table
-        RustyIceberg.free_table(table_1)
+        RustyIceberg.free_table!(table_1)
 
         # Test 2: Create table with custom properties
         println("\nTest 2: Creating table with custom properties...")
@@ -1107,7 +1107,7 @@ end
         println("✅ Table existence verified: $table_name_2")
 
         # Clean up second table
-        RustyIceberg.free_table(table_2)
+        RustyIceberg.free_table!(table_2)
 
         # Test 3: Create table with partition spec
         println("\nTest 3: Creating table with partition spec...")
@@ -1135,7 +1135,7 @@ end
         println("✅ Table existence verified: $table_name_3")
 
         # Clean up third table
-        RustyIceberg.free_table(table_3)
+        RustyIceberg.free_table!(table_3)
 
         # Test 4: List tables in test namespace to verify all created tables
         println("\nTest 4: Verifying all created tables in namespace...")

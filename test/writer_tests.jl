@@ -87,7 +87,7 @@ using Tables
         reloaded_table = RustyIceberg.load_table(catalog, test_namespace, table_name)
         @test reloaded_table != C_NULL
         println("✅ Table exists in catalog and can be loaded")
-        RustyIceberg.free_table(reloaded_table)
+        RustyIceberg.free_table!(reloaded_table)
 
         # Test 7: Verify data was written by scanning the table
         println("\nTest 7: Verifying written data...")
@@ -115,7 +115,7 @@ using Tables
         println("✅ Verified data content matches exactly")
 
         # Clean up updated table
-        RustyIceberg.free_table(updated_table)
+        RustyIceberg.free_table!(updated_table)
 
     finally
         # Clean up all resources in reverse order
@@ -124,7 +124,7 @@ using Tables
             RustyIceberg.free_data_files!(data_files)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
             println("✅ Table cleaned up")
         end
         # Drop table and namespace
@@ -252,7 +252,7 @@ end
         println("✅ Verified data content from both writers matches exactly")
 
         # Clean up
-        RustyIceberg.free_table(updated_table)
+        RustyIceberg.free_table!(updated_table)
 
     finally
         # Clean up all resources in reverse order
@@ -264,7 +264,7 @@ end
             RustyIceberg.free_data_files!(data_files2)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
             println("✅ Table cleaned up")
         end
         # Drop table and namespace
@@ -359,7 +359,7 @@ end
             println("✅ Writer cleaned up")
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
             println("✅ Table cleaned up")
         end
         # Drop table and namespace
@@ -480,7 +480,7 @@ end
         println("✅ Verified Arrow.Table data content matches exactly")
 
         # Clean up updated table
-        RustyIceberg.free_table(updated_table)
+        RustyIceberg.free_table!(updated_table)
 
     finally
         # Clean up all resources in reverse order
@@ -488,7 +488,7 @@ end
             RustyIceberg.free_data_files!(data_files)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
             println("✅ Table cleaned up")
         end
         if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
@@ -596,7 +596,7 @@ end
 
             # Free the updated table and reload with fresh credentials for reading
             println("\nReloading table with fresh vended credentials for reading...")
-            RustyIceberg.free_table(updated_table)
+            RustyIceberg.free_table!(updated_table)
             updated_table = RustyIceberg.load_table(catalog, test_namespace, table_name; load_credentials=true)
             @test updated_table != C_NULL
             println("✅ Table reloaded with fresh credentials")
@@ -625,7 +625,7 @@ end
         finally
             # Cleanup
             if table != C_NULL
-                RustyIceberg.free_table(table)
+                RustyIceberg.free_table!(table)
                 println("✅ Table freed")
             end
             if data_files !== nothing && data_files.ptr != C_NULL
@@ -765,7 +765,7 @@ end
         println("✅ Verified write_columns data content matches exactly")
 
         # Clean up updated table
-        RustyIceberg.free_table(updated_table)
+        RustyIceberg.free_table!(updated_table)
 
     finally
         # Clean up all resources in reverse order
@@ -773,7 +773,7 @@ end
             RustyIceberg.free_data_files!(data_files)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
             println("✅ Table cleaned up")
         end
         if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
@@ -877,14 +877,14 @@ end
         @test !ismissing(sorted_values[5]) && sorted_values[5] ≈ 5.5
         println("✅ Verified null values are correctly written and read")
 
-        RustyIceberg.free_table(updated_table)
+        RustyIceberg.free_table!(updated_table)
 
     finally
         if data_files !== nothing && data_files.ptr != C_NULL
             RustyIceberg.free_data_files!(data_files)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
             println("✅ Table cleaned up")
         end
         if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
@@ -1003,14 +1003,14 @@ end
         @test sorted_balances[3].value == Int128(1)
         println("✅ DECIMAL(38, 10) values verified")
 
-        RustyIceberg.free_table(updated_table)
+        RustyIceberg.free_table!(updated_table)
 
     finally
         if data_files !== nothing && data_files.ptr != C_NULL
             RustyIceberg.free_data_files!(data_files)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
             println("✅ Table cleaned up")
         end
         if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
@@ -1100,14 +1100,14 @@ end
         @test !ismissing(sorted_prices[5]) && sorted_prices[5].value == Int128(50000)  # 500.00
         println("✅ Nullable decimal values verified (nulls at positions 2 and 4)")
 
-        RustyIceberg.free_table(updated_table)
+        RustyIceberg.free_table!(updated_table)
 
     finally
         if data_files !== nothing && data_files.ptr != C_NULL
             RustyIceberg.free_data_files!(data_files)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
             println("✅ Table cleaned up")
         end
         if table_name !== nothing && test_namespace !== nothing && catalog !== nothing

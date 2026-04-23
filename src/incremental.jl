@@ -19,10 +19,10 @@ scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
 with_batch_size!(scan, UInt(1024))
 inserts_stream, deletes_stream = scan!(scan)
 # ... process batches from both streams
-free_stream(inserts_stream)
-free_stream(deletes_stream)
+free_stream!(inserts_stream)
+free_stream!(deletes_stream)
 free_scan!(scan)
-free_table(table)
+free_table!(table)
 ```
 """
 mutable struct IncrementalScan
@@ -327,24 +327,24 @@ end
 #   build!(scan)
 #   reader = create_reader(scan)
 #   append_stream, delete_stream = plan_files(scan)
-#   while (at = next_file(append_stream)) !== nothing
-#       stream = read_file(reader, at)   # consumes at
+#   while (at = next_file!(append_stream)) !== nothing
+#       stream = read_file!(reader, at)   # consumes at
 #       while (bp = next_batch(stream)) != C_NULL
 #           # ... process batch ...
-#           free_batch(bp)
+#           free_batch!(bp)
 #       end
-#       free_stream(stream)
+#       free_stream!(stream)
 #   end
-#   while (dt = next_file(delete_stream)) !== nothing
-#       stream = read_file(reader, dt)  # consumes dt; yields (file_path, pos) batches
+#   while (dt = next_file!(delete_stream)) !== nothing
+#       stream = read_file!(reader, dt)  # consumes dt; yields (file_path, pos) batches
 #       while (bp = next_batch(stream)) != C_NULL
-#           free_batch(bp)
+#           free_batch!(bp)
 #       end
-#       free_stream(stream)
+#       free_stream!(stream)
 #   end
-#   free_file_stream(append_stream)
-#   free_file_stream(delete_stream)
-#   free_reader(reader)
+#   free_file_stream!(append_stream)
+#   free_file_stream!(delete_stream)
+#   free_reader!(reader)
 # ---------------------------------------------------------------------------
 
 """Opaque handle to a buffered stream of incremental append tasks."""
@@ -415,11 +415,11 @@ function create_reader(scan::IncrementalScan; reader_concurrency::UInt=UInt(0))
 end
 
 """
-    next_file(stream::AppendFileStream) -> Union{AppendFileHandle, Nothing}
+    next_file!(stream::AppendFileStream) -> Union{AppendFileHandle, Nothing}
 
 Pull the next append task from the stream. Returns `nothing` at end-of-stream.
 """
-function next_file(stream::AppendFileStream)
+function next_file!(stream::AppendFileStream)
     response = OpaqueResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_incremental_next_append_file(
@@ -433,11 +433,11 @@ function next_file(stream::AppendFileStream)
 end
 
 """
-    read_file(reader::ArrowReaderContext, task::AppendFileHandle) -> ArrowStream
+    read_file!(reader::ArrowReaderContext, task::AppendFileHandle) -> ArrowStream
 
 Read a single incremental append task into an Arrow stream. **Consumes `task`**.
 """
-function read_file(reader::ArrowReaderContext, task::AppendFileHandle)
+function read_file!(reader::ArrowReaderContext, task::AppendFileHandle)
     response = ArrowStreamResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_incremental_read_append_file(
@@ -452,12 +452,12 @@ function read_file(reader::ArrowReaderContext, task::AppendFileHandle)
 end
 
 """
-    next_file(stream::DeleteFileStream) -> Union{DeleteFileHandle, Nothing}
+    next_file!(stream::DeleteFileStream) -> Union{DeleteFileHandle, Nothing}
 
 Pull the next positional-delete task from the stream. Returns `nothing` at end-of-stream.
 Only `PositionalDeletes` tasks are returned; `DeletedFile` and `EqualityDeletes` are skipped.
 """
-function next_file(stream::DeleteFileStream)
+function next_file!(stream::DeleteFileStream)
     response = OpaqueResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_incremental_next_pos_delete_file(
@@ -471,12 +471,12 @@ function next_file(stream::DeleteFileStream)
 end
 
 """
-    read_file(reader::ArrowReaderContext, task::DeleteFileHandle) -> ArrowStream
+    read_file!(reader::ArrowReaderContext, task::DeleteFileHandle) -> ArrowStream
 
 Convert a positional-delete task into an Arrow stream of `(file_path, pos)` batches.
 **Consumes `task`**.
 """
-function read_file(reader::ArrowReaderContext, task::DeleteFileHandle)
+function read_file!(reader::ArrowReaderContext, task::DeleteFileHandle)
     response = ArrowStreamResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_incremental_read_pos_delete_file(
@@ -545,21 +545,21 @@ function file_path(fs::DeleteFileHandle)
 end
 
 """Free a stream of incremental append tasks."""
-function free_file_stream(stream::AppendFileStream)
+function free_file_stream!(stream::AppendFileStream)
     @ccall rust_lib.iceberg_incremental_append_file_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """Free a stream of positional-delete tasks."""
-function free_file_stream(stream::DeleteFileStream)
+function free_file_stream!(stream::DeleteFileStream)
     @ccall rust_lib.iceberg_incremental_pos_delete_file_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """Free an append task handle. Only call if NOT passed to `read_file`."""
-function free_file(task::AppendFileHandle)
+function free_file!(task::AppendFileHandle)
     @ccall rust_lib.iceberg_incremental_append_file_free(task.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """Free a positional-delete task handle. Only call if NOT passed to `read_file`."""
-function free_file(task::DeleteFileHandle)
+function free_file!(task::DeleteFileHandle)
     @ccall rust_lib.iceberg_incremental_pos_delete_file_free(task.ptr::Ptr{Cvoid})::Cvoid
 end

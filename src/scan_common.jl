@@ -74,20 +74,20 @@ function next_batch(stream::ArrowStream)
 end
 
 """
-    free_batch(batch::Ptr{ArrowBatch})
+    free_batch!(batch::Ptr{ArrowBatch})
 
 Free the memory associated with an Arrow batch.
 """
-function free_batch(batch::Ptr{ArrowBatch})
+function free_batch!(batch::Ptr{ArrowBatch})
     @ccall rust_lib.iceberg_arrow_batch_free(batch::Ptr{ArrowBatch})::Cvoid
 end
 
 """
-    free_stream(stream::ArrowStream)
+    free_stream!(stream::ArrowStream)
 
 Free the memory associated with an Arrow stream.
 """
-function free_stream(stream::ArrowStream)
+function free_stream!(stream::ArrowStream)
     @ccall rust_lib.iceberg_arrow_stream_free(stream::ArrowStream)::Cvoid
 end
 

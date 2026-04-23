@@ -12,14 +12,14 @@ export Table, Scan, IncrementalScan, ArrowBatch, StaticConfig, ArrowStream
 export init_runtime
 export IcebergException
 export new_incremental_scan, free_scan!
-export table_open, free_table, new_scan
+export table_open, free_table!, new_scan
 export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_schema
 export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
 export with_file_column!, with_pos_column!
-export scan!, next_batch, free_batch, free_stream
+export scan!, next_batch, free_batch!, free_stream!
 export FileScanStream, ArrowReaderContext, FileScanHandle
-export plan_files, create_reader, next_file, read_file, read_file_scan
-export record_count, file_path, free_file_stream, free_reader, free_file
+export plan_files, create_reader, next_file!, read_file!, read_file_scan!
+export record_count, file_path, free_file_stream!, free_reader!, free_file!
 export AppendFileStream, DeleteFileStream
 export AppendFileHandle, DeleteFileHandle
 export FILE_COLUMN, POS_COLUMN
@@ -418,11 +418,11 @@ function table_open(snapshot_path::String; properties::Dict{String,String}=Dict{
 end
 
 """
-    free_table(table::Table)
+    free_table!(table::Table)
 
 Free the memory associated with an Iceberg table.
 """
-function free_table(table::Table)
+function free_table!(table::Table)
     @ccall rust_lib.iceberg_table_free(table::Table)::Cvoid
 end
 

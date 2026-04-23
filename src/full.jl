@@ -17,9 +17,9 @@ select_columns!(scan, ["col1", "col2"])
 with_batch_size!(scan, UInt(1024))
 stream = scan!(scan)
 # ... process batches from stream
-free_stream(stream)
+free_stream!(stream)
 free_scan!(scan)
-free_table(table)
+free_table!(table)
 ```
 """
 mutable struct Scan
@@ -305,16 +305,16 @@ end
 #   build!(scan)
 #   reader = create_reader(scan)
 #   file_stream = plan_files(scan)
-#   while (fs = next_file(file_stream)) !== nothing
-#       stream = read_file_scan(reader, fs)   # consumes fs
+#   while (fs = next_file!(file_stream)) !== nothing
+#       stream = read_file_scan!(reader, fs)   # consumes fs
 #       while (bp = next_batch(stream)) != C_NULL
 #           # ... process batch ...
-#           free_batch(bp)
+#           free_batch!(bp)
 #       end
-#       free_stream(stream)
+#       free_stream!(stream)
 #   end
-#   free_file_stream(file_stream)
-#   free_reader(reader)
+#   free_file_stream!(file_stream)
+#   free_reader!(reader)
 # ---------------------------------------------------------------------------
 
 """Opaque pointer to a stream of FileScanTasks."""
@@ -322,12 +322,12 @@ mutable struct FileScanStream
     ptr::Ptr{Cvoid}
 end
 
-"""Shared ArrowReader context — pass to every read_file_scan call."""
+"""Shared ArrowReader context — pass to every read_file_scan! call."""
 mutable struct ArrowReaderContext
     ptr::Ptr{Cvoid}
 end
 
-"""Handle to a single file scan task returned by next_file."""
+"""Handle to a single file scan task returned by next_file!."""
 mutable struct FileScanHandle
     ptr::Ptr{Cvoid}
 end
@@ -356,7 +356,7 @@ end
     create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))::ArrowReaderContext
 
 Create a shared reader context from the scan's configuration.
-Pass this to every `read_file_scan` call.
+Pass this to every `read_file_scan!` call.
 `reader_concurrency` overrides the scan-level data_file_concurrency_limit when > 0.
 """
 function create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))
@@ -371,11 +371,11 @@ function create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))
 end
 
 """
-    next_file(stream::FileScanStream)::Union{FileScanHandle, Nothing}
+    next_file!(stream::FileScanStream)::Union{FileScanHandle, Nothing}
 
 Pull the next file scan from the stream. Returns `nothing` at end-of-stream.
 """
-function next_file(stream::FileScanStream)
+function next_file!(stream::FileScanStream)
     response = OpaqueResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_next_file_scan_task(
@@ -389,12 +389,12 @@ function next_file(stream::FileScanStream)
 end
 
 """
-    read_file_scan(reader::ArrowReaderContext, fs::FileScanHandle)::ArrowStream
+    read_file_scan!(reader::ArrowReaderContext, fs::FileScanHandle)::ArrowStream
 
 Read a single file scan into an Arrow stream. **Consumes `fs`** — do not call
 `free_file_scan` afterwards.
 """
-function read_file_scan(reader::ArrowReaderContext, fs::FileScanHandle)
+function read_file_scan!(reader::ArrowReaderContext, fs::FileScanHandle)
     response = ArrowStreamResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_read_file_scan_task(
@@ -436,19 +436,19 @@ function file_path(fs::FileScanHandle)
 end
 
 """Free a file scan stream (from plan_files)."""
-function free_file_stream(stream::FileScanStream)
+function free_file_stream!(stream::FileScanStream)
     @ccall rust_lib.iceberg_file_scan_task_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """Free an ArrowReaderContext (from create_reader)."""
-function free_reader(reader::ArrowReaderContext)
+function free_reader!(reader::ArrowReaderContext)
     @ccall rust_lib.iceberg_arrow_reader_context_free(reader.ptr::Ptr{Cvoid})::Cvoid
 end
 
 """
-Free a FileScanHandle. Only call this if the handle was NOT passed to read_file_scan,
-since read_file_scan consumes the handle.
+Free a FileScanHandle. Only call this if the handle was NOT passed to read_file_scan!,
+since read_file_scan! consumes the handle.
 """
-function free_file(fs::FileScanHandle)
+function free_file!(fs::FileScanHandle)
     @ccall rust_lib.iceberg_file_scan_task_free(fs.ptr::Ptr{Cvoid})::Cvoid
 end
