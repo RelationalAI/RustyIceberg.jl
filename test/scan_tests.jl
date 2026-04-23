@@ -1236,14 +1236,14 @@ end
         reader = RustyIceberg.create_reader(scan)
         @test reader isa RustyIceberg.ArrowReaderContext
         file_stream = RustyIceberg.plan_files(scan)
-        @test file_stream isa RustyIceberg.FileScanTaskStream
+        @test file_stream isa RustyIceberg.FileScanStream
 
         all_rows = Tuple[]
         task_count = 0
 
         try
             while true
-                fs = RustyIceberg.next_file_scan(file_stream)
+                fs = RustyIceberg.next_file(file_stream)
                 fs === nothing && break
                 task_count += 1
                 stream = RustyIceberg.read_file_scan(reader, fs)
@@ -1310,7 +1310,7 @@ end
         split_rows = Tuple[]
         try
             while true
-                fs = RustyIceberg.next_file_scan(file_stream)
+                fs = RustyIceberg.next_file(file_stream)
                 fs === nothing && break
                 stream = RustyIceberg.read_file_scan(reader, fs)
                 try
@@ -1354,7 +1354,7 @@ end
 
         try
             while true
-                fs = RustyIceberg.next_file_scan(file_stream)
+                fs = RustyIceberg.next_file(file_stream)
                 fs === nothing && break
                 stream = RustyIceberg.read_file_scan(reader, fs)
                 try
@@ -1392,7 +1392,7 @@ end
 
         try
             while true
-                fs = RustyIceberg.next_file_scan(file_stream)
+                fs = RustyIceberg.next_file(file_stream)
                 fs === nothing && break
 
                 count = RustyIceberg.record_count(fs)
@@ -1433,7 +1433,7 @@ end
         file_stream = RustyIceberg.plan_files(scan)
 
         try
-            fs = RustyIceberg.next_file_scan(file_stream)
+            fs = RustyIceberg.next_file(file_stream)
             if fs !== nothing
                 @test_nowarn RustyIceberg.free_file(fs)
             end
@@ -1460,7 +1460,7 @@ end
 
         try
             while true
-                fs = RustyIceberg.next_file_scan(file_stream)
+                fs = RustyIceberg.next_file(file_stream)
                 fs === nothing && break
                 stream = RustyIceberg.read_file_scan(reader, fs)
                 try
@@ -1499,7 +1499,7 @@ end
 
         try
             while true
-                fs = RustyIceberg.next_file_scan(file_stream)
+                fs = RustyIceberg.next_file(file_stream)
                 fs === nothing && break
                 task_count += 1
                 stream = RustyIceberg.read_file_scan(reader, fs)
@@ -1542,18 +1542,18 @@ end
         reader = RustyIceberg.create_reader(scan)
         @test reader isa RustyIceberg.ArrowReaderContext
         append_stream, delete_stream = RustyIceberg.plan_files(scan)
-        @test append_stream isa RustyIceberg.IncrementalAppendFileStream
-        @test delete_stream isa RustyIceberg.IncrementalPosDeleteFileStream
+        @test append_stream isa RustyIceberg.AppendFileStream
+        @test delete_stream isa RustyIceberg.DeleteFileStream
 
         inserts_values = Int64[]
         append_task_count = 0
 
         try
             while true
-                at = RustyIceberg.next_append_file(append_stream)
+                at = RustyIceberg.next_file(append_stream)
                 at === nothing && break
                 append_task_count += 1
-                stream = RustyIceberg.read_append_file(reader, at)
+                stream = RustyIceberg.read_file(reader, at)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1574,10 +1574,10 @@ end
             delete_task_count = 0
 
             while true
-                dt = RustyIceberg.next_pos_delete_file(delete_stream)
+                dt = RustyIceberg.next_file(delete_stream)
                 dt === nothing && break
                 delete_task_count += 1
-                stream = RustyIceberg.read_pos_delete_file(reader, dt)
+                stream = RustyIceberg.read_file(reader, dt)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1627,11 +1627,11 @@ end
 
         try
             while true
-                at = RustyIceberg.next_append_file(append_stream)
+                at = RustyIceberg.next_file(append_stream)
                 at === nothing && break
                 count = RustyIceberg.record_count(at)
                 @test count === nothing || count >= 0
-                stream = RustyIceberg.read_append_file(reader, at)
+                stream = RustyIceberg.read_file(reader, at)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1644,7 +1644,7 @@ end
             end
             total_delete_positions = 0
             while true
-                dt = RustyIceberg.next_pos_delete_file(delete_stream)
+                dt = RustyIceberg.next_file(delete_stream)
                 dt === nothing && break
                 n = RustyIceberg.record_count(dt)
                 @test n >= 0
@@ -1671,7 +1671,7 @@ end
         append_stream, delete_stream = RustyIceberg.plan_files(scan)
 
         try
-            at = RustyIceberg.next_append_file(append_stream)
+            at = RustyIceberg.next_file(append_stream)
             if at !== nothing
                 @test_nowarn RustyIceberg.free_file(at)
             end
@@ -1729,9 +1729,9 @@ end
         sp_deletes = Tuple{String, Int64}[]
         try
             while true
-                at = RustyIceberg.next_append_file(append_stream)
+                at = RustyIceberg.next_file(append_stream)
                 at === nothing && break
-                stream = RustyIceberg.read_append_file(reader, at)
+                stream = RustyIceberg.read_file(reader, at)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1747,9 +1747,9 @@ end
                 end
             end
             while true
-                dt = RustyIceberg.next_pos_delete_file(delete_stream)
+                dt = RustyIceberg.next_file(delete_stream)
                 dt === nothing && break
-                stream = RustyIceberg.read_pos_delete_file(reader, dt)
+                stream = RustyIceberg.read_file(reader, dt)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL

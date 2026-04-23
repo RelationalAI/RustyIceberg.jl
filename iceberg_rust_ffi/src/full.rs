@@ -189,7 +189,7 @@ export_runtime_op!(
 impl_scan_free!(iceberg_scan_free, IcebergScan);
 
 // ---------------------------------------------------------------------------
-// Split-scan API: plan_files → create_reader → next_file_scan → read_file_scan
+// Split-scan API: plan_files → create_reader → next_file → read_file_scan
 // ---------------------------------------------------------------------------
 
 // Async: plan which files to read. Returns a concurrent-safe task stream.

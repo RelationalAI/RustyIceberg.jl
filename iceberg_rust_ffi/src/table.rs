@@ -68,7 +68,7 @@ pub(crate) const DEFAULT_DELETE_BATCH_SIZE: usize = 1024;
 
 unsafe impl Send for IcebergArrowReaderContext {}
 
-/// A single file scan task (byte range of a Parquet file) returned by next_file_scan.
+/// A single file scan task (byte range of a Parquet file) returned by next_file.
 pub struct IcebergFileScanTask {
     pub task: FileScanTask,
 }
@@ -288,7 +288,7 @@ pub type IcebergIncrementalAppendFileResponse =
 pub type IcebergIncrementalPosDeleteFileResponse =
     IcebergBoxedResponse<IcebergIncrementalPosDeleteFile>;
 
-/// Response for next_file_scan — null value pointer means end-of-stream.
+/// Response for next_file — null value pointer means end-of-stream.
 #[repr(transparent)]
 pub struct IcebergNextFileScanTaskResponse(pub IcebergBoxedResponse<IcebergFileScanTask>);
 
