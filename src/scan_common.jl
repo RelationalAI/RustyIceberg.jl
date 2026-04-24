@@ -13,15 +13,13 @@ const ArrowStream = Ptr{Cvoid}
 
 The name of the metadata column containing file paths (_file).
 
-This constant can be used with the `select_columns!` function to include
-file path information in query results. It corresponds to the _file metadata
-column in Iceberg tables.
+This constant can be used as a column name to include file path information
+in query results. It corresponds to the _file metadata column in Iceberg tables.
 
 # Example
 ```julia
 # Select specific columns including the file path
-scan = new_scan(table)
-select_columns!(scan, ["id", "name", FILE_COLUMN])
+scan = new_scan(table; column_names=["id", "name", FILE_COLUMN])
 stream = scan!(scan)
 ```
 """
@@ -32,15 +30,14 @@ const FILE_COLUMN = "_file"
 
 The name of the metadata column containing row positions within files (_pos).
 
-This constant can be used with the `select_columns!` function to include
-position information in query results. It corresponds to the _pos metadata
-column in Iceberg tables, which represents the row's position within its data file.
+This constant can be used as a column name to include position information
+in query results. It corresponds to the _pos metadata column in Iceberg tables,
+which represents the row's position within its data file.
 
 # Example
 ```julia
 # Select specific columns including the position
-scan = new_scan(table)
-select_columns!(scan, ["id", "name", POS_COLUMN])
+scan = new_scan(table; column_names=["id", "name", POS_COLUMN])
 stream = scan!(scan)
 ```
 """

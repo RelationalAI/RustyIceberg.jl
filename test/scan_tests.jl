@@ -88,9 +88,7 @@ using Arrow
             selected_columns = names(first_df)[1:min(2, length(names(first_df)))]
 
             table2 = RustyIceberg.table_open(snapshot_path)
-            scan2 = RustyIceberg.new_scan(table2)
-            RustyIceberg.select_columns!(scan2, selected_columns)
-            RustyIceberg.with_batch_size!(scan2, UInt(8))
+            scan2 = RustyIceberg.new_scan(table2; column_names=selected_columns, batch_size=Int64(8))
             stream2 = RustyIceberg.scan!(scan2)
 
             try
@@ -143,8 +141,7 @@ end
     println("Testing reading nations table...")
 
     table = RustyIceberg.table_open(nations_snapshot_path)
-    scan = RustyIceberg.new_scan(table)
-    RustyIceberg.with_batch_size!(scan, UInt(5))
+    scan = RustyIceberg.new_scan(table; batch_size=Int64(5))
     stream = RustyIceberg.scan!(scan)
 
     rows = Tuple[]
@@ -226,14 +223,10 @@ end
     to_snapshot_id = Int64(6832180054960511692)
 
     @testset "Incremental Scan E2E Test" begin
-        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id; batch_size=Int64(50))
         @test scan isa RustyIceberg.IncrementalScan
         @test scan.ptr != C_NULL
         println("✅ Incremental scan created (from snapshot $from_snapshot_id to $to_snapshot_id)")
-
-        # Test builder methods
-        @test_nowarn RustyIceberg.with_batch_size!(scan, UInt(50))
-        println("✅ Batch size configured")
 
         # Build and get streams
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
@@ -336,10 +329,7 @@ end
     end
 
     @testset "Incremental Scan with Column Selection" begin
-        scan2 = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-
-        # Select only the "n" column
-        RustyIceberg.select_columns!(scan2, ["n"])
+        scan2 = new_incremental_scan(table, from_snapshot_id, to_snapshot_id; column_names=["n"])
 
         inserts_stream2, deletes_stream2 = RustyIceberg.scan!(scan2)
 
@@ -368,15 +358,15 @@ end
 
     @testset "Incremental Scan with nothing for both snapshot IDs" begin
         # Test scanning from root (nothing) to current (nothing) - full history
-        scan3 = new_incremental_scan(table, nothing, nothing)
+        scan3 = new_incremental_scan(table, nothing, nothing;
+            manifest_file_concurrency_limit=Int64(2),
+            manifest_entry_concurrency_limit=Int64(256),
+            data_file_concurrency_limit=Int64(1024),
+            batch_size=Int64(50),
+        )
         @test scan3 isa RustyIceberg.IncrementalScan
         @test scan3.ptr != C_NULL
         println("✅ Incremental scan created with nothing for both snapshot IDs")
-
-        RustyIceberg.with_manifest_file_concurrency_limit!(scan3, UInt(2))
-        RustyIceberg.with_manifest_entry_concurrency_limit!(scan3, UInt(256))
-        RustyIceberg.with_data_file_concurrency_limit!(scan3, UInt(1024))
-        RustyIceberg.with_batch_size!(scan3, UInt(50))
 
         inserts_stream3, deletes_stream3 = RustyIceberg.scan!(scan3)
         @test inserts_stream3 != C_NULL
@@ -473,12 +463,9 @@ end
     from_snapshot_id = Int64(6540713100348352610)
     to_snapshot_id = Int64(6832180054960511692)
 
-    @testset "select_columns! - Full Scan" begin
+    @testset "column_names - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Select specific columns
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
+        scan = RustyIceberg.new_scan(table; column_names=["c_custkey", "c_name"])
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -494,7 +481,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ select_columns! test passed for full scan")
+            println("✅ column_names test passed for full scan")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -502,11 +489,9 @@ end
         end
     end
 
-    @testset "select_columns! - Incremental Scan" begin
+    @testset "column_names - Incremental Scan" begin
         table = RustyIceberg.table_open(incremental_path)
-        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-
-        RustyIceberg.select_columns!(scan, ["n"])
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id; column_names=["n"])
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
 
         try
@@ -522,7 +507,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
-            println("✅ select_columns! test passed for incremental scan")
+            println("✅ column_names test passed for incremental scan")
         finally
             RustyIceberg.free_stream!(inserts_stream)
             RustyIceberg.free_stream!(deletes_stream)
@@ -531,12 +516,9 @@ end
         end
     end
 
-    @testset "with_batch_size! - Full Scan" begin
+    @testset "batch_size - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Set small batch size
-        RustyIceberg.with_batch_size!(scan, UInt(10))
+        scan = RustyIceberg.new_scan(table; batch_size=Int64(10))
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -551,7 +533,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ with_batch_size! test passed for full scan")
+            println("✅ batch_size test passed for full scan")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -559,11 +541,9 @@ end
         end
     end
 
-    @testset "with_batch_size! - Incremental Scan" begin
+    @testset "batch_size - Incremental Scan" begin
         table = RustyIceberg.table_open(incremental_path)
-        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-
-        RustyIceberg.with_batch_size!(scan, UInt(10))
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id; batch_size=Int64(10))
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
 
         try
@@ -577,7 +557,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
-            println("✅ with_batch_size! test passed for incremental scan")
+            println("✅ batch_size test passed for incremental scan")
         finally
             RustyIceberg.free_stream!(inserts_stream)
             RustyIceberg.free_stream!(deletes_stream)
@@ -586,12 +566,9 @@ end
         end
     end
 
-    @testset "with_data_file_concurrency_limit! - Full Scan" begin
+    @testset "data_file_concurrency_limit - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Set concurrency limit (should not error)
-        @test_nowarn RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(4))
+        scan = RustyIceberg.new_scan(table; data_file_concurrency_limit=Int64(4))
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -600,7 +577,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ with_data_file_concurrency_limit! test passed for full scan")
+            println("✅ data_file_concurrency_limit test passed for full scan")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -608,11 +585,9 @@ end
         end
     end
 
-    @testset "with_data_file_concurrency_limit! - Incremental Scan" begin
+    @testset "data_file_concurrency_limit - Incremental Scan" begin
         table = RustyIceberg.table_open(incremental_path)
-        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-
-        @test_nowarn RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(4))
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id; data_file_concurrency_limit=Int64(4))
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
 
         try
@@ -621,7 +596,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
-            println("✅ with_data_file_concurrency_limit! test passed for incremental scan")
+            println("✅ data_file_concurrency_limit test passed for incremental scan")
         finally
             RustyIceberg.free_stream!(inserts_stream)
             RustyIceberg.free_stream!(deletes_stream)
@@ -630,12 +605,9 @@ end
         end
     end
 
-    @testset "with_manifest_entry_concurrency_limit! - Full Scan" begin
+    @testset "manifest_entry_concurrency_limit - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Set concurrency limit (should not error)
-        @test_nowarn RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(4))
+        scan = RustyIceberg.new_scan(table; manifest_entry_concurrency_limit=Int64(4))
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -644,7 +616,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ with_manifest_entry_concurrency_limit! test passed for full scan")
+            println("✅ manifest_entry_concurrency_limit test passed for full scan")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -652,12 +624,9 @@ end
         end
     end
 
-    @testset "with_manifest_file_concurrency_limit! - Full Scan" begin
+    @testset "manifest_file_concurrency_limit - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Set concurrency limit (should not error)
-        @test_nowarn RustyIceberg.with_manifest_file_concurrency_limit!(scan, UInt(4))
+        scan = RustyIceberg.new_scan(table; manifest_file_concurrency_limit=Int64(4))
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -666,7 +635,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ with_manifest_file_concurrency_limit! test passed for full scan")
+            println("✅ manifest_file_concurrency_limit test passed for full scan")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -674,11 +643,9 @@ end
         end
     end
 
-    @testset "with_manifest_entry_concurrency_limit! - Incremental Scan" begin
+    @testset "manifest_entry_concurrency_limit - Incremental Scan" begin
         table = RustyIceberg.table_open(incremental_path)
-        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-
-        @test_nowarn RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(4))
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id; manifest_entry_concurrency_limit=Int64(4))
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
 
         try
@@ -687,7 +654,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
-            println("✅ with_manifest_entry_concurrency_limit! test passed for incremental scan")
+            println("✅ manifest_entry_concurrency_limit test passed for incremental scan")
         finally
             RustyIceberg.free_stream!(inserts_stream)
             RustyIceberg.free_stream!(deletes_stream)
@@ -696,17 +663,15 @@ end
         end
     end
 
-    @testset "Combined Builder Methods - Full Scan" begin
+    @testset "Combined Parameters - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Combine multiple builder methods
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_address"])
-        RustyIceberg.with_batch_size!(scan, UInt(5))
-        RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(2))
-        RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(2))
-        RustyIceberg.with_serialization_concurrency_limit!(scan, UInt(2))
-
+        scan = RustyIceberg.new_scan(table;
+            column_names=["c_custkey", "c_name", "c_address"],
+            batch_size=Int64(5),
+            data_file_concurrency_limit=Int64(2),
+            manifest_entry_concurrency_limit=Int64(2),
+            serialization_concurrency=Int64(2),
+        )
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -724,7 +689,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ Combined builder methods test passed for full scan")
+            println("✅ Combined parameters test passed for full scan")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -732,18 +697,16 @@ end
         end
     end
 
-    @testset "Combined Builder Methods - Incremental Scan" begin
+    @testset "Combined Parameters - Incremental Scan" begin
         table = RustyIceberg.table_open(incremental_path)
-        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-
-        # Combine multiple builder methods
-        RustyIceberg.select_columns!(scan, ["n"])
-        RustyIceberg.with_batch_size!(scan, UInt(5))
-        RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(2))
-        RustyIceberg.with_manifest_file_concurrency_limit!(scan, UInt(2))
-        RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(2))
-        RustyIceberg.with_serialization_concurrency_limit!(scan, UInt(2))
-
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id;
+            column_names=["n"],
+            batch_size=Int64(5),
+            data_file_concurrency_limit=Int64(2),
+            manifest_file_concurrency_limit=Int64(2),
+            manifest_entry_concurrency_limit=Int64(2),
+            serialization_concurrency=Int64(2),
+        )
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
 
         try
@@ -760,7 +723,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
-            println("✅ Combined builder methods test passed for incremental scan")
+            println("✅ Combined parameters test passed for incremental scan")
         finally
             RustyIceberg.free_stream!(inserts_stream)
             RustyIceberg.free_stream!(deletes_stream)
@@ -769,13 +732,9 @@ end
         end
     end
 
-    @testset "select_columns! with with_file_column! - Full Scan" begin
+    @testset "column_names with file_column - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Select specific columns AND include file metadata
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
-        RustyIceberg.with_file_column!(scan)
+        scan = RustyIceberg.new_scan(table; column_names=["c_custkey", "c_name"], file_column=true)
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -803,7 +762,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ select_columns! with with_file_column! test passed for full scan")
+            println("✅ column_names with file_column test passed for full scan")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -811,13 +770,9 @@ end
         end
     end
 
-    @testset "select_columns! with with_file_column! - Incremental Scan" begin
+    @testset "column_names with file_column - Incremental Scan" begin
         table = RustyIceberg.table_open(incremental_path)
-        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-
-        # Select specific column AND include file metadata for incremental scan
-        RustyIceberg.select_columns!(scan, ["n"])
-        RustyIceberg.with_file_column!(scan)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id; column_names=["n"], file_column=true)
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
 
         try
@@ -842,7 +797,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
-            println("✅ select_columns! with with_file_column! test passed for incremental scan")
+            println("✅ column_names with file_column test passed for incremental scan")
         finally
             RustyIceberg.free_stream!(inserts_stream)
             RustyIceberg.free_stream!(deletes_stream)
@@ -851,12 +806,9 @@ end
         end
     end
 
-    @testset "select_columns! with FILE_COLUMN constant" begin
+    @testset "column_names with FILE_COLUMN constant" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Select columns including FILE_COLUMN constant
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", RustyIceberg.FILE_COLUMN])
+        scan = RustyIceberg.new_scan(table; column_names=["c_custkey", "c_name", RustyIceberg.FILE_COLUMN])
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -883,7 +835,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ select_columns! with FILE_COLUMN constant test passed")
+            println("✅ column_names with FILE_COLUMN constant test passed")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -891,13 +843,9 @@ end
         end
     end
 
-    @testset "select_columns! with with_pos_column! - Full Scan" begin
+    @testset "column_names with pos_column - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Select specific columns AND include pos metadata
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
-        RustyIceberg.with_pos_column!(scan)
+        scan = RustyIceberg.new_scan(table; column_names=["c_custkey", "c_name"], pos_column=true)
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -928,7 +876,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ select_columns! with with_pos_column! test passed for full scan")
+            println("✅ column_names with pos_column test passed for full scan")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -936,13 +884,9 @@ end
         end
     end
 
-    @testset "select_columns! with with_pos_column! - Incremental Scan" begin
+    @testset "column_names with pos_column - Incremental Scan" begin
         table = RustyIceberg.table_open(incremental_path)
-        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-
-        # Select specific column AND include pos metadata for incremental scan
-        RustyIceberg.select_columns!(scan, ["n"])
-        RustyIceberg.with_pos_column!(scan)
+        scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id; column_names=["n"], pos_column=true)
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
 
         try
@@ -1016,7 +960,7 @@ end
             full_range = 0:19
             @test Set(keys(position_counts)) == Set(full_range)
 
-            println("✅ select_columns! with with_pos_column! test passed for incremental scan")
+            println("✅ column_names with pos_column test passed for incremental scan")
         finally
             RustyIceberg.free_stream!(inserts_stream)
             RustyIceberg.free_stream!(deletes_stream)
@@ -1025,12 +969,9 @@ end
         end
     end
 
-    @testset "select_columns! with POS_COLUMN constant" begin
+    @testset "column_names with POS_COLUMN constant" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Select columns including POS_COLUMN constant
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", RustyIceberg.POS_COLUMN])
+        scan = RustyIceberg.new_scan(table; column_names=["c_custkey", "c_name", RustyIceberg.POS_COLUMN])
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -1060,7 +1001,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ select_columns! with POS_COLUMN constant test passed")
+            println("✅ column_names with POS_COLUMN constant test passed")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -1068,14 +1009,9 @@ end
         end
     end
 
-    @testset "with_file_column! and with_pos_column! combined" begin
+    @testset "file_column and pos_column combined" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-
-        # Select columns and include both file and pos metadata
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
-        RustyIceberg.with_file_column!(scan)
-        RustyIceberg.with_pos_column!(scan)
+        scan = RustyIceberg.new_scan(table; column_names=["c_custkey", "c_name"], file_column=true, pos_column=true)
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -1108,7 +1044,7 @@ end
                 RustyIceberg.free_batch!(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
-            println("✅ with_file_column! and with_pos_column! combined test passed")
+            println("✅ file_column and pos_column combined test passed")
         finally
             RustyIceberg.free_stream!(stream)
             RustyIceberg.free_scan!(scan)
@@ -1116,20 +1052,17 @@ end
         end
     end
 
-    @testset "with_snapshot_id! - Full Scan via Builder Method" begin
+    @testset "snapshot_id - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
 
         # Use the correct snapshot ID for the customer table
         customer_snapshot_id = Int64(3441867730092225551)
 
-        scan = RustyIceberg.new_scan(table)
-
-        # Set snapshot ID explicitly using builder method
-        RustyIceberg.with_snapshot_id!(scan, customer_snapshot_id)
+        scan = RustyIceberg.new_scan(table;
+            snapshot_id=customer_snapshot_id,
+            column_names=["c_custkey", "c_name"],
+        )
         println("ℹ️  Set snapshot ID to: $customer_snapshot_id")
-
-        # Also select a column to verify scan works correctly
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -1161,7 +1094,7 @@ end
             @test !isempty(custkey_values)
             @test all(custkey_values .> 0)  # Customer keys are positive
 
-            println("✅ with_snapshot_id! builder method test passed for full scan")
+            println("✅ snapshot_id test passed for full scan")
             println("   - Total batches: $batch_count")
             println("   - Total rows: $total_rows")
             println("   - Sample customer keys: $(first(custkey_values, 5))")
@@ -1172,19 +1105,18 @@ end
         end
     end
 
-    @testset "Combined with_snapshot_id! and other builder methods" begin
+    @testset "Combined snapshot_id and other parameters" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
 
         # Use the correct snapshot ID for the customer table
         customer_snapshot_id = Int64(3441867730092225551)
 
-        # Combine multiple builder methods including snapshot_id
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_address"])
-        RustyIceberg.with_snapshot_id!(scan, customer_snapshot_id)
-        RustyIceberg.with_batch_size!(scan, UInt(5))
-        RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(2))
-
+        scan = RustyIceberg.new_scan(table;
+            column_names=["c_custkey", "c_name", "c_address"],
+            snapshot_id=customer_snapshot_id,
+            batch_size=Int64(5),
+            data_file_concurrency_limit=Int64(2),
+        )
         stream = RustyIceberg.scan!(scan)
 
         try
@@ -1213,7 +1145,7 @@ end
             @test !isempty(custkey_values)
             @test all(custkey_values .> 0)  # Valid customer keys
 
-            println("✅ Combined with_snapshot_id! and other builder methods test passed")
+            println("✅ Combined snapshot_id and other parameters test passed")
             println("   - Total batches: $batch_count")
             println("   - All batches respect size limit (≤5)")
         finally
@@ -1231,7 +1163,6 @@ end
     @testset "E2E - Nations Table" begin
         table = RustyIceberg.table_open(nations_path)
         scan = RustyIceberg.new_scan(table)
-        RustyIceberg.build!(scan)
 
         reader = RustyIceberg.create_reader(scan)
         @test reader isa RustyIceberg.ArrowReaderContext
@@ -1304,7 +1235,6 @@ end
 
         # Split scan
         scan_split = RustyIceberg.new_scan(table)
-        RustyIceberg.build!(scan_split)
         reader = RustyIceberg.create_reader(scan_split)
         file_stream = RustyIceberg.plan_files(scan_split)
         split_rows = Tuple[]
@@ -1345,9 +1275,7 @@ end
 
     @testset "Column selection" begin
         table = RustyIceberg.table_open(nations_path)
-        scan = RustyIceberg.new_scan(table)
-        RustyIceberg.select_columns!(scan, ["n_nationkey", "n_name"])
-        RustyIceberg.build!(scan)
+        scan = RustyIceberg.new_scan(table; column_names=["n_nationkey", "n_name"])
 
         reader = RustyIceberg.create_reader(scan)
         file_stream = RustyIceberg.plan_files(scan)
@@ -1384,7 +1312,6 @@ end
     @testset "record_count" begin
         table = RustyIceberg.table_open(nations_path)
         scan = RustyIceberg.new_scan(table)
-        RustyIceberg.build!(scan)
 
         reader = RustyIceberg.create_reader(scan)
         file_stream = RustyIceberg.plan_files(scan)
@@ -1427,7 +1354,6 @@ end
     @testset "free_file discards task without reading" begin
         table = RustyIceberg.table_open(nations_path)
         scan = RustyIceberg.new_scan(table)
-        RustyIceberg.build!(scan)
 
         reader = RustyIceberg.create_reader(scan)
         file_stream = RustyIceberg.plan_files(scan)
@@ -1448,9 +1374,7 @@ end
 
     @testset "create_reader with reader_concurrency override" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-        RustyIceberg.select_columns!(scan, ["c_custkey"])
-        RustyIceberg.build!(scan)
+        scan = RustyIceberg.new_scan(table; column_names=["c_custkey"])
 
         reader = RustyIceberg.create_reader(scan; reader_concurrency=UInt(4))
         @test reader isa RustyIceberg.ArrowReaderContext
@@ -1488,9 +1412,7 @@ end
 
     @testset "Multi-file with batch_size" begin
         table = RustyIceberg.table_open(customer_path)
-        scan = RustyIceberg.new_scan(table)
-        RustyIceberg.with_batch_size!(scan, UInt(100))
-        RustyIceberg.build!(scan)
+        scan = RustyIceberg.new_scan(table; batch_size=Int64(100))
 
         reader = RustyIceberg.create_reader(scan)
         file_stream = RustyIceberg.plan_files(scan)
@@ -1537,7 +1459,6 @@ end
     @testset "E2E append + delete streams" begin
         table = RustyIceberg.table_open(incremental_path)
         scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-        RustyIceberg.build!(scan)
 
         reader = RustyIceberg.create_reader(scan)
         @test reader isa RustyIceberg.ArrowReaderContext
@@ -1620,7 +1541,6 @@ end
     @testset "record_count" begin
         table = RustyIceberg.table_open(incremental_path)
         scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-        RustyIceberg.build!(scan)
 
         reader = RustyIceberg.create_reader(scan)
         append_stream, delete_stream = RustyIceberg.plan_files(scan)
@@ -1665,7 +1585,6 @@ end
     @testset "free_file discards without reading" begin
         table = RustyIceberg.table_open(incremental_path)
         scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-        RustyIceberg.build!(scan)
 
         reader = RustyIceberg.create_reader(scan)
         append_stream, delete_stream = RustyIceberg.plan_files(scan)
@@ -1722,7 +1641,6 @@ end
 
         # Split scan
         scan_sp = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-        RustyIceberg.build!(scan_sp)
         reader = RustyIceberg.create_reader(scan_sp)
         append_stream, delete_stream = RustyIceberg.plan_files(scan_sp)
         sp_inserts = Int64[]

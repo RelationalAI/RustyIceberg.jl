@@ -14,8 +14,6 @@ export IcebergException
 export new_incremental_scan, free_scan!
 export table_open, free_table!, new_scan
 export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_schema
-export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
-export with_file_column!, with_pos_column!
 export scan!, next_batch, free_batch!, free_stream!
 export FileScanStream, ArrowReaderContext, FileScanHandle
 export plan_files, create_reader, next_file!, read_file!, read_file_scan!

@@ -3,7 +3,7 @@ use std::ptr;
 
 use iceberg::arrow::ArrowReaderBuilder;
 use iceberg::io::FileIO;
-use iceberg::scan::incremental::{IncrementalTableScan, IncrementalTableScanBuilder};
+use iceberg::scan::incremental::IncrementalTableScan;
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, Context, NotifyGuard, RawResponse,
     ResponseGuard, RT,
@@ -23,15 +23,14 @@ use crate::{IcebergArrowStream, IcebergArrowStreamResponse, IcebergTable};
 /// When -1 is passed as from_snapshot_id or to_snapshot_id, it means None (use default).
 const SNAPSHOT_ID_NONE: i64 = -1;
 
-/// Struct for incremental scan builder and scan
+/// Struct for a built incremental table scan.
 #[repr(C)]
 pub struct IcebergIncrementalScan {
-    pub builder: Option<IncrementalTableScanBuilder<'static>>,
-    pub scan: Option<IncrementalTableScan>,
+    pub scan: IncrementalTableScan,
     /// 0 = auto-detect (num_cpus)
     pub serialization_concurrency: usize,
     /// Stored for create_reader; set at scan creation from table.file_io()
-    pub file_io: Option<FileIO>,
+    pub file_io: FileIO,
     /// 0 = use reader default
     pub data_file_concurrency_limit: usize,
     /// 0 = no override
@@ -83,122 +82,95 @@ impl RawResponse for IcebergUnzippedStreamsResponse {
     }
 }
 
-/// Create a new incremental scan builder
+/// Create a new incremental scan builder with all parameters.
+///
+/// Numeric parameters use -1 as "not set / use default" sentinel.
 ///
 /// # Arguments
 /// * `table` - The table to scan
-/// * `from_snapshot_id` - Starting snapshot ID, or `SNAPSHOT_ID_NONE` (-1) to scan from the root (oldest) snapshot
-/// * `to_snapshot_id` - Ending snapshot ID, or `SNAPSHOT_ID_NONE` (-1) to scan to the current (latest) snapshot
+/// * `from_snapshot_id` - Starting snapshot ID, or -1 (SNAPSHOT_ID_NONE) for oldest
+/// * `to_snapshot_id` - Ending snapshot ID, or -1 (SNAPSHOT_ID_NONE) for current
+/// * All remaining parameters use -1 to mean "not set / use default"
 #[no_mangle]
 pub extern "C" fn iceberg_new_incremental_scan(
     table: *mut IcebergTable,
     from_snapshot_id: i64,
     to_snapshot_id: i64,
+    column_names: *const *const c_char, // NULL = all columns
+    column_names_len: usize,
+    data_file_concurrency_limit: i64,    // -1 = use reader default
+    manifest_file_concurrency_limit: i64, // -1 = don't set
+    manifest_entry_concurrency_limit: i64, // -1 = don't set
+    batch_size: i64,                     // -1 = no override
+    file_column: u8,                     // 0 = no, non-zero = yes
+    pos_column: u8,
+    serialization_concurrency: i64,      // -1 = auto-detect
+    task_prefetch_depth: i64,            // -1 = use DEFAULT_TASK_PREFETCH_DEPTH
 ) -> *mut IcebergIncrementalScan {
     if table.is_null() {
         return ptr::null_mut();
     }
     let table_ref = unsafe { &*table };
 
-    // Convert SNAPSHOT_ID_NONE to None for optional snapshot IDs
-    let from_id = if from_snapshot_id == SNAPSHOT_ID_NONE {
-        None
-    } else {
-        Some(from_snapshot_id)
-    };
-
-    let to_id = if to_snapshot_id == SNAPSHOT_ID_NONE {
-        None
-    } else {
-        Some(to_snapshot_id)
-    };
+    let from_id = if from_snapshot_id == SNAPSHOT_ID_NONE { None } else { Some(from_snapshot_id) };
+    let to_id = if to_snapshot_id == SNAPSHOT_ID_NONE { None } else { Some(to_snapshot_id) };
 
     let file_io = table_ref.table.file_io().clone();
-    let scan_builder = table_ref.table.incremental_scan(from_id, to_id);
+    let mut builder = table_ref.table.incremental_scan(from_id, to_id);
+
+    // Apply column selection
+    if !column_names.is_null() && column_names_len > 0 {
+        let mut columns = Vec::new();
+        for i in 0..column_names_len {
+            let col_ptr = unsafe { *column_names.add(i) };
+            if col_ptr.is_null() {
+                return ptr::null_mut();
+            }
+            let col_str = unsafe {
+                match CStr::from_ptr(col_ptr).to_str() {
+                    Ok(s) => s,
+                    Err(_) => return ptr::null_mut(),
+                }
+            };
+            columns.push(col_str.to_string());
+        }
+        builder = builder.select(columns);
+    }
+
+    // Apply builder methods
+    if manifest_file_concurrency_limit >= 0 {
+        builder = builder.with_manifest_file_concurrency_limit(manifest_file_concurrency_limit as usize);
+    }
+    if manifest_entry_concurrency_limit >= 0 {
+        builder = builder.with_manifest_entry_concurrency_limit(manifest_entry_concurrency_limit as usize);
+    }
+    if batch_size >= 0 {
+        builder = builder.with_batch_size(Some(batch_size as usize));
+    }
+    if file_column != 0 {
+        builder = builder.with_file_column();
+    }
+    if pos_column != 0 {
+        builder = builder.with_pos_column();
+    }
+    if data_file_concurrency_limit >= 0 {
+        builder = builder.with_data_file_concurrency_limit(data_file_concurrency_limit as usize);
+    }
+
+    let scan = match builder.build() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
     Box::into_raw(Box::new(IcebergIncrementalScan {
-        builder: Some(scan_builder),
-        scan: None,
-        serialization_concurrency: 0,
-        file_io: Some(file_io),
-        data_file_concurrency_limit: 0,
-        batch_size: 0,
-        task_prefetch_depth: 0,
+        scan,
+        serialization_concurrency: if serialization_concurrency < 0 { 0 } else { serialization_concurrency as usize },
+        file_io,
+        data_file_concurrency_limit: if data_file_concurrency_limit < 0 { 0 } else { data_file_concurrency_limit as usize },
+        batch_size: if batch_size < 0 { 0 } else { batch_size as usize },
+        task_prefetch_depth: if task_prefetch_depth < 0 { 0 } else { task_prefetch_depth as usize },
     }))
 }
-
-// Use macros from scan_common for shared functionality
-impl_select_columns!(iceberg_incremental_select_columns, IcebergIncrementalScan);
-
-impl_scan_builder_method!(
-    iceberg_incremental_scan_with_manifest_file_concurrency_limit,
-    IcebergIncrementalScan,
-    with_manifest_file_concurrency_limit,
-    n: usize
-);
-
-/// Sets data file concurrency and stores the value for create_reader.
-#[no_mangle]
-pub extern "C" fn iceberg_incremental_scan_with_data_file_concurrency_limit(
-    scan: &mut *mut IcebergIncrementalScan,
-    n: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    let scan_ref = unsafe { &mut **scan };
-    let builder = scan_ref.builder.take();
-    if builder.is_none() {
-        return CResult::Error;
-    }
-    scan_ref.builder = builder.map(|b| b.with_data_file_concurrency_limit(n));
-    scan_ref.data_file_concurrency_limit = n;
-    CResult::Ok
-}
-
-impl_scan_builder_method!(
-    iceberg_incremental_scan_with_manifest_entry_concurrency_limit,
-    IcebergIncrementalScan,
-    with_manifest_entry_concurrency_limit,
-    n: usize
-);
-
-/// Sets batch size on the builder and stores the value for create_reader.
-#[no_mangle]
-pub extern "C" fn iceberg_incremental_scan_with_batch_size(
-    scan: &mut *mut IcebergIncrementalScan,
-    n: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    let scan_ref = unsafe { &mut **scan };
-    if scan_ref.builder.is_none() {
-        return CResult::Error;
-    }
-    let builder = scan_ref.builder.take();
-    scan_ref.builder = builder.map(|b| b.with_batch_size(Some(n)));
-    scan_ref.batch_size = n;
-    CResult::Ok
-}
-
-impl_scan_builder_method!(
-    iceberg_incremental_scan_with_file_column,
-    IcebergIncrementalScan,
-    with_file_column
-);
-
-impl_scan_builder_method!(
-    iceberg_incremental_scan_with_pos_column,
-    IcebergIncrementalScan,
-    with_pos_column
-);
-
-impl_scan_build!(iceberg_incremental_scan_build, IcebergIncrementalScan);
-
-impl_with_serialization_concurrency_limit!(
-    iceberg_incremental_scan_with_serialization_concurrency_limit,
-    IcebergIncrementalScan
-);
 
 // Get unzipped Arrow streams from incremental scan (async)
 // Returns two separate streams: one for inserts, one for deletes
@@ -210,10 +182,6 @@ export_runtime_op!(
             return Err(anyhow::anyhow!("Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &*scan };
-        let scan_ref = &scan_ptr.scan;
-        if scan_ref.is_none() {
-            return Err(anyhow::anyhow!("Incremental scan not initialized"));
-        }
 
         // Determine concurrency (0 = auto-detect)
         let serialization_concurrency = scan_ptr.serialization_concurrency;
@@ -225,7 +193,7 @@ export_runtime_op!(
             serialization_concurrency
         };
 
-        Ok((scan_ref.as_ref().unwrap(), serialization_concurrency))
+        Ok((&scan_ptr.scan, serialization_concurrency))
     },
     result_tuple,
     async {
@@ -344,8 +312,7 @@ export_runtime_op!(
             return Err(anyhow::anyhow!("Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &*scan };
-        let scan_ref = scan_ptr.scan.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Incremental scan not built — call build! first"))?;
+        let scan_ref = &scan_ptr.scan;
         let task_prefetch_depth = if scan_ptr.task_prefetch_depth == 0 {
             DEFAULT_TASK_PREFETCH_DEPTH
         } else {
@@ -377,10 +344,7 @@ pub extern "C" fn iceberg_incremental_create_reader(
         return ptr::null_mut();
     }
     let scan_ptr = unsafe { &*scan };
-    let file_io = match scan_ptr.file_io.as_ref() {
-        Some(f) => f.clone(),
-        None => return ptr::null_mut(),
-    };
+    let file_io = scan_ptr.file_io.clone();
 
     let mut builder = ArrowReaderBuilder::new(file_io);
 

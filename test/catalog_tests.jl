@@ -569,16 +569,11 @@ end
         @test table != C_NULL
         println("✅ Customer table loaded successfully from catalog")
 
-        # Create a scan on the loaded table
+        # Create a scan on the loaded table with specific columns
         println("Creating scan on loaded customer table...")
-        scan = RustyIceberg.new_scan(table)
+        scan = RustyIceberg.new_scan(table; column_names=["c_custkey", "c_name", "c_nationkey"])
         @test scan != C_NULL
         println("✅ Scan created successfully on loaded table")
-
-        # Select specific columns to verify table structure
-        println("Selecting specific columns from customer table...")
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
-        println("✅ Column selection completed")
 
         # Execute the scan
         println("Executing scan on loaded customer table...")
@@ -656,16 +651,11 @@ end
         @test table != C_NULL
         println("✅ Customer table loaded successfully with vended credentials")
 
-        # Create a scan on the loaded table
+        # Create a scan on the loaded table with specific columns
         println("Creating scan on loaded customer table...")
-        scan = RustyIceberg.new_scan(table)
+        scan = RustyIceberg.new_scan(table; column_names=["c_custkey", "c_name", "c_nationkey"])
         @test scan != C_NULL
         println("✅ Scan created successfully on loaded table")
-
-        # Select specific columns
-        println("Selecting specific columns from customer table...")
-        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
-        println("✅ Column selection completed")
 
         # Execute the scan
         println("Executing scan on loaded customer table...")
@@ -738,8 +728,7 @@ end
             credential_error_caught = false
             try
                 table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer"; load_credentials=false)
-                scan = RustyIceberg.new_scan(table)
-                RustyIceberg.select_columns!(scan, ["c_custkey"])
+                scan = RustyIceberg.new_scan(table; column_names=["c_custkey"])
                 stream = RustyIceberg.scan!(scan)
                 RustyIceberg.next_batch(stream)
                 error("Expected a credential/access error but none was thrown")
@@ -803,15 +792,11 @@ end
             @test table != C_NULL
             println("✅ Customer table loaded successfully")
 
-            # Create a scan on the loaded table
+            # Create a scan on the loaded table with specific columns
             println("Creating scan on loaded customer table...")
-            scan = RustyIceberg.new_scan(table)
+            scan = RustyIceberg.new_scan(table; column_names=["c_custkey", "c_name", "c_nationkey"])
             @test scan != C_NULL
             println("✅ Scan created successfully on loaded table")
-
-            # Select specific columns
-            println("Selecting specific columns from customer table...")
-            RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
             println("✅ Column selection completed")
 
             # Execute the scan - this is where the credentials loader should kick in
@@ -885,15 +870,10 @@ end
         to_snapshot_id = Int64(6832180054960511692)
 
         println("Creating incremental scan on catalog-loaded table...")
-        scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id; batch_size=Int64(10))
         @test scan isa RustyIceberg.IncrementalScan
         @test scan.ptr != C_NULL
         println("✅ Incremental scan created successfully on catalog-loaded table")
-
-        # Configure scan with batch size
-        println("Configuring incremental scan...")
-        RustyIceberg.with_batch_size!(scan, UInt(10))
-        println("✅ Batch size configured")
 
         # Execute the scan to get streams
         println("Executing incremental scan on catalog-loaded table...")

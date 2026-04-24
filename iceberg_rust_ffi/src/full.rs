@@ -4,7 +4,7 @@ use std::ptr;
 use futures::{stream, StreamExt};
 use iceberg::arrow::ArrowReaderBuilder;
 use iceberg::io::FileIO;
-use iceberg::scan::{TableScan, TableScanBuilder};
+use iceberg::scan::TableScan;
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
@@ -17,12 +17,13 @@ use crate::{
     IcebergFileScanTaskStreamResponse, IcebergNextFileScanTaskResponse, IcebergTable,
 };
 
-/// Struct for regular (full) scan builder and scan
+const SNAPSHOT_ID_NONE: i64 = -1;
+
+/// Struct for a built full table scan.
 #[repr(C)]
 pub struct IcebergScan {
-    pub builder: Option<TableScanBuilder<'static>>,
-    pub scan: Option<TableScan>,
-    pub file_io: Option<FileIO>,
+    pub scan: TableScan,
+    pub file_io: FileIO,
     /// 0 = auto-detect (num_cpus)
     pub serialization_concurrency: usize,
     /// stored separately so create_reader can use it; 0 = use reader default
@@ -35,110 +36,87 @@ pub struct IcebergScan {
 
 unsafe impl Send for IcebergScan {}
 
-/// Create a new scan builder
+/// Create and build a new scan.
+///
+/// Numeric parameters use -1 as "not set / use default" sentinel.
+/// Returns NULL on any error (invalid table, failed build, bad column names, etc.)
 #[no_mangle]
-pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan {
+pub extern "C" fn iceberg_new_scan(
+    table: *mut IcebergTable,
+    column_names: *const *const c_char, // NULL = all columns
+    column_names_len: usize,
+    data_file_concurrency_limit: i64,    // -1 = use reader default
+    manifest_file_concurrency_limit: i64, // -1 = don't set
+    manifest_entry_concurrency_limit: i64, // -1 = don't set
+    batch_size: i64,                     // -1 = no override
+    file_column: u8,                     // 0 = no, non-zero = yes
+    pos_column: u8,
+    serialization_concurrency: i64,      // -1 = auto-detect
+    snapshot_id: i64,                    // -1 = current (SNAPSHOT_ID_NONE)
+    task_prefetch_depth: i64,            // -1 = use DEFAULT_TASK_PREFETCH_DEPTH
+) -> *mut IcebergScan {
     if table.is_null() {
         return ptr::null_mut();
     }
     let table_ref = unsafe { &*table };
     let file_io = table_ref.table.file_io().clone();
-    let scan_builder = table_ref.table.scan();
+    let mut builder = table_ref.table.scan();
+
+    // Apply column selection
+    if !column_names.is_null() && column_names_len > 0 {
+        let mut columns = Vec::new();
+        for i in 0..column_names_len {
+            let col_ptr = unsafe { *column_names.add(i) };
+            if col_ptr.is_null() {
+                return ptr::null_mut();
+            }
+            let col_str = unsafe {
+                match CStr::from_ptr(col_ptr).to_str() {
+                    Ok(s) => s,
+                    Err(_) => return ptr::null_mut(),
+                }
+            };
+            columns.push(col_str.to_string());
+        }
+        builder = builder.select(columns);
+    }
+
+    // Apply builder methods
+    if manifest_file_concurrency_limit >= 0 {
+        builder = builder.with_manifest_file_concurrency_limit(manifest_file_concurrency_limit as usize);
+    }
+    if manifest_entry_concurrency_limit >= 0 {
+        builder = builder.with_manifest_entry_concurrency_limit(manifest_entry_concurrency_limit as usize);
+    }
+    if batch_size >= 0 {
+        builder = builder.with_batch_size(Some(batch_size as usize));
+    }
+    if file_column != 0 {
+        builder = builder.with_file_column();
+    }
+    if pos_column != 0 {
+        builder = builder.with_pos_column();
+    }
+    if snapshot_id != SNAPSHOT_ID_NONE {
+        builder = builder.snapshot_id(snapshot_id);
+    }
+    if data_file_concurrency_limit >= 0 {
+        builder = builder.with_data_file_concurrency_limit(data_file_concurrency_limit as usize);
+    }
+
+    let scan = match builder.build() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
     Box::into_raw(Box::new(IcebergScan {
-        builder: Some(scan_builder),
-        scan: None,
-        file_io: Some(file_io),
-        serialization_concurrency: 1,
-        data_file_concurrency_limit: 0,
-        batch_size: 0,
-        task_prefetch_depth: 0,
+        scan,
+        file_io,
+        serialization_concurrency: if serialization_concurrency < 0 { 0 } else { serialization_concurrency as usize },
+        data_file_concurrency_limit: if data_file_concurrency_limit < 0 { 0 } else { data_file_concurrency_limit as usize },
+        batch_size: if batch_size < 0 { 0 } else { batch_size as usize },
+        task_prefetch_depth: if task_prefetch_depth < 0 { 0 } else { task_prefetch_depth as usize },
     }))
-}
-
-// Use macros from scan_common for shared functionality
-impl_select_columns!(iceberg_select_columns, IcebergScan);
-
-/// Sets data file concurrency on the builder and stores the value for create_reader.
-#[no_mangle]
-pub extern "C" fn iceberg_scan_with_data_file_concurrency_limit(
-    scan: &mut *mut IcebergScan,
-    n: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    let scan_ref = unsafe { &mut **scan };
-    let builder = scan_ref.builder.take();
-    if builder.is_none() {
-        return CResult::Error;
-    }
-    scan_ref.builder = builder.map(|b| b.with_data_file_concurrency_limit(n));
-    scan_ref.data_file_concurrency_limit = n;
-    CResult::Ok
-}
-
-impl_scan_builder_method!(
-    iceberg_scan_with_manifest_file_concurrency_limit,
-    IcebergScan,
-    with_manifest_file_concurrency_limit,
-    n: usize
-);
-
-impl_scan_builder_method!(
-    iceberg_scan_with_manifest_entry_concurrency_limit,
-    IcebergScan,
-    with_manifest_entry_concurrency_limit,
-    n: usize
-);
-
-/// Sets batch size on the builder and stores the value for create_reader.
-#[no_mangle]
-pub extern "C" fn iceberg_scan_with_batch_size(
-    scan: &mut *mut IcebergScan,
-    n: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    let scan_ref = unsafe { &mut **scan };
-    if scan_ref.builder.is_none() {
-        return CResult::Error;
-    }
-    let builder = scan_ref.builder.take();
-    scan_ref.builder = builder.map(|b| b.with_batch_size(Some(n)));
-    scan_ref.batch_size = n;
-    CResult::Ok
-}
-
-impl_scan_builder_method!(iceberg_scan_with_file_column, IcebergScan, with_file_column);
-
-impl_scan_builder_method!(iceberg_scan_with_pos_column, IcebergScan, with_pos_column);
-
-impl_scan_build!(iceberg_scan_build, IcebergScan);
-
-impl_with_serialization_concurrency_limit!(
-    iceberg_scan_with_serialization_concurrency_limit,
-    IcebergScan
-);
-
-impl_scan_builder_method!(
-    iceberg_scan_with_snapshot_id,
-    IcebergScan,
-    snapshot_id,
-    snapshot_id: i64
-);
-
-/// Sets the file scan task prefetch depth (tasks buffered ahead of consumer).
-#[no_mangle]
-pub extern "C" fn iceberg_scan_with_task_prefetch_depth(
-    scan: &mut *mut IcebergScan,
-    n: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    unsafe { (*(*scan)).task_prefetch_depth = n };
-    CResult::Ok
 }
 
 // Async: get a single Arrow stream for the entire scan (non-split API)
@@ -150,10 +128,6 @@ export_runtime_op!(
             return Err(anyhow::anyhow!("Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &*scan };
-        let scan_ref = &scan_ptr.scan;
-        if scan_ref.is_none() {
-            return Err(anyhow::anyhow!("Scan not initialized"));
-        }
 
         // Determine concurrency (0 = auto-detect)
         let serialization_concurrency = scan_ptr.serialization_concurrency;
@@ -165,7 +139,7 @@ export_runtime_op!(
             serialization_concurrency
         };
 
-        Ok((scan_ref.as_ref().unwrap(), serialization_concurrency))
+        Ok((&scan_ptr.scan, serialization_concurrency))
     },
     result_tuple,
     async {
@@ -201,14 +175,12 @@ export_runtime_op!(
             return Err(anyhow::anyhow!("Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &*scan };
-        let scan_ref = scan_ptr.scan.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Scan not built — call build! first"))?;
         let task_prefetch_depth = if scan_ptr.task_prefetch_depth == 0 {
             crate::table::DEFAULT_TASK_PREFETCH_DEPTH
         } else {
             scan_ptr.task_prefetch_depth
         };
-        Ok((scan_ref, task_prefetch_depth))
+        Ok((&scan_ptr.scan, task_prefetch_depth))
     },
     result_tuple,
     async {
@@ -233,11 +205,8 @@ pub extern "C" fn iceberg_create_reader(
         return ptr::null_mut();
     }
     let scan_ptr = unsafe { &*scan };
-    let Some(file_io) = scan_ptr.file_io.as_ref() else {
-        return ptr::null_mut();
-    };
 
-    let mut builder = ArrowReaderBuilder::new(file_io.clone())
+    let mut builder = ArrowReaderBuilder::new(scan_ptr.file_io.clone())
         .with_row_group_filtering_enabled(true)
         .with_row_selection_enabled(false);
 
@@ -247,7 +216,7 @@ pub extern "C" fn iceberg_create_reader(
         scan_ptr.data_file_concurrency_limit
     };
     if data_file_concurrency > 0 {
-    builder = builder.with_data_file_concurrency_limit(data_file_concurrency);
+        builder = builder.with_data_file_concurrency_limit(data_file_concurrency);
     }
     if scan_ptr.batch_size > 0 {
         builder = builder.with_batch_size(scan_ptr.batch_size);

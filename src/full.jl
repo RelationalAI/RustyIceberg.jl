@@ -6,15 +6,12 @@
 A mutable wrapper around a pointer to a regular (full) table scan.
 
 This type enables multiple dispatch and safe memory management for Iceberg table scans.
-Use `new_scan` to create a scan, configure it with builder methods, and call `scan!`
-to build the scan and obtain an Arrow stream.
+Use `new_scan` to create a scan and call `scan!` to build it and obtain an Arrow stream.
 
 # Example
 ```julia
 table = table_open("s3://path/to/table/metadata.json")
-scan = new_scan(table)
-select_columns!(scan, ["col1", "col2"])
-with_batch_size!(scan, UInt(1024))
+scan = new_scan(table; column_names=["col1", "col2"], batch_size=Int64(1024))
 stream = scan!(scan)
 # ... process batches from stream
 free_stream!(stream)
@@ -27,229 +24,68 @@ mutable struct Scan
 end
 
 """
-    new_scan(table::Table) -> Scan
+    new_scan(table::Table; kwargs...) -> Scan
 
-Create a scan for the given table.
+Create a scan for the given table. All scan parameters are configured via keyword arguments.
+
+# Keyword Arguments
+- `column_names`: columns to read (default: all columns)
+- `data_file_concurrency_limit`: data file concurrency (`-1` = reader default)
+- `manifest_file_concurrency_limit`: manifest file concurrency (`-1` = don't set)
+- `manifest_entry_concurrency_limit`: manifest entry concurrency (`-1` = don't set)
+- `batch_size`: Arrow record batch size (`-1` = no override)
+- `file_column`: include `_file` metadata column (default: `false`)
+- `pos_column`: include `_pos` metadata column (default: `false`)
+- `serialization_concurrency`: parallel batch serializations (`-1` = auto-detect)
+- `snapshot_id`: snapshot ID to scan (`-1` = current snapshot)
+- `task_prefetch_depth`: file scan task prefetch depth (`-1` = use default)
 """
-function new_scan(table::Table)
-    scan_ptr = @ccall rust_lib.iceberg_new_scan(table::Table)::Ptr{Cvoid}
+function new_scan(table::Table;
+    column_names::Union{Vector{String}, Nothing} = nothing,
+    data_file_concurrency_limit::Int64 = Int64(-1),
+    manifest_file_concurrency_limit::Int64 = Int64(-1),
+    manifest_entry_concurrency_limit::Int64 = Int64(-1),
+    batch_size::Int64 = Int64(-1),
+    file_column::Bool = false,
+    pos_column::Bool = false,
+    serialization_concurrency::Int64 = Int64(-1),
+    snapshot_id::Int64 = Int64(-1),
+    task_prefetch_depth::Int64 = Int64(-1),
+)
+    if column_names !== nothing
+        c_strings = [pointer(col) for col in column_names]
+        scan_ptr = GC.@preserve column_names c_strings @ccall rust_lib.iceberg_new_scan(
+            table::Table,
+            pointer(c_strings)::Ptr{Cstring},
+            length(column_names)::Csize_t,
+            data_file_concurrency_limit::Int64,
+            manifest_file_concurrency_limit::Int64,
+            manifest_entry_concurrency_limit::Int64,
+            batch_size::Int64,
+            file_column::Bool,
+            pos_column::Bool,
+            serialization_concurrency::Int64,
+            snapshot_id::Int64,
+            task_prefetch_depth::Int64,
+        )::Ptr{Cvoid}
+    else
+        scan_ptr = @ccall rust_lib.iceberg_new_scan(
+            table::Table,
+            C_NULL::Ptr{Cstring},
+            Csize_t(0)::Csize_t,
+            data_file_concurrency_limit::Int64,
+            manifest_file_concurrency_limit::Int64,
+            manifest_entry_concurrency_limit::Int64,
+            batch_size::Int64,
+            file_column::Bool,
+            pos_column::Bool,
+            serialization_concurrency::Int64,
+            snapshot_id::Int64,
+            task_prefetch_depth::Int64,
+        )::Ptr{Cvoid}
+    end
+    scan_ptr == C_NULL && throw(IcebergException("Failed to create scan"))
     return Scan(scan_ptr)
-end
-
-"""
-    select_columns!(scan::Scan, column_names::Vector{String})
-
-Select specific columns for the scan.
-"""
-function select_columns!(scan::Scan, column_names::Vector{String})
-    # Convert String vector to Cstring array
-    c_strings = [pointer(col) for col in column_names]
-    result = GC.@preserve scan c_strings @ccall rust_lib.iceberg_select_columns(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        pointer(c_strings)::Ptr{Cstring},
-        length(column_names)::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to select columns", result))
-    end
-    return nothing
-end
-
-"""
-    with_data_file_concurrency_limit!(scan::Scan, n::UInt)
-
-Sets the data file concurrency level for the scan.
-"""
-function with_data_file_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_data_file_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set data file concurrency limit", result))
-    end
-    return nothing
-end
-
-"""
-    with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
-
-Sets the manifest file concurrency level for the full scan.
-"""
-function with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_manifest_file_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set manifest file concurrency limit", result))
-    end
-    return nothing
-end
-
-"""
-    with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
-
-Sets the manifest entry concurrency level for the scan.
-"""
-function with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_manifest_entry_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set manifest entry concurrency limit", result))
-    end
-    return nothing
-end
-
-"""
-    with_batch_size!(scan::Scan, n::UInt)
-
-Sets the batch size for the scan.
-"""
-function with_batch_size!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_batch_size(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set batch size", result))
-    end
-    return nothing
-end
-
-"""
-    with_file_column!(scan::Scan)
-
-Add the _file metadata column to the scan.
-
-The _file column contains the file path for each row, which can be useful for
-tracking which data files contain specific rows.
-
-# Example
-```julia
-scan = new_scan(table)
-with_file_column!(scan)
-stream = scan!(scan)
-```
-"""
-function with_file_column!(scan::Scan)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_file_column(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to add file column to scan", result))
-    end
-    return nothing
-end
-
-"""
-    with_pos_column!(scan::Scan)
-
-Add the _pos metadata column to the scan.
-
-The _pos column contains the position of each row within its data file, which can
-be useful for tracking row locations and debugging.
-
-# Example
-```julia
-scan = new_scan(table)
-with_pos_column!(scan)
-stream = scan!(scan)
-```
-"""
-function with_pos_column!(scan::Scan)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_pos_column(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to add pos column to scan", result))
-    end
-    return nothing
-end
-
-"""
-    with_serialization_concurrency_limit!(scan::Scan, n::UInt)
-
-Set the serialization concurrency limit for the scan.
-
-This controls how many RecordBatch serializations can happen in parallel.
-- `n = 0`: Auto-detect based on CPU cores (default)
-- `n > 0`: Use exactly n concurrent serializations
-
-Higher values improve throughput for scans with many batches, but use more memory.
-
-# Example
-```julia
-scan = new_scan(table)
-with_serialization_concurrency_limit!(scan, UInt(8))  # Serialize up to 8 batches in parallel
-stream = scan!(scan)
-```
-"""
-function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_serialization_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set serialization concurrency limit", result))
-    end
-    return nothing
-end
-
-"""
-    with_snapshot_id!(scan::Scan, snapshot_id::Int64)
-
-Set the snapshot ID for the scan.
-
-By default, a scan uses the current (latest) snapshot of the table. This method allows
-you to scan a specific snapshot by ID, which is useful for reading historical data or
-comparing data across different points in time.
-
-# Example
-```julia
-table = table_open("s3://path/to/table/metadata.json")
-# List available snapshots (if method is available)
-scan = new_scan(table)
-with_snapshot_id!(scan, Int64(123))  # Scan snapshot with ID 123
-stream = scan!(scan)
-```
-"""
-function with_snapshot_id!(scan::Scan, snapshot_id::Int64)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_snapshot_id(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        snapshot_id::Int64
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set snapshot ID", result))
-    end
-    return nothing
-end
-
-"""
-    build!(scan::Scan)
-
-Build the provided table scan object.
-"""
-function build!(scan::Scan)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_build(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to build scan", result))
-    end
-    return nothing
 end
 
 # Type alias using generic Response{T}
@@ -280,10 +116,9 @@ end
 """
     scan!(scan::Scan) -> ArrowStream
 
-Build the provided table scan object and return an Arrow stream.
+Execute the scan and return an Arrow stream.
 """
 function scan!(scan::Scan)
-    build!(scan)
     return arrow_stream(scan)
 end
 
@@ -302,7 +137,6 @@ end
 # Split-scan API
 #
 # Usage:
-#   build!(scan)
 #   reader = create_reader(scan)
 #   file_stream = plan_files(scan)
 #   while (fs = next_file!(file_stream)) !== nothing
