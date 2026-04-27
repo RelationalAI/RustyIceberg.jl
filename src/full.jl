@@ -269,6 +269,29 @@ function file_path(fs::FileScanHandle)
     return path
 end
 
+"""
+    file_metadata(scan::Scan) -> Vector{NamedTuple{(:path, :record_count), Tuple{String, Union{Int64, Nothing}}}}
+
+Return all file paths and record counts for a scan by draining the plan_files stream.
+No data files are opened. The returned record counts come from manifest metadata and
+may be `nothing` for delete files or partial scans.
+"""
+function file_metadata(scan::Scan)
+    stream = plan_files(scan)
+    result = NamedTuple{(:path, :record_count), Tuple{String, Union{Int64, Nothing}}}[]
+    try
+        while true
+            handle = next_file!(stream)
+            handle === nothing && break
+            push!(result, (path=file_path(handle), record_count=record_count(handle)))
+            free_file!(handle)
+        end
+    finally
+        free_file_stream!(stream)
+    end
+    return result
+end
+
 """Free a file scan stream (from plan_files)."""
 function free_file_stream!(stream::FileScanStream)
     @ccall rust_lib.iceberg_file_scan_task_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid

@@ -12,10 +12,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::scan_common::*;
 use crate::table::{
-    read_incremental_append_file, IcebergArrowReaderContext,
-    IcebergIncrementalAppendFile, IcebergIncrementalAppendFileStream,
-    IcebergIncrementalPosDeleteFile, IcebergIncrementalPosDeleteFileStream,
-    DEFAULT_DELETE_BATCH_SIZE, DEFAULT_TASK_PREFETCH_DEPTH,
+    read_incremental_append_file, IcebergArrowReaderContext, IcebergIncrementalAppendFile,
+    IcebergIncrementalAppendFileStream, IcebergIncrementalPosDeleteFile,
+    IcebergIncrementalPosDeleteFileStream, DEFAULT_DELETE_BATCH_SIZE, DEFAULT_TASK_PREFETCH_DEPTH,
 };
 use crate::{IcebergArrowStream, IcebergArrowStreamResponse, IcebergTable};
 
@@ -98,22 +97,30 @@ pub extern "C" fn iceberg_new_incremental_scan(
     to_snapshot_id: i64,
     column_names: *const *const c_char, // NULL = all columns
     column_names_len: usize,
-    data_file_concurrency_limit: i64,    // -1 = use reader default
-    manifest_file_concurrency_limit: i64, // -1 = don't set
+    data_file_concurrency_limit: i64,      // -1 = use reader default
+    manifest_file_concurrency_limit: i64,  // -1 = don't set
     manifest_entry_concurrency_limit: i64, // -1 = don't set
-    batch_size: i64,                     // -1 = no override
-    file_column: u8,                     // 0 = no, non-zero = yes
+    batch_size: i64,                       // -1 = no override
+    file_column: u8,                       // 0 = no, non-zero = yes
     pos_column: u8,
-    serialization_concurrency: i64,      // -1 = auto-detect
-    task_prefetch_depth: i64,            // -1 = use DEFAULT_TASK_PREFETCH_DEPTH
+    serialization_concurrency: i64, // -1 = auto-detect
+    task_prefetch_depth: i64,       // -1 = use DEFAULT_TASK_PREFETCH_DEPTH
 ) -> *mut IcebergIncrementalScan {
     if table.is_null() {
         return ptr::null_mut();
     }
     let table_ref = unsafe { &*table };
 
-    let from_id = if from_snapshot_id == SNAPSHOT_ID_NONE { None } else { Some(from_snapshot_id) };
-    let to_id = if to_snapshot_id == SNAPSHOT_ID_NONE { None } else { Some(to_snapshot_id) };
+    let from_id = if from_snapshot_id == SNAPSHOT_ID_NONE {
+        None
+    } else {
+        Some(from_snapshot_id)
+    };
+    let to_id = if to_snapshot_id == SNAPSHOT_ID_NONE {
+        None
+    } else {
+        Some(to_snapshot_id)
+    };
 
     let file_io = table_ref.table.file_io().clone();
     let mut builder = table_ref.table.incremental_scan(from_id, to_id);
@@ -139,10 +146,12 @@ pub extern "C" fn iceberg_new_incremental_scan(
 
     // Apply builder methods
     if manifest_file_concurrency_limit >= 0 {
-        builder = builder.with_manifest_file_concurrency_limit(manifest_file_concurrency_limit as usize);
+        builder =
+            builder.with_manifest_file_concurrency_limit(manifest_file_concurrency_limit as usize);
     }
     if manifest_entry_concurrency_limit >= 0 {
-        builder = builder.with_manifest_entry_concurrency_limit(manifest_entry_concurrency_limit as usize);
+        builder = builder
+            .with_manifest_entry_concurrency_limit(manifest_entry_concurrency_limit as usize);
     }
     if batch_size >= 0 {
         builder = builder.with_batch_size(Some(batch_size as usize));
@@ -162,13 +171,42 @@ pub extern "C" fn iceberg_new_incremental_scan(
         Err(_) => return ptr::null_mut(),
     };
 
+    let resolved_serialization_concurrency = if serialization_concurrency < 0 {
+        0
+    } else {
+        serialization_concurrency as usize
+    };
+    let resolved_data_file_concurrency = if data_file_concurrency_limit < 0 {
+        0
+    } else {
+        data_file_concurrency_limit as usize
+    };
+    let resolved_batch_size = if batch_size < 0 {
+        0
+    } else {
+        batch_size as usize
+    };
+    let resolved_task_prefetch_depth = if task_prefetch_depth < 0 {
+        0
+    } else {
+        task_prefetch_depth as usize
+    };
+    tracing::info!(
+        data_file_concurrency = resolved_data_file_concurrency,
+        manifest_file_concurrency = manifest_file_concurrency_limit,
+        manifest_entry_concurrency = manifest_entry_concurrency_limit,
+        batch_size = resolved_batch_size,
+        serialization_concurrency = resolved_serialization_concurrency,
+        task_prefetch_depth = resolved_task_prefetch_depth,
+        "iceberg_new_incremental_scan"
+    );
     Box::into_raw(Box::new(IcebergIncrementalScan {
         scan,
-        serialization_concurrency: if serialization_concurrency < 0 { 0 } else { serialization_concurrency as usize },
+        serialization_concurrency: resolved_serialization_concurrency,
         file_io,
-        data_file_concurrency_limit: if data_file_concurrency_limit < 0 { 0 } else { data_file_concurrency_limit as usize },
-        batch_size: if batch_size < 0 { 0 } else { batch_size as usize },
-        task_prefetch_depth: if task_prefetch_depth < 0 { 0 } else { task_prefetch_depth as usize },
+        data_file_concurrency_limit: resolved_data_file_concurrency,
+        batch_size: resolved_batch_size,
+        task_prefetch_depth: resolved_task_prefetch_depth,
     }))
 }
 
@@ -241,11 +279,20 @@ pub struct IcebergIncrementalTaskStreamsResponse {
 unsafe impl Send for IcebergIncrementalTaskStreamsResponse {}
 
 impl RawResponse for IcebergIncrementalTaskStreamsResponse {
-    type Payload = (IcebergIncrementalAppendFileStream, IcebergIncrementalPosDeleteFileStream);
+    type Payload = (
+        IcebergIncrementalAppendFileStream,
+        IcebergIncrementalPosDeleteFileStream,
+    );
 
-    fn result_mut(&mut self) -> &mut CResult { &mut self.result }
-    fn context_mut(&mut self) -> &mut *const Context { &mut self.context }
-    fn error_message_mut(&mut self) -> &mut *mut c_char { &mut self.error_message }
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.error_message
+    }
 
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload {
@@ -271,9 +318,15 @@ unsafe impl Send for IcebergIncrementalNextAppendFileResponse {}
 
 impl RawResponse for IcebergIncrementalNextAppendFileResponse {
     type Payload = Option<IcebergIncrementalAppendFile>;
-    fn result_mut(&mut self) -> &mut CResult { &mut self.0.result }
-    fn context_mut(&mut self) -> &mut *const Context { &mut self.0.context }
-    fn error_message_mut(&mut self) -> &mut *mut c_char { &mut self.0.error_message }
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.0.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.0.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.0.error_message
+    }
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload.flatten() {
             Some(task) => self.0.value = Box::into_raw(Box::new(task)),
@@ -291,9 +344,15 @@ unsafe impl Send for IcebergIncrementalNextPosDeleteFileResponse {}
 
 impl RawResponse for IcebergIncrementalNextPosDeleteFileResponse {
     type Payload = Option<IcebergIncrementalPosDeleteFile>;
-    fn result_mut(&mut self) -> &mut CResult { &mut self.0.result }
-    fn context_mut(&mut self) -> &mut *const Context { &mut self.0.context }
-    fn error_message_mut(&mut self) -> &mut *mut c_char { &mut self.0.error_message }
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.0.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.0.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.0.error_message
+    }
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload.flatten() {
             Some(task) => self.0.value = Box::into_raw(Box::new(task)),
@@ -357,13 +416,19 @@ pub extern "C" fn iceberg_incremental_create_reader(
         builder = builder.with_data_file_concurrency_limit(concurrency);
     }
 
-    let batch_size = if scan_ptr.batch_size > 0 { Some(scan_ptr.batch_size) } else { None };
+    let batch_size = if scan_ptr.batch_size > 0 {
+        Some(scan_ptr.batch_size)
+    } else {
+        None
+    };
     if let Some(n) = batch_size {
         builder = builder.with_batch_size(n);
     }
 
     let serialization_concurrency = if scan_ptr.serialization_concurrency == 0 {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
     } else {
         scan_ptr.serialization_concurrency
     };

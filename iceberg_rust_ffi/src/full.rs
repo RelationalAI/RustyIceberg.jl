@@ -12,9 +12,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::scan_common::*;
 use crate::{
-    IcebergArrowReaderContext, IcebergArrowStream,
-    IcebergArrowStreamResponse, IcebergFileScanTask, IcebergFileScanTaskStream,
-    IcebergFileScanTaskStreamResponse, IcebergNextFileScanTaskResponse, IcebergTable,
+    IcebergArrowReaderContext, IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanTask,
+    IcebergFileScanTaskStream, IcebergFileScanTaskStreamResponse, IcebergNextFileScanTaskResponse,
+    IcebergTable,
 };
 
 const SNAPSHOT_ID_NONE: i64 = -1;
@@ -45,15 +45,15 @@ pub extern "C" fn iceberg_new_scan(
     table: *mut IcebergTable,
     column_names: *const *const c_char, // NULL = all columns
     column_names_len: usize,
-    data_file_concurrency_limit: i64,    // -1 = use reader default
-    manifest_file_concurrency_limit: i64, // -1 = don't set
+    data_file_concurrency_limit: i64,      // -1 = use reader default
+    manifest_file_concurrency_limit: i64,  // -1 = don't set
     manifest_entry_concurrency_limit: i64, // -1 = don't set
-    batch_size: i64,                     // -1 = no override
-    file_column: u8,                     // 0 = no, non-zero = yes
+    batch_size: i64,                       // -1 = no override
+    file_column: u8,                       // 0 = no, non-zero = yes
     pos_column: u8,
-    serialization_concurrency: i64,      // -1 = auto-detect
-    snapshot_id: i64,                    // -1 = current (SNAPSHOT_ID_NONE)
-    task_prefetch_depth: i64,            // -1 = use DEFAULT_TASK_PREFETCH_DEPTH
+    serialization_concurrency: i64, // -1 = auto-detect
+    snapshot_id: i64,               // -1 = current (SNAPSHOT_ID_NONE)
+    task_prefetch_depth: i64,       // -1 = use DEFAULT_TASK_PREFETCH_DEPTH
 ) -> *mut IcebergScan {
     if table.is_null() {
         return ptr::null_mut();
@@ -83,10 +83,12 @@ pub extern "C" fn iceberg_new_scan(
 
     // Apply builder methods
     if manifest_file_concurrency_limit >= 0 {
-        builder = builder.with_manifest_file_concurrency_limit(manifest_file_concurrency_limit as usize);
+        builder =
+            builder.with_manifest_file_concurrency_limit(manifest_file_concurrency_limit as usize);
     }
     if manifest_entry_concurrency_limit >= 0 {
-        builder = builder.with_manifest_entry_concurrency_limit(manifest_entry_concurrency_limit as usize);
+        builder = builder
+            .with_manifest_entry_concurrency_limit(manifest_entry_concurrency_limit as usize);
     }
     if batch_size >= 0 {
         builder = builder.with_batch_size(Some(batch_size as usize));
@@ -109,13 +111,42 @@ pub extern "C" fn iceberg_new_scan(
         Err(_) => return ptr::null_mut(),
     };
 
+    let resolved_serialization_concurrency = if serialization_concurrency < 0 {
+        0
+    } else {
+        serialization_concurrency as usize
+    };
+    let resolved_data_file_concurrency = if data_file_concurrency_limit < 0 {
+        0
+    } else {
+        data_file_concurrency_limit as usize
+    };
+    let resolved_batch_size = if batch_size < 0 {
+        0
+    } else {
+        batch_size as usize
+    };
+    let resolved_task_prefetch_depth = if task_prefetch_depth < 0 {
+        0
+    } else {
+        task_prefetch_depth as usize
+    };
+    tracing::info!(
+        data_file_concurrency = resolved_data_file_concurrency,
+        manifest_file_concurrency = manifest_file_concurrency_limit,
+        manifest_entry_concurrency = manifest_entry_concurrency_limit,
+        batch_size = resolved_batch_size,
+        serialization_concurrency = resolved_serialization_concurrency,
+        task_prefetch_depth = resolved_task_prefetch_depth,
+        "iceberg_new_scan"
+    );
     Box::into_raw(Box::new(IcebergScan {
         scan,
         file_io,
-        serialization_concurrency: if serialization_concurrency < 0 { 0 } else { serialization_concurrency as usize },
-        data_file_concurrency_limit: if data_file_concurrency_limit < 0 { 0 } else { data_file_concurrency_limit as usize },
-        batch_size: if batch_size < 0 { 0 } else { batch_size as usize },
-        task_prefetch_depth: if task_prefetch_depth < 0 { 0 } else { task_prefetch_depth as usize },
+        serialization_concurrency: resolved_serialization_concurrency,
+        data_file_concurrency_limit: resolved_data_file_concurrency,
+        batch_size: resolved_batch_size,
+        task_prefetch_depth: resolved_task_prefetch_depth,
     }))
 }
 
@@ -230,7 +261,11 @@ pub extern "C" fn iceberg_create_reader(
         scan_ptr.serialization_concurrency
     };
 
-    let batch_size = if scan_ptr.batch_size > 0 { Some(scan_ptr.batch_size) } else { None };
+    let batch_size = if scan_ptr.batch_size > 0 {
+        Some(scan_ptr.batch_size)
+    } else {
+        None
+    };
 
     Box::into_raw(Box::new(IcebergArrowReaderContext {
         reader: builder.build(),
@@ -281,8 +316,7 @@ export_runtime_op!(
     async {
         let (reader, serialization_concurrency, file_scan_task) = result_tuple;
 
-        // Wrap the single task in a stream for the reader API, which expects a stream
-        // of tasks
+        // Wrap the single task in a one-element stream, as reader.read() takes a FileScanTaskStream as input
         let task_stream = stream::once(async { Ok(file_scan_task) }).boxed();
         let record_batch_stream = reader.read(task_stream)?;
         let serialized_stream = crate::transform_stream_with_parallel_serialization(
@@ -299,9 +333,7 @@ export_runtime_op!(
 
 /// Returns the record count for a file scan task, or -1 if not available.
 #[no_mangle]
-pub extern "C" fn iceberg_file_scan_task_record_count(
-    task: *const IcebergFileScanTask,
-) -> i64 {
+pub extern "C" fn iceberg_file_scan_task_record_count(task: *const IcebergFileScanTask) -> i64 {
     if task.is_null() {
         return -1;
     }
