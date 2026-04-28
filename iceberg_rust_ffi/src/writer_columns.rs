@@ -123,11 +123,11 @@ unsafe fn build_null_buffer_scattered(
                 bits[(out + i) / 8] |= b << ((out + i) % 8);
             }
         } else {
-            // Scattered: gather validity bits via selection indices (1-based)
-            let sel = std::slice::from_raw_parts(slice.sel_ptr, slice.len);
-            for (i, &idx) in sel.iter().enumerate() {
-                let src = (idx - 1) as usize;
-                let b = (*slice.validity_ptr.add(src / 8) >> (src % 8)) & 1;
+            // Scattered: validity is per output row (0..len-1), same as sequential.
+            // The selection governs which *data* elements are picked, not which
+            // validity bits — the validity bitmap has one bit per output row.
+            for i in 0..slice.len {
+                let b = (*slice.validity_ptr.add(i / 8) >> (i % 8)) & 1;
                 bits[(out + i) / 8] |= b << ((out + i) % 8);
             }
         }

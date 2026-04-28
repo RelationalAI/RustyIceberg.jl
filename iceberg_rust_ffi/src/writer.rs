@@ -4,7 +4,7 @@
 /// across all writers. Per-writer ordering is guaranteed by the per-writer
 /// `Arc<Mutex<ConcreteDataFileWriter>>` inside WriterState: only one pool thread encodes
 /// a given writer at a time, and the FIFO global queue ensures batches are submitted
-/// in order. Drain tasks are lightweight async forwarders (no CPU work).
+/// in order.
 use std::ffi::{c_char, c_void};
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -26,8 +26,6 @@ use iceberg::writer::file_writer::ParquetWriterBuilder;
 use iceberg::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 /// Compression codec values (must match Julia's CompressionCodec enum)
 const COMPRESSION_UNCOMPRESSED: i32 = 0;
@@ -106,9 +104,6 @@ use object_store_ffi::{
 /// Type alias for the concrete DataFileWriter we use
 type ConcreteDataFileWriter =
     DataFileWriter<ParquetWriterBuilder, DefaultLocationGenerator, DefaultFileNameGenerator>;
-
-/// Batch item sent through the per-writer drain channel.
-pub(crate) type BatchItem = RecordBatch;
 
 /// Encode task submitted to the global worker pool.
 struct EncodeTask {
@@ -240,18 +235,12 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
 
 /// Opaque writer handle for FFI.
 ///
-/// Writing is pipelined: Julia gathers a RecordBatch, sends it to the bounded per-writer
-/// channel (capacity 1), and returns immediately. A lightweight async drain task forwards
-/// batches to the global encode pool. Pool workers (N = available_parallelism) encode
-/// Parquet concurrently across all active writers.
+/// Writing is pipelined: Julia gathers a RecordBatch and submits it directly to the
+/// global encode pool, then returns immediately. Pool workers (N = available_parallelism)
+/// encode Parquet concurrently across all active writers.
 pub struct IcebergDataFileWriter {
     /// Arrow schema for this table, used by write_columns to create RecordBatches.
     pub(crate) arrow_schema: ArrowSchemaRef,
-    /// Sender side of the per-writer batch queue (bounded, capacity 1).
-    /// Dropped in iceberg_writer_close to signal EOF to the drain task.
-    pub(crate) batch_tx: Option<mpsc::Sender<BatchItem>>,
-    /// Lightweight async drain task: forwards batches from batch_tx to the global pool.
-    pub(crate) drain_handle: Option<JoinHandle<()>>,
     /// Shared state: owns the ConcreteDataFileWriter, tracks pending count and errors.
     pub(crate) writer_state: Arc<WriterState>,
 }
@@ -485,16 +474,12 @@ pub extern "C" fn iceberg_writer_write_columns_sync(
     }
 }
 
-/// Free a writer. Aborts the drain task and poisons the writer state so any in-flight
-/// pool tasks fail gracefully (error/cancel path).
+/// Free a writer. Poisons the writer state so any in-flight pool tasks fail gracefully.
 #[no_mangle]
 pub extern "C" fn iceberg_writer_free(writer: *mut IcebergDataFileWriter) {
     if !writer.is_null() {
         unsafe {
             let boxed = Box::from_raw(writer);
-            if let Some(handle) = boxed.drain_handle {
-                handle.abort();
-            }
             // Poison the ConcreteDataFileWriter so any in-flight pool tasks return an error
             // rather than writing to a partially-freed writer.
             let _ = boxed.writer_state.writer.lock().unwrap().take();
@@ -504,8 +489,7 @@ pub extern "C" fn iceberg_writer_free(writer: *mut IcebergDataFileWriter) {
 
 // Create a new DataFileWriter from a table with configuration options.
 //
-// Spawns a lightweight async drain task per writer. The global encode pool
-// (N = available_parallelism threads) is initialized on the first call.
+// The global encode pool (N = available_parallelism threads) is initialized on the first call.
 export_runtime_op!(
     iceberg_writer_new,
     IcebergDataFileWriterResponse,
@@ -575,7 +559,7 @@ export_runtime_op!(
         );
 
         // Initialize global pool (no-op if already running).
-        let pool = get_or_init_encode_pool();
+        get_or_init_encode_pool();
 
         let writer_state = Arc::new(WriterState {
             writer: Mutex::new(Some(concrete_writer)),
@@ -584,31 +568,8 @@ export_runtime_op!(
             error: Mutex::new(None),
         });
 
-        // Bounded per-writer channel (capacity 1): Julia can be at most one batch ahead
-        // of the pool. This provides backpressure: send blocks if the drain task hasn't
-        // forwarded the previous batch yet.
-        let (batch_tx, mut batch_rx) = mpsc::channel::<BatchItem>(1);
-
-        // Lightweight drain task: forwards batches to the global pool asynchronously.
-        let drain_handle: JoinHandle<()> = {
-            let state = writer_state.clone();
-            let pool_tx = pool.task_tx.clone();
-            tokio::task::spawn(async move {
-                while let Some(batch) = batch_rx.recv().await {
-                    state.pending.fetch_add(1, Ordering::AcqRel);
-                    let task = EncodeTask { batch, state: state.clone() };
-                    if pool_tx.send(task).await.is_err() {
-                        eprintln!("[iceberg:drain] pool channel closed");
-                        break;
-                    }
-                }
-            })
-        };
-
         Ok::<IcebergDataFileWriter, anyhow::Error>(IcebergDataFileWriter {
             arrow_schema,
-            batch_tx: Some(batch_tx),
-            drain_handle: Some(drain_handle),
             writer_state,
         })
     },
@@ -618,65 +579,71 @@ export_runtime_op!(
     parquet_props: *const ParquetWriterPropertiesFFI
 );
 
-// Write Arrow IPC data to the writer.
-//
-// Deserializes the IPC stream, then sends each RecordBatch to the drain task's channel.
-// Returns immediately after queuing — encoding happens asynchronously in the global pool.
-export_runtime_op!(
-    iceberg_writer_write,
-    crate::IcebergResponse,
-    || {
-        if writer.is_null() {
-            return Err(anyhow::anyhow!("Null writer pointer provided"));
-        }
-        if arrow_ipc_data.is_null() {
-            return Err(anyhow::anyhow!("Null arrow_ipc_data pointer provided"));
-        }
-        if arrow_ipc_len == 0 {
-            return Err(anyhow::anyhow!("Arrow IPC data length is zero"));
-        }
-
-        // Copy the IPC data into a Vec for safe use across await points
-        let ipc_bytes = unsafe {
-            std::slice::from_raw_parts(arrow_ipc_data, arrow_ipc_len).to_vec()
-        };
-
-        let writer_ref = unsafe { &mut *writer };
-        Ok((writer_ref, ipc_bytes))
-    },
-    result_tuple,
-    async {
-        let (writer_ref, ipc_bytes) = result_tuple;
-
-        let tx = writer_ref
-            .batch_tx
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Writer has been closed"))?;
-
-        // Deserialize Arrow IPC to RecordBatches and enqueue each one
-        let cursor = Cursor::new(ipc_bytes);
-        let mut reader = StreamReader::try_new(cursor, None)
-            .map_err(|e| anyhow::anyhow!("Failed to create Arrow IPC reader: {}", e))?;
-
-        while let Some(batch_result) = reader.next() {
-            let batch = batch_result
-                .map_err(|e| anyhow::anyhow!("Failed to read Arrow IPC batch: {}", e))?;
-            tx.send(batch).await
-                .map_err(|_| anyhow::anyhow!("Writer channel closed (drain task may have failed)"))?;
-        }
-
-        Ok::<(), anyhow::Error>(())
-    },
+/// Write Arrow IPC data synchronously: copy IPC bytes from Julia, deserialize the stream,
+/// and submit each RecordBatch to the global encode pool.
+///
+/// Returns 0 on success, -1 on error (error stored in writer state, propagated on close).
+#[no_mangle]
+pub extern "C" fn iceberg_writer_write_sync(
     writer: *mut IcebergDataFileWriter,
     arrow_ipc_data: *const u8,
-    arrow_ipc_len: usize
-);
+    arrow_ipc_len: usize,
+) -> i32 {
+    if writer.is_null() || arrow_ipc_data.is_null() || arrow_ipc_len == 0 {
+        return -1;
+    }
+
+    let writer_ref = unsafe { &*writer };
+
+    let pool = match GLOBAL_ENCODE_POOL.get() {
+        Some(p) => p,
+        None => {
+            eprintln!("[iceberg:sync] encode pool not initialized; call iceberg_writer_new first");
+            return -1;
+        }
+    };
+
+    let ipc_bytes = unsafe {
+        std::slice::from_raw_parts(arrow_ipc_data, arrow_ipc_len).to_vec()
+    };
+
+    let cursor = Cursor::new(ipc_bytes);
+    let reader = match StreamReader::try_new(cursor, None) {
+        Ok(r) => r,
+        Err(e) => {
+            let mut slot = writer_ref.writer_state.error.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() { *slot = Some(anyhow::anyhow!("IPC reader: {}", e)); }
+            return -1;
+        }
+    };
+
+    for batch_result in reader {
+        let batch = match batch_result {
+            Ok(b) => b,
+            Err(e) => {
+                let mut slot = writer_ref.writer_state.error.lock().unwrap_or_else(|e| e.into_inner());
+                if slot.is_none() { *slot = Some(anyhow::anyhow!("IPC batch: {}", e)); }
+                return -1;
+            }
+        };
+        writer_ref.writer_state.pending.fetch_add(1, Ordering::AcqRel);
+        let task = EncodeTask { batch, state: writer_ref.writer_state.clone() };
+        if pool.task_tx.blocking_send(task).is_err() {
+            let prev = writer_ref.writer_state.pending.fetch_sub(1, Ordering::AcqRel);
+            if prev == 1 { writer_ref.writer_state.done_notify.notify_one(); }
+            let mut slot = writer_ref.writer_state.error.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() { *slot = Some(anyhow::anyhow!("Encode pool closed")); }
+            return -1;
+        }
+    }
+
+    0
+}
 
 // Close the writer and return the produced DataFiles.
 //
-// Drops the batch sender (signals EOF to the drain task), waits for the drain task to
-// finish forwarding all batches, waits for all pool encodes to complete, then finalizes
-// the Parquet file and returns the DataFiles metadata.
+// Waits for all pending pool encodes to complete, then finalizes the Parquet file
+// and returns the DataFiles metadata.
 export_runtime_op!(
     iceberg_writer_close,
     IcebergWriterCloseResponse,
@@ -689,15 +656,6 @@ export_runtime_op!(
     },
     writer_ref,
     async {
-        // Drop the sender — signals the drain task that no more batches are coming
-        drop(writer_ref.batch_tx.take());
-
-        // Wait for the drain task to finish forwarding all batches to the pool
-        if let Some(handle) = writer_ref.drain_handle.take() {
-            handle.await
-                .map_err(|e| anyhow::anyhow!("Drain task panicked: {}", e))?;
-        }
-
         // Wait for all pending pool encodes to complete.
         // Uses a timeout to guard against a dead worker thread (e.g. panic outside
         // catch_unwind) that would otherwise leave pending > 0 forever.

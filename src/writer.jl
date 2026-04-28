@@ -415,23 +415,14 @@ end
 
 # Internal helper to write raw IPC bytes to the Rust writer
 function _write_ipc_bytes(writer::DataFileWriter, ipc_bytes::Vector{UInt8})
-    ipc_data = pointer(ipc_bytes)
-    ipc_len = length(ipc_bytes)
-
-    response = Response{Cvoid}(-1, nothing, C_NULL, C_NULL)
-
-    async_ccall(response, ipc_bytes) do handle
-        @ccall rust_lib.iceberg_writer_write(
+    ret = GC.@preserve ipc_bytes begin
+        @ccall rust_lib.iceberg_writer_write_sync(
             writer.ptr::Ptr{Cvoid},
-            ipc_data::Ptr{UInt8},
-            ipc_len::Csize_t,
-            response::Ref{Response{Cvoid}},
-            handle::Ptr{Cvoid}
-        )::Cint
+            pointer(ipc_bytes)::Ptr{UInt8},
+            length(ipc_bytes)::Csize_t,
+        )::Int32
     end
-
-    @throw_on_error(response, "write", IcebergException)
-
+    ret == 0 || throw(IcebergException("write failed (see writer close for details)"))
     return nothing
 end
 
