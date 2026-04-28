@@ -82,6 +82,28 @@ using Tables
         @test updated_table != C_NULL
         println("✅ Transaction committed successfully")
 
+        # Snapshot ID is a non-nothing Int64 after the first commit
+        snapshot_id_1 = RustyIceberg.table_current_snapshot_id(updated_table)
+        @test !isnothing(snapshot_id_1)
+        @test snapshot_id_1 isa Int64
+        println("✅ Snapshot ID after first commit: $snapshot_id_1")
+
+        # A second commit produces a different snapshot ID
+        data_files_2 = RustyIceberg.with_data_file_writer(updated_table; prefix="batch2") do writer
+            write(writer, (id = Int64[9], name = ["Ivy"], value = [9.9]))
+        end
+        updated_table_2 = RustyIceberg.with_transaction(updated_table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files_2)
+            end
+        end
+        snapshot_id_2 = RustyIceberg.table_current_snapshot_id(updated_table_2)
+        @test !isnothing(snapshot_id_2)
+        @test snapshot_id_2 isa Int64
+        @test snapshot_id_2 != snapshot_id_1
+        println("✅ Snapshot ID after second commit: $snapshot_id_2 (differs from first)")
+        RustyIceberg.free_table(updated_table_2)
+
         # Test 6: Verify table exists in catalog by loading it fresh
         println("\nTest 6: Verifying table exists in catalog...")
         reloaded_table = RustyIceberg.load_table(catalog, test_namespace, table_name)
