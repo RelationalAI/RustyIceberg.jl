@@ -7,9 +7,9 @@
 /// in order. Drain tasks are lightweight async forwarders (no CPU work).
 use std::ffi::{c_char, c_void};
 use std::io::Cursor;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::thread;
 
 use arrow_array::RecordBatch;
@@ -26,7 +26,7 @@ use iceberg::writer::file_writer::ParquetWriterBuilder;
 use iceberg::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// Compression codec values (must match Julia's CompressionCodec enum)
@@ -96,7 +96,9 @@ use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
 use crate::transaction::IcebergDataFiles;
 use crate::util::parse_c_string;
-use crate::writer_columns::{build_arrow_array_scattered, GatheredColumnDescriptor};
+use crate::writer_columns::{
+    build_arrow_array_scattered, ColumnDescriptor, GatheredColumnDescriptor, SliceRef,
+};
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
@@ -106,15 +108,11 @@ type ConcreteDataFileWriter =
     DataFileWriter<ParquetWriterBuilder, DefaultLocationGenerator, DefaultFileNameGenerator>;
 
 /// Batch item sent through the per-writer drain channel.
-/// `ack` is `Some` only for the zero-copy path (`write_columns`), where Arrow arrays
-/// point directly into Julia memory — the pool worker sends on it after encoding so
-/// Julia knows those buffers are safe to reuse.
-pub(crate) type BatchItem = (RecordBatch, Option<oneshot::Sender<()>>);
+pub(crate) type BatchItem = RecordBatch;
 
 /// Encode task submitted to the global worker pool.
 struct EncodeTask {
     batch: RecordBatch,
-    ack_opt: Option<oneshot::Sender<()>>,
     state: Arc<WriterState>,
 }
 
@@ -201,13 +199,9 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
 
                         let handle_enc = handle.clone();
                         let encode_result = catch_unwind(AssertUnwindSafe(move || {
-                            let t0 = std::time::Instant::now();
-                            // Use unwrap_or_else to recover from a poisoned mutex
-                            // (which happens when a previous encode panicked mid-write).
                             let result: anyhow::Result<()> = {
-                                let mut guard = task.state.writer
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner());
+                                let mut guard =
+                                    task.state.writer.lock().unwrap_or_else(|e| e.into_inner());
                                 match guard.as_mut() {
                                     Some(w) => handle_enc
                                         .block_on(w.write(task.batch))
@@ -215,12 +209,6 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
                                     None => Err(anyhow::anyhow!("writer already closed")),
                                 }
                             };
-                            // ACK inside the closure: if we panic before reaching this,
-                            // the Sender is dropped and ack_rx returns RecvError, which
-                            // write_columns propagates as an error to Julia — correct behavior.
-                            if let Some(ack) = task.ack_opt {
-                                let _ = ack.send(());
-                            }
                             result
                         }));
 
@@ -230,9 +218,7 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
                             Err(_panic) => Some(anyhow::anyhow!("encode worker panicked")),
                         };
                         if let Some(e) = err {
-                            let mut slot = state.error
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
+                            let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
                             if slot.is_none() {
                                 *slot = Some(e);
                             }
@@ -316,7 +302,11 @@ pub extern "C" fn iceberg_writer_write_scattered_columns_sync(
     let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
 
     if col_descs.len() != arrow_schema.fields().len() {
-        let mut slot = writer_ref.writer_state.error.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = writer_ref
+            .writer_state
+            .error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
             *slot = Some(anyhow::anyhow!(
                 "Column count mismatch: got {} but schema has {}",
@@ -329,7 +319,6 @@ pub extern "C" fn iceberg_writer_write_scattered_columns_sync(
 
     // Gather: read from Julia memory into Rust-owned Arrow arrays (blocking, in calling thread).
     // After this block, all Julia pointers have been consumed — safe to release.
-    let t0 = std::time::Instant::now();
     let batch = match (|| -> Result<RecordBatch, anyhow::Error> {
         let mut arrays = Vec::with_capacity(num_columns);
         for (i, desc) in col_descs.iter().enumerate() {
@@ -340,21 +329,153 @@ pub extern "C" fn iceberg_writer_write_scattered_columns_sync(
     })() {
         Ok(b) => b,
         Err(e) => {
-            let mut slot = writer_ref.writer_state.error.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() { *slot = Some(e); }
+            let mut slot = writer_ref
+                .writer_state
+                .error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                *slot = Some(e);
+            }
             return -1;
         }
     };
 
     // Increment pending before submit so iceberg_writer_close always accounts for this batch.
-    writer_ref.writer_state.pending.fetch_add(1, Ordering::AcqRel);
-    let task = EncodeTask { batch, ack_opt: None, state: writer_ref.writer_state.clone() };
+    writer_ref
+        .writer_state
+        .pending
+        .fetch_add(1, Ordering::AcqRel);
+    let task = EncodeTask {
+        batch,
+        state: writer_ref.writer_state.clone(),
+    };
 
     match pool.task_tx.blocking_send(task) {
         Ok(()) => 0,
         Err(_) => {
             // Pool channel closed — undo the pending increment.
-            let prev = writer_ref.writer_state.pending.fetch_sub(1, Ordering::AcqRel);
+            let prev = writer_ref
+                .writer_state
+                .pending
+                .fetch_sub(1, Ordering::AcqRel);
+            if prev == 1 {
+                writer_ref.writer_state.done_notify.notify_one();
+            }
+            eprintln!("[iceberg:sync] pool channel closed");
+            -1
+        }
+    }
+}
+
+/// Synchronous write of flat column data: copies each column from Julia memory into
+/// Rust-owned Arrow arrays in the calling thread, then submits to the global encode
+/// pool asynchronously.
+///
+/// Each `ColumnDescriptor` is treated as a single sequential slice (no scatter/gather).
+/// Returns 0 on success, -1 on error (error stored in writer state, propagated on close).
+#[no_mangle]
+pub extern "C" fn iceberg_writer_write_columns_sync(
+    writer: *mut IcebergDataFileWriter,
+    columns: *const ColumnDescriptor,
+    num_columns: usize,
+) -> i32 {
+    if writer.is_null() || columns.is_null() || num_columns == 0 {
+        return -1;
+    }
+
+    let writer_ref = unsafe { &*writer };
+
+    let pool = match GLOBAL_ENCODE_POOL.get() {
+        Some(p) => p,
+        None => {
+            eprintln!("[iceberg:sync] encode pool not initialized; call iceberg_writer_new first");
+            return -1;
+        }
+    };
+
+    let arrow_schema = writer_ref.arrow_schema.clone();
+    let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
+
+    if col_descs.len() != arrow_schema.fields().len() {
+        let mut slot = writer_ref
+            .writer_state
+            .error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(anyhow::anyhow!(
+                "Column count mismatch: got {} but schema has {}",
+                col_descs.len(),
+                arrow_schema.fields().len()
+            ));
+        }
+        return -1;
+    }
+
+    // Wrap each ColumnDescriptor as a single-slice GatheredColumnDescriptor.
+    // Sequential access (sel_ptr = null) so data[0..num_rows] is read in order.
+    let slices: Vec<SliceRef> = col_descs
+        .iter()
+        .map(|d| SliceRef {
+            data_ptr: d.data_ptr,
+            lengths_ptr: d.lengths_ptr,
+            validity_ptr: d.validity_ptr,
+            sel_ptr: std::ptr::null(),
+            len: d.num_rows,
+        })
+        .collect();
+
+    let gathered: Vec<GatheredColumnDescriptor> = col_descs
+        .iter()
+        .zip(slices.iter())
+        .map(|(d, s)| GatheredColumnDescriptor {
+            slices: s as *const SliceRef,
+            num_slices: 1,
+            total_rows: d.num_rows,
+            column_type: d.column_type,
+            is_nullable: d.is_nullable,
+        })
+        .collect();
+
+    let batch = match (|| -> Result<RecordBatch, anyhow::Error> {
+        let mut arrays = Vec::with_capacity(num_columns);
+        for (i, desc) in gathered.iter().enumerate() {
+            arrays.push(unsafe { build_arrow_array_scattered(desc, arrow_schema.field(i))? });
+        }
+        RecordBatch::try_new(arrow_schema, arrays)
+            .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))
+    })() {
+        Ok(b) => b,
+        Err(e) => {
+            let mut slot = writer_ref
+                .writer_state
+                .error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                *slot = Some(e);
+            }
+            return -1;
+        }
+    };
+
+    writer_ref
+        .writer_state
+        .pending
+        .fetch_add(1, Ordering::AcqRel);
+    let task = EncodeTask {
+        batch,
+        state: writer_ref.writer_state.clone(),
+    };
+
+    match pool.task_tx.blocking_send(task) {
+        Ok(()) => 0,
+        Err(_) => {
+            let prev = writer_ref
+                .writer_state
+                .pending
+                .fetch_sub(1, Ordering::AcqRel);
             if prev == 1 {
                 writer_ref.writer_state.done_notify.notify_one();
             }
@@ -473,9 +594,9 @@ export_runtime_op!(
             let state = writer_state.clone();
             let pool_tx = pool.task_tx.clone();
             tokio::task::spawn(async move {
-                while let Some((batch, ack_opt)) = batch_rx.recv().await {
+                while let Some(batch) = batch_rx.recv().await {
                     state.pending.fetch_add(1, Ordering::AcqRel);
-                    let task = EncodeTask { batch, ack_opt, state: state.clone() };
+                    let task = EncodeTask { batch, state: state.clone() };
                     if pool_tx.send(task).await.is_err() {
                         eprintln!("[iceberg:drain] pool channel closed");
                         break;
@@ -540,8 +661,7 @@ export_runtime_op!(
         while let Some(batch_result) = reader.next() {
             let batch = batch_result
                 .map_err(|e| anyhow::anyhow!("Failed to read Arrow IPC batch: {}", e))?;
-            // IPC data already copied into ipc_bytes above — no ACK needed.
-            tx.send((batch, None)).await
+            tx.send(batch).await
                 .map_err(|_| anyhow::anyhow!("Writer channel closed (drain task may have failed)"))?;
         }
 

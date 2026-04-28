@@ -1126,3 +1126,158 @@ end
 
     println("\n✅ write_columns decimal nullable tests completed!")
 end
+
+@testset "Writer write_scattered_columns_sync API" begin
+    println("Testing write_scattered_columns_sync (gathered-column) API...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+
+        test_namespace = ["test_gathered_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+
+        # Schema: id (non-nullable long), score (nullable double), tag (nullable string)
+        schema = Schema([
+            Field(Int32(1), "id",    IcebergLong();   required=true),
+            Field(Int32(2), "score", IcebergDouble(); required=false),
+            Field(Int32(3), "tag",   IcebergString(); required=false),
+        ])
+
+        table_name = "gathered_test_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(catalog, test_namespace, table_name, schema)
+        @test table != C_NULL
+        println("✅ Table created")
+
+        # --- Data layout (4 rows) ---
+        # id:    [1, 2, 3, 4]  — non-nullable, single sequential slice
+        # score: [1.1, null, 3.3, null]  — nullable; two sequential slices, each with validity
+        # tag:   ["alpha", null, "gamma", null]  — nullable string via add_string_slice!
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            batch = RustyIceberg.GatheredBatch()
+
+            # id: single sequential slice, no nulls
+            id_data = Int64[1, 2, 3, 4]
+            id_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_INT64)
+            RustyIceberg.add_slice!(id_col, id_data)
+            push!(batch, id_col)
+            println("✅ id column built (sequential, non-nullable)")
+
+            # score: two sequential slices, each with validity masks
+            # Slice 1 — src = [1.1, 9.9], validity = [true, false] → rows 0 (1.1) and 1 (null)
+            # Slice 2 — src = [3.3, 8.8] via selection [1] + identity [8.8] (just sequential here)
+            # Use scattered access for slice 2: src=[99.9, 3.3, 88.8], sel=[2] → picks 3.3
+            score_src1 = Float64[1.1, 9.9]
+            score_valid1 = BitVector([true, false])
+
+            score_src2 = Float64[99.9, 3.3, 88.8]
+            score_sel2 = Int64[2]       # picks index 2 → 3.3 (1-based)
+            score_valid2 = BitVector([true])
+
+            score_src3 = Float64[7.7, 8.8]
+            score_valid3 = BitVector([false])  # null for row 3
+
+            score_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_FLOAT64; nullable=true)
+            RustyIceberg.add_slice!(score_col, score_src1; validity=score_valid1)
+            RustyIceberg.add_slice!(score_col, score_src2; sel=score_sel2, validity=score_valid2)
+            RustyIceberg.add_slice!(score_col, score_src3; sel=Int64[1], validity=score_valid3)
+            push!(batch, score_col)
+            println("✅ score column built (scattered + nullable)")
+
+            # tag: string column via add_string_slice!
+            # Row 0: "alpha", row 1: null, row 2: "gamma", row 3: null
+            tag_strings = ["alpha", "", "gamma", ""]  # empty at null positions
+            tag_ptrs = Vector{Ptr{UInt8}}(undef, 4)
+            tag_lens = Vector{Int64}(undef, 4)
+            tag_valid = BitVector([true, false, true, false])
+            for i in 1:4
+                if tag_valid[i]
+                    tag_ptrs[i] = pointer(tag_strings[i])
+                    tag_lens[i] = ncodeunits(tag_strings[i])
+                else
+                    tag_ptrs[i] = Ptr{UInt8}(C_NULL)
+                    tag_lens[i] = 0
+                end
+            end
+
+            tag_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_STRING; nullable=true)
+            RustyIceberg.add_string_slice!(tag_col, tag_ptrs, tag_lens; validity=tag_valid)
+            # Preserve source strings so pointers stay valid until write completes
+            push!(tag_col.preserve, tag_strings)
+            push!(batch, tag_col)
+            println("✅ tag column built (string via add_string_slice!)")
+
+            RustyIceberg.write_scattered_columns_sync(writer, batch)
+            println("✅ Batch written via write_scattered_columns_sync")
+        end
+        @test data_files !== nothing && data_files.ptr != C_NULL
+        println("✅ Writer closed")
+
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+        println("✅ Transaction committed")
+
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
+        @test length(tbl.id) == 4
+        println("✅ Read $(length(tbl.id)) rows")
+
+        perm = sortperm(tbl.id)
+        sorted_ids   = tbl.id[perm]
+        sorted_scores = tbl.score[perm]
+        sorted_tags  = tbl.tag[perm]
+
+        # Verify id column (non-nullable, sequential)
+        @test sorted_ids == Int64[1, 2, 3, 4]
+        println("✅ id values correct")
+
+        # Verify score column (nullable, scattered slices)
+        @test !ismissing(sorted_scores[1]) && sorted_scores[1] ≈ 1.1
+        @test ismissing(sorted_scores[2])
+        @test !ismissing(sorted_scores[3]) && sorted_scores[3] ≈ 3.3
+        @test ismissing(sorted_scores[4])
+        println("✅ score values correct (including nulls)")
+
+        # Verify tag column (nullable string)
+        @test !ismissing(sorted_tags[1]) && sorted_tags[1] == "alpha"
+        @test ismissing(sorted_tags[2])
+        @test !ismissing(sorted_tags[3]) && sorted_tags[3] == "gamma"
+        @test ismissing(sorted_tags[4])
+        println("✅ tag values correct (including nulls)")
+
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+        end
+    end
+
+    println("\n✅ write_scattered_columns_sync API tests completed!")
+end

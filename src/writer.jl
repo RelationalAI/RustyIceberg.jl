@@ -844,29 +844,18 @@ write_columns(writer, [desc], (data, validity))  # Arrays preserved during call
 ```
 """
 function write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}, arrays_to_preserve)
-    if writer.ptr == C_NULL
-        throw(IcebergException("Writer has been freed"))
-    end
+    writer.ptr == C_NULL && throw(IcebergException("Writer has been freed"))
+    isempty(columns) && throw(IcebergException("No columns provided"))
 
-    if isempty(columns)
-        throw(IcebergException("No columns provided"))
-    end
-
-    response = Response{Cvoid}(-1, nothing, C_NULL, C_NULL)
-
-    # Pass arrays_to_preserve to async_ccall so GC.@preserve keeps them alive
-    async_ccall(response, columns, arrays_to_preserve) do handle
-        @ccall rust_lib.iceberg_writer_write_columns(
+    ret = GC.@preserve columns arrays_to_preserve begin
+        @ccall rust_lib.iceberg_writer_write_columns_sync(
             writer.ptr::Ptr{Cvoid},
             pointer(columns)::Ptr{ColumnDescriptor},
             length(columns)::Csize_t,
-            response::Ref{Response{Cvoid}},
-            handle::Ptr{Cvoid}
-        )::Cint
+        )::Int32
     end
 
-    @throw_on_error(response, "write_columns", IcebergException)
-
+    ret == 0 || throw(IcebergException("write_columns failed (see writer close for details)"))
     return nothing
 end
 

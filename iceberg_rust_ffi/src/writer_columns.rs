@@ -4,7 +4,6 @@
 /// avoiding the overhead of Arrow IPC serialization. Julia passes raw column pointers
 /// and metadata, and Rust builds Arrow arrays directly from them.
 use std::ffi::c_void;
-use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow_array::{
@@ -12,31 +11,9 @@ use arrow_array::{
         Date32Type, Decimal128Type, Float32Type, Float64Type, Int32Type, Int64Type,
         TimestampMicrosecondType,
     },
-    ArrayRef, BooleanArray, PrimitiveArray, RecordBatch, StringArray,
+    ArrayRef, BooleanArray, PrimitiveArray, StringArray,
 };
-use arrow_buffer::{ArrowNativeType, BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
-
-/// No-op allocator: Arrow buffers created from Julia memory must not be freed by Rust.
-/// Julia owns the memory until the per-batch oneshot ACK is received (write_columns path).
-struct NoopAllocation;
-
-/// Build a zero-copy `ScalarBuffer<T>` pointing directly into Julia-owned memory.
-/// Safety: `ptr` must be non-null, valid, and alive until the buffer is dropped.
-unsafe fn zero_copy_scalar_buffer<T: ArrowNativeType>(
-    ptr: *const T,
-    num_rows: usize,
-) -> ScalarBuffer<T> {
-    let byte_len = num_rows * std::mem::size_of::<T>();
-    let nn_ptr = NonNull::new_unchecked(ptr as *mut u8);
-    let buf = Buffer::from_custom_allocation(nn_ptr, byte_len, Arc::new(NoopAllocation));
-    ScalarBuffer::new(buf, 0, num_rows)
-}
-use arrow_schema::DataType;
-
-use crate::writer::IcebergDataFileWriter;
-use object_store_ffi::{
-    export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
-};
+use arrow_buffer::{BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
 
 /// Column type codes (must match Julia's ColumnType enum)
 pub const COLUMN_TYPE_INT32: i32 = 0;
@@ -81,168 +58,6 @@ pub struct ColumnDescriptor {
 unsafe impl Send for ColumnDescriptor {}
 unsafe impl Sync for ColumnDescriptor {}
 
-/// Build an Arrow array from a ColumnDescriptor and its corresponding schema field.
-/// The schema field is used to extract precision/scale for decimal columns.
-unsafe fn build_arrow_array(
-    desc: &ColumnDescriptor,
-    schema_field: &arrow_schema::Field,
-) -> Result<ArrayRef, anyhow::Error> {
-    let null_buffer = if desc.is_nullable && !desc.validity_ptr.is_null() {
-        // Julia's BitVector uses the same little-endian bit-packed layout as Arrow.
-        // Point directly into Julia's buffer — no copy needed.
-        let num_bytes = (desc.num_rows + 7) / 8;
-        let nn_ptr = NonNull::new_unchecked(desc.validity_ptr as *mut u8);
-        let buf = Buffer::from_custom_allocation(nn_ptr, num_bytes, Arc::new(NoopAllocation));
-        Some(NullBuffer::new(BooleanBuffer::new(buf, 0, desc.num_rows)))
-    } else {
-        None
-    };
-
-    let array: ArrayRef = match desc.column_type {
-        COLUMN_TYPE_INT32 => {
-            let buffer = zero_copy_scalar_buffer(desc.data_ptr as *const i32, desc.num_rows);
-            Arc::new(PrimitiveArray::<Int32Type>::new(buffer, null_buffer))
-        }
-        COLUMN_TYPE_INT64 => {
-            let buffer = zero_copy_scalar_buffer(desc.data_ptr as *const i64, desc.num_rows);
-            Arc::new(PrimitiveArray::<Int64Type>::new(buffer, null_buffer))
-        }
-        COLUMN_TYPE_FLOAT32 => {
-            let buffer = zero_copy_scalar_buffer(desc.data_ptr as *const f32, desc.num_rows);
-            Arc::new(PrimitiveArray::<Float32Type>::new(buffer, null_buffer))
-        }
-        COLUMN_TYPE_FLOAT64 => {
-            let buffer = zero_copy_scalar_buffer(desc.data_ptr as *const f64, desc.num_rows);
-            Arc::new(PrimitiveArray::<Float64Type>::new(buffer, null_buffer))
-        }
-        COLUMN_TYPE_DATE => {
-            // Date is stored as Int32 (days since epoch)
-            let buffer = zero_copy_scalar_buffer(desc.data_ptr as *const i32, desc.num_rows);
-            Arc::new(PrimitiveArray::<Date32Type>::new(buffer, null_buffer))
-        }
-        COLUMN_TYPE_TIMESTAMP => {
-            // Timestamp without timezone (Iceberg `timestamp`)
-            // Stored as Int64 microseconds since epoch
-            let buffer = zero_copy_scalar_buffer(desc.data_ptr as *const i64, desc.num_rows);
-            Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(
-                buffer,
-                null_buffer,
-            ))
-        }
-        COLUMN_TYPE_TIMESTAMPTZ => {
-            // Timestamp with UTC timezone (Iceberg `timestamptz`)
-            // Stored as Int64 microseconds since epoch, with timezone metadata
-            let buffer = zero_copy_scalar_buffer(desc.data_ptr as *const i64, desc.num_rows);
-            Arc::new(
-                PrimitiveArray::<TimestampMicrosecondType>::new(buffer, null_buffer)
-                    .with_timezone("UTC"),
-            )
-        }
-        COLUMN_TYPE_BOOLEAN => {
-            let data = std::slice::from_raw_parts(desc.data_ptr as *const u8, desc.num_rows);
-            // Convert bytes to boolean buffer
-            let mut bits = vec![0u8; (desc.num_rows + 7) / 8];
-            for (i, &val) in data.iter().enumerate() {
-                if val != 0 {
-                    bits[i / 8] |= 1 << (i % 8);
-                }
-            }
-            let values = BooleanBuffer::new(Buffer::from(bits), 0, desc.num_rows);
-            Arc::new(BooleanArray::new(values, null_buffer))
-        }
-        COLUMN_TYPE_STRING => {
-            // String data passed from Julia:
-            // - data_ptr: pointer to array of string pointers (each pointing to UTF-8 bytes)
-            // - lengths_ptr: pointer to array of string lengths (Int64)
-            // Note: While we avoid copying on the Julia side (just passing pointers),
-            // Arrow's StringArray copies the data into its own contiguous buffer below.
-            if desc.lengths_ptr.is_null() {
-                return Err(anyhow::anyhow!("String column requires lengths"));
-            }
-            let str_ptrs =
-                std::slice::from_raw_parts(desc.data_ptr as *const *const u8, desc.num_rows);
-            let str_lens = std::slice::from_raw_parts(desc.lengths_ptr, desc.num_rows);
-
-            // Build string references, then Arrow copies them into its internal buffer
-            let mut strings: Vec<Option<&str>> = Vec::with_capacity(desc.num_rows);
-            for i in 0..desc.num_rows {
-                let is_null: bool = if let Some(ref nb) = null_buffer {
-                    nb.is_null(i)
-                } else {
-                    false
-                };
-                if is_null {
-                    strings.push(None);
-                } else {
-                    let ptr = str_ptrs[i];
-                    let len = str_lens[i] as usize;
-                    let bytes = std::slice::from_raw_parts(ptr, len);
-                    let s = std::str::from_utf8(bytes)
-                        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in string column: {}", e))?;
-                    strings.push(Some(s));
-                }
-            }
-            Arc::new(StringArray::from(strings))
-        }
-        COLUMN_TYPE_UUID => {
-            // UUID is stored as 16 bytes (UInt128 in Julia)
-            // Store as fixed-size binary (16 bytes per value)
-            let data = std::slice::from_raw_parts(desc.data_ptr as *const u8, desc.num_rows * 16);
-
-            // Build the array using the builder or from_iter_values
-            let values: Vec<&[u8]> = data.chunks(16).collect();
-            Arc::new(
-                arrow_array::FixedSizeBinaryArray::try_from_iter(values.into_iter())
-                    .map_err(|e| anyhow::anyhow!("Failed to create UUID array: {}", e))?,
-            )
-        }
-        COLUMN_TYPE_DECIMAL_INT32 | COLUMN_TYPE_DECIMAL_INT64 | COLUMN_TYPE_DECIMAL_INT128 => {
-            // All decimal variants map to Arrow Decimal128. Precision and scale come from
-            // the schema field (set when the Iceberg table was created).
-            let (precision, scale) = match schema_field.data_type() {
-                DataType::Decimal128(p, s) => (*p, *s),
-                dt => {
-                    return Err(anyhow::anyhow!(
-                        "Expected Decimal128 schema field for decimal column, got {:?}",
-                        dt
-                    ))
-                }
-            };
-
-            // All decimal variants produce an Arrow Decimal128 (i128 backing).
-            // INT32/INT64 variants need widening — materialize to avoid a cast loop
-            // in the zero-copy path; INT128 shares the same layout and is zero-copy.
-            let buffer: ScalarBuffer<i128> = match desc.column_type {
-                COLUMN_TYPE_DECIMAL_INT32 => {
-                    let data =
-                        std::slice::from_raw_parts(desc.data_ptr as *const i32, desc.num_rows);
-                    ScalarBuffer::from(data.iter().map(|&v| v as i128).collect::<Vec<_>>())
-                }
-                COLUMN_TYPE_DECIMAL_INT64 => {
-                    let data =
-                        std::slice::from_raw_parts(desc.data_ptr as *const i64, desc.num_rows);
-                    ScalarBuffer::from(data.iter().map(|&v| v as i128).collect::<Vec<_>>())
-                }
-                _ => {
-                    // COLUMN_TYPE_DECIMAL_INT128: Julia Int128 and Rust i128 share the same
-                    // 16-byte little-endian layout on all supported platforms — zero-copy.
-                    zero_copy_scalar_buffer(desc.data_ptr as *const i128, desc.num_rows)
-                }
-            };
-            Arc::new(
-                PrimitiveArray::<Decimal128Type>::new(buffer, null_buffer)
-                    .with_precision_and_scale(precision, scale)
-                    .map_err(|e| anyhow::anyhow!("Failed to set decimal precision/scale: {}", e))?,
-            )
-        }
-        _ => {
-            return Err(anyhow::anyhow!("Unknown column type: {}", desc.column_type));
-        }
-    };
-
-    Ok(array)
-}
-
 // =============================================================================
 // Scattered-gather writer: pass raw source pointers + selection indices to Rust,
 // which gathers the data directly into Arrow arrays — eliminating the Julia-side
@@ -286,7 +101,10 @@ unsafe impl Sync for GatheredColumnDescriptor {}
 
 /// Build the Arrow null buffer by scanning validity bits across all slices.
 /// Returns `None` if every slice has a null `validity_ptr` (all rows valid).
-unsafe fn build_null_buffer_scattered(slices: &[SliceRef], total_rows: usize) -> Option<NullBuffer> {
+unsafe fn build_null_buffer_scattered(
+    slices: &[SliceRef],
+    total_rows: usize,
+) -> Option<NullBuffer> {
     if !slices.iter().any(|s| !s.validity_ptr.is_null()) {
         return None;
     }
@@ -315,7 +133,11 @@ unsafe fn build_null_buffer_scattered(slices: &[SliceRef], total_rows: usize) ->
         }
         out += slice.len;
     }
-    Some(NullBuffer::new(BooleanBuffer::new(Buffer::from(bits), 0, total_rows)))
+    Some(NullBuffer::new(BooleanBuffer::new(
+        Buffer::from(bits),
+        0,
+        total_rows,
+    )))
 }
 
 /// Gather all slices for a column into an Arrow array.
@@ -346,8 +168,10 @@ pub(crate) unsafe fn build_arrow_array_scattered(
                     }
                 }
             }
-            Arc::new(PrimitiveArray::<$ArrowType>::new(ScalarBuffer::from(values), null_buf))
-                as ArrayRef
+            Arc::new(PrimitiveArray::<$ArrowType>::new(
+                ScalarBuffer::from(values),
+                null_buf,
+            )) as ArrayRef
         }};
     }
 
@@ -387,8 +211,11 @@ pub(crate) unsafe fn build_arrow_array_scattered(
                 }
             }
             Arc::new(
-                PrimitiveArray::<TimestampMicrosecondType>::new(ScalarBuffer::from(values), null_buf)
-                    .with_timezone("UTC"),
+                PrimitiveArray::<TimestampMicrosecondType>::new(
+                    ScalarBuffer::from(values),
+                    null_buf,
+                )
+                .with_timezone("UTC"),
             )
         }
         COLUMN_TYPE_BOOLEAN => {
@@ -399,10 +226,15 @@ pub(crate) unsafe fn build_arrow_array_scattered(
                 if slice.sel_ptr.is_null() {
                     let data = std::slice::from_raw_parts(src, slice.len);
                     for (i, &v) in data.iter().enumerate() {
-                        if v != 0 { bits[(out + i) / 8] |= 1 << ((out + i) % 8); }
+                        if v != 0 {
+                            bits[(out + i) / 8] |= 1 << ((out + i) % 8);
+                        }
                     }
                 } else {
-                    for (i, &idx) in std::slice::from_raw_parts(slice.sel_ptr, slice.len).iter().enumerate() {
+                    for (i, &idx) in std::slice::from_raw_parts(slice.sel_ptr, slice.len)
+                        .iter()
+                        .enumerate()
+                    {
                         if *src.add((idx - 1) as usize) != 0 {
                             bits[(out + i) / 8] |= 1 << ((out + i) % 8);
                         }
@@ -410,7 +242,10 @@ pub(crate) unsafe fn build_arrow_array_scattered(
                 }
                 out += slice.len;
             }
-            Arc::new(BooleanArray::new(BooleanBuffer::new(Buffer::from(bits), 0, total), null_buf))
+            Arc::new(BooleanArray::new(
+                BooleanBuffer::new(Buffer::from(bits), 0, total),
+                null_buf,
+            ))
         }
         COLUMN_TYPE_STRING => {
             // Strings are always pre-staged in Julia; data_ptr = *const *const u8,
@@ -420,7 +255,8 @@ pub(crate) unsafe fn build_arrow_array_scattered(
                 if slice.lengths_ptr.is_null() {
                     return Err(anyhow::anyhow!("String column requires lengths_ptr"));
                 }
-                let ptrs = std::slice::from_raw_parts(slice.data_ptr as *const *const u8, slice.len);
+                let ptrs =
+                    std::slice::from_raw_parts(slice.data_ptr as *const *const u8, slice.len);
                 let lens = std::slice::from_raw_parts(slice.lengths_ptr, slice.len);
                 for i in 0..slice.len {
                     let is_null = if !slice.validity_ptr.is_null() {
@@ -431,8 +267,11 @@ pub(crate) unsafe fn build_arrow_array_scattered(
                     if is_null {
                         all_strings.push(None);
                     } else {
-                        let s = std::str::from_utf8(std::slice::from_raw_parts(ptrs[i], lens[i] as usize))
-                            .map_err(|e| anyhow::anyhow!("Invalid UTF-8: {}", e))?;
+                        let s = std::str::from_utf8(std::slice::from_raw_parts(
+                            ptrs[i],
+                            lens[i] as usize,
+                        ))
+                        .map_err(|e| anyhow::anyhow!("Invalid UTF-8: {}", e))?;
                         all_strings.push(Some(s));
                     }
                 }
@@ -447,7 +286,10 @@ pub(crate) unsafe fn build_arrow_array_scattered(
                     data.extend_from_slice(std::slice::from_raw_parts(src, slice.len * 16));
                 } else {
                     for &idx in std::slice::from_raw_parts(slice.sel_ptr, slice.len) {
-                        data.extend_from_slice(std::slice::from_raw_parts(src.add((idx - 1) as usize * 16), 16));
+                        data.extend_from_slice(std::slice::from_raw_parts(
+                            src.add((idx - 1) as usize * 16),
+                            16,
+                        ));
                     }
                 }
             }
@@ -468,7 +310,11 @@ pub(crate) unsafe fn build_arrow_array_scattered(
                     COLUMN_TYPE_DECIMAL_INT32 => {
                         let src = slice.data_ptr as *const i32;
                         if slice.sel_ptr.is_null() {
-                            values.extend(std::slice::from_raw_parts(src, slice.len).iter().map(|&v| v as i128));
+                            values.extend(
+                                std::slice::from_raw_parts(src, slice.len)
+                                    .iter()
+                                    .map(|&v| v as i128),
+                            );
                         } else {
                             for &idx in std::slice::from_raw_parts(slice.sel_ptr, slice.len) {
                                 values.push(*src.add((idx - 1) as usize) as i128);
@@ -478,7 +324,11 @@ pub(crate) unsafe fn build_arrow_array_scattered(
                     COLUMN_TYPE_DECIMAL_INT64 => {
                         let src = slice.data_ptr as *const i64;
                         if slice.sel_ptr.is_null() {
-                            values.extend(std::slice::from_raw_parts(src, slice.len).iter().map(|&v| v as i128));
+                            values.extend(
+                                std::slice::from_raw_parts(src, slice.len)
+                                    .iter()
+                                    .map(|&v| v as i128),
+                            );
                         } else {
                             for &idx in std::slice::from_raw_parts(slice.sel_ptr, slice.len) {
                                 values.push(*src.add((idx - 1) as usize) as i128);
@@ -508,75 +358,3 @@ pub(crate) unsafe fn build_arrow_array_scattered(
     };
     Ok(array)
 }
-
-// Write columns directly to the Parquet writer.
-// Accepts an array of ColumnDescriptors and builds a RecordBatch from them,
-// then writes to the underlying Parquet writer.
-// The caller must ensure all pointers are valid and point to appropriately sized data.
-export_runtime_op!(
-    iceberg_writer_write_columns,
-    crate::IcebergResponse,
-    || {
-        if writer.is_null() {
-            return Err(anyhow::anyhow!("Null writer pointer provided"));
-        }
-        if columns.is_null() || num_columns == 0 {
-            return Err(anyhow::anyhow!("No columns provided"));
-        }
-
-        // Copy column descriptors for safe use across await
-        let cols: Vec<ColumnDescriptor> = unsafe {
-            std::slice::from_raw_parts(columns, num_columns).to_vec()
-        };
-
-        let writer_ref = unsafe { &mut *writer };
-        Ok((writer_ref, cols))
-    },
-    result_tuple,
-    async {
-        let (writer_ref, cols) = result_tuple;
-
-        let arrow_schema = writer_ref.arrow_schema.clone();
-
-        // Validate column count matches schema
-        if cols.len() != arrow_schema.fields().len() {
-            return Err(anyhow::anyhow!(
-                "Column count mismatch: got {} columns but schema has {} fields",
-                cols.len(),
-                arrow_schema.fields().len()
-            ));
-        }
-
-        // Build Arrow arrays from column descriptors.
-        // These arrays are zero-copy: they hold raw pointers into Julia-owned buffers.
-        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(cols.len());
-        for (i, desc) in cols.iter().enumerate() {
-            let schema_field = arrow_schema.field(i);
-            let array = unsafe { build_arrow_array(desc, schema_field)? };
-            arrays.push(array);
-        }
-
-        let batch = RecordBatch::try_new(arrow_schema, arrays)
-            .map_err(|e| anyhow::anyhow!("Failed to create RecordBatch: {}", e))?;
-
-        // Arrow arrays are zero-copy (pointing into Julia buffers) — we must not return
-        // until Rust has released them. Use a per-batch oneshot: the drain task signals
-        // after encoding, at which point the Arrow arrays have been dropped.
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<()>();
-        writer_ref
-            .batch_tx
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Writer has been closed"))?
-            .send((batch, Some(ack_tx)))
-            .await
-            .map_err(|_| anyhow::anyhow!("Writer channel closed (drain task may have failed)"))?;
-        ack_rx
-            .await
-            .map_err(|_| anyhow::anyhow!("Ack channel closed (drain task may have failed)"))?;
-
-        Ok::<(), anyhow::Error>(())
-    },
-    writer: *mut IcebergDataFileWriter,
-    columns: *const ColumnDescriptor,
-    num_columns: usize
-);
