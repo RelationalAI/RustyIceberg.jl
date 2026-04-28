@@ -903,7 +903,10 @@ add_slice!(col, src_array2; sel=sel_indices)      # scattered: rows at sel_indic
 add_slice!(col, src_array3; validity=valid_bv)    # nullable slice
 ```
 
-String columns are not supported on the scattered path; use `ColumnBatch` instead.
+For string columns use `add_string_slice!` instead of `add_slice!`. Selection vectors
+are not supported for strings: Julia strings are non-contiguous, so the caller must
+build `str_ptrs`/`str_lens` arrays up-front — any row selection is applied on the Julia
+side before calling `add_string_slice!`.
 """
 mutable struct GatheredColumn
     slices::Vector{SliceRef}

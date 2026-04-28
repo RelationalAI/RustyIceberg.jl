@@ -248,8 +248,11 @@ pub(crate) unsafe fn build_arrow_array_gathered(
             ))
         }
         COLUMN_TYPE_STRING => {
-            // Strings are always pre-staged in Julia; data_ptr = *const *const u8,
-            // lengths_ptr = *const i64, sel_ptr is always null (identity).
+            // String columns do not support selection vectors. Julia strings are
+            // heap-allocated with non-contiguous addresses, so the caller must build
+            // str_ptrs/str_lens arrays up-front — any row selection is already applied
+            // before add_string_slice! is called. sel_ptr is therefore always null here.
+            // data_ptr = *const *const u8, lengths_ptr = *const i64.
             let mut all_strings: Vec<Option<&str>> = Vec::with_capacity(total);
             for slice in slices {
                 if slice.lengths_ptr.is_null() {
