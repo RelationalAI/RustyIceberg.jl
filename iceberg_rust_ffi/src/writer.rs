@@ -603,16 +603,20 @@ pub extern "C" fn iceberg_writer_write_sync(
         }
     };
 
-    let ipc_bytes = unsafe {
-        std::slice::from_raw_parts(arrow_ipc_data, arrow_ipc_len).to_vec()
-    };
+    let ipc_bytes = unsafe { std::slice::from_raw_parts(arrow_ipc_data, arrow_ipc_len).to_vec() };
 
     let cursor = Cursor::new(ipc_bytes);
     let reader = match StreamReader::try_new(cursor, None) {
         Ok(r) => r,
         Err(e) => {
-            let mut slot = writer_ref.writer_state.error.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() { *slot = Some(anyhow::anyhow!("IPC reader: {}", e)); }
+            let mut slot = writer_ref
+                .writer_state
+                .error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                *slot = Some(anyhow::anyhow!("IPC reader: {}", e));
+            }
             return -1;
         }
     };
@@ -621,18 +625,41 @@ pub extern "C" fn iceberg_writer_write_sync(
         let batch = match batch_result {
             Ok(b) => b,
             Err(e) => {
-                let mut slot = writer_ref.writer_state.error.lock().unwrap_or_else(|e| e.into_inner());
-                if slot.is_none() { *slot = Some(anyhow::anyhow!("IPC batch: {}", e)); }
+                let mut slot = writer_ref
+                    .writer_state
+                    .error
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if slot.is_none() {
+                    *slot = Some(anyhow::anyhow!("IPC batch: {}", e));
+                }
                 return -1;
             }
         };
-        writer_ref.writer_state.pending.fetch_add(1, Ordering::AcqRel);
-        let task = EncodeTask { batch, state: writer_ref.writer_state.clone() };
+        writer_ref
+            .writer_state
+            .pending
+            .fetch_add(1, Ordering::AcqRel);
+        let task = EncodeTask {
+            batch,
+            state: writer_ref.writer_state.clone(),
+        };
         if pool.task_tx.blocking_send(task).is_err() {
-            let prev = writer_ref.writer_state.pending.fetch_sub(1, Ordering::AcqRel);
-            if prev == 1 { writer_ref.writer_state.done_notify.notify_one(); }
-            let mut slot = writer_ref.writer_state.error.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() { *slot = Some(anyhow::anyhow!("Encode pool closed")); }
+            let prev = writer_ref
+                .writer_state
+                .pending
+                .fetch_sub(1, Ordering::AcqRel);
+            if prev == 1 {
+                writer_ref.writer_state.done_notify.notify_one();
+            }
+            let mut slot = writer_ref
+                .writer_state
+                .error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                *slot = Some(anyhow::anyhow!("Encode pool closed"));
+            }
             return -1;
         }
     }
