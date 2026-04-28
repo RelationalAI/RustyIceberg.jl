@@ -95,7 +95,7 @@ use crate::table::IcebergTable;
 use crate::transaction::IcebergDataFiles;
 use crate::util::parse_c_string;
 use crate::writer_columns::{
-    build_arrow_array_scattered, ColumnDescriptor, GatheredColumnDescriptor, SliceRef,
+    build_arrow_array_gathered, ColumnDescriptor, GatheredColumnDescriptor, SliceRef,
 };
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
@@ -307,7 +307,7 @@ pub extern "C" fn iceberg_writer_write_gathered_columns(
     let batch = match (|| -> Result<RecordBatch, anyhow::Error> {
         let mut arrays = Vec::with_capacity(num_columns);
         for (i, desc) in col_descs.iter().enumerate() {
-            arrays.push(unsafe { build_arrow_array_scattered(desc, arrow_schema.field(i))? });
+            arrays.push(unsafe { build_arrow_array_gathered(desc, arrow_schema.field(i))? });
         }
         RecordBatch::try_new(arrow_schema, arrays)
             .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))
@@ -426,7 +426,7 @@ pub extern "C" fn iceberg_writer_write_columns_sync(
     let batch = match (|| -> Result<RecordBatch, anyhow::Error> {
         let mut arrays = Vec::with_capacity(num_columns);
         for (i, desc) in gathered.iter().enumerate() {
-            arrays.push(unsafe { build_arrow_array_scattered(desc, arrow_schema.field(i))? });
+            arrays.push(unsafe { build_arrow_array_gathered(desc, arrow_schema.field(i))? });
         }
         RecordBatch::try_new(arrow_schema, arrays)
             .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))

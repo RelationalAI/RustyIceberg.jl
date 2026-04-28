@@ -141,7 +141,7 @@ unsafe fn build_null_buffer_scattered(
 }
 
 /// Gather all slices for a column into an Arrow array.
-pub(crate) unsafe fn build_arrow_array_scattered(
+pub(crate) unsafe fn build_arrow_array_gathered(
     desc: &GatheredColumnDescriptor,
     schema_field: &arrow_schema::Field,
 ) -> Result<ArrayRef, anyhow::Error> {
