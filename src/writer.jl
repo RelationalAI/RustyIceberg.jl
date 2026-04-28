@@ -36,16 +36,24 @@ Configuration options for the DataFileWriter.
 
 # Fields
 - `prefix::String`: Prefix for output file names (default: "data")
-- `target_file_size_bytes::Int`: Target size for rolling to a new file (default: 512 MB)
-- `compression::CompressionCodec`: Compression codec for Parquet files (default: UNCOMPRESSED)
+- `target_file_size_bytes::Int`: Target file size before rolling to a new file (default: 512 MB)
+- `compression::CompressionCodec`: Parquet compression codec (default: UNCOMPRESSED)
+- `dictionary_enabled::Bool`: Enable Parquet dictionary encoding globally (default: true)
+- `max_row_group_size::Int`: Maximum rows per Parquet row group, 0 = parquet default (1 048 576)
+- `data_page_size::Int`: Target uncompressed data page size in bytes, 0 = parquet default (1 048 576)
+- `write_batch_size::Int`: Rows encoded per column chunk within a row group, 0 = parquet default (1024).
+  Increasing this (e.g. 65536) reduces encoding overhead for large row groups.
+- `plain_encoding::Bool`: Force PLAIN encoding for all columns, bypassing the DELTA_BINARY_PACKED
+  default that parquet-rs uses for INT64/INT32 under PARQUET_2_0 (default: false).
 
 # Example
 ```julia
-# Override defaults: use smaller file size and ZSTD compression
 config = WriterConfig(
     prefix = "my_data",
-    target_file_size_bytes = 128 * 1024 * 1024,  # 128 MB (default is 512 MB)
-    compression = ZSTD
+    compression = ZSTD,
+    dictionary_enabled = false,  # disable dict encoding for benchmarking
+    plain_encoding = true,       # use PLAIN to avoid DELTA_BINARY_PACKED overhead
+    write_batch_size = 65536,    # larger batches for better throughput
 )
 writer = DataFileWriter(table, config)
 ```
@@ -54,6 +62,24 @@ writer = DataFileWriter(table, config)
     prefix::String = "data"
     target_file_size_bytes::Int = DEFAULT_TARGET_FILE_SIZE_BYTES
     compression::CompressionCodec = UNCOMPRESSED
+    dictionary_enabled::Bool = true
+    max_row_group_size::Int = 0
+    data_page_size::Int = 0
+    write_batch_size::Int = 0
+    plain_encoding::Bool = false
+    statistics_enabled::Bool = true
+end
+
+# C-layout struct matching ParquetWriterPropertiesFFI in Rust.
+# Fields are ordered largest-to-smallest to match repr(C) padding rules.
+struct ParquetWriterPropertiesFFI
+    max_row_group_size::Int64
+    data_page_size::Int64
+    write_batch_size::Int64
+    compression_codec::Int32
+    dictionary_enabled::Bool
+    use_plain_encoding::Bool
+    statistics_enabled::Bool
 end
 
 """
@@ -121,6 +147,21 @@ function get_column_metadata(table::Table)::Dict{Symbol, Vector{Pair{String, Str
 end
 
 """
+    set_encode_workers!(n::Int)
+
+Set the number of threads in the global Parquet encode worker pool.
+
+Must be called before creating any `DataFileWriter`; has no effect once the pool
+has been initialized (i.e. after the first writer is created). Defaults to
+`Sys.CPU_THREADS` if not set.
+"""
+function set_encode_workers!(n::Int)
+    n > 0 || throw(ArgumentError("n must be positive, got $n"))
+    @ccall rust_lib.iceberg_set_encode_workers(n::Cint)::Cvoid
+    return nothing
+end
+
+"""
     DataFileWriter(table::Table, config::WriterConfig) -> DataFileWriter
     DataFileWriter(table::Table; prefix="data", target_file_size_bytes=512MB, compression=UNCOMPRESSED) -> DataFileWriter
 
@@ -157,13 +198,22 @@ free_writer!(writer)
 """
 function DataFileWriter(table::Table, config::WriterConfig)
     response = DataFileWriterResponse()
+    parquet_props = Ref(ParquetWriterPropertiesFFI(
+        Int64(config.max_row_group_size),
+        Int64(config.data_page_size),
+        Int64(config.write_batch_size),
+        Int32(config.compression),
+        config.dictionary_enabled,
+        config.plain_encoding,
+        config.statistics_enabled,
+    ))
 
-    async_ccall(response, config.prefix) do handle
+    async_ccall(response, config.prefix, parquet_props) do handle
         @ccall rust_lib.iceberg_writer_new(
             table::Table,
             config.prefix::Cstring,
             config.target_file_size_bytes::Int64,
-            Int32(config.compression)::Int32,
+            parquet_props::Ref{ParquetWriterPropertiesFFI},
             response::Ref{DataFileWriterResponse},
             handle::Ptr{Cvoid}
         )::Cint
@@ -447,6 +497,47 @@ end
 # ==========================================================================================
 
 """
+    SliceRef
+
+FFI reference to a single slice of source column data for the scattered-gather writer.
+
+- `data_ptr`: pointer to source data array (T[]) or string pointers (Ptr{UInt8}[])
+- `lengths_ptr`: for string columns, pointer to lengths array; null for other types
+- `validity_ptr`: pointer to validity bitmap (BitVector.chunks); null if all rows valid
+- `sel_ptr`: pointer to selection index array (1-based Julia indices); null for sequential access
+- `len`: number of rows in this slice
+
+All fields are 8 bytes — total struct size is 40 bytes with no padding.
+"""
+struct SliceRef
+    data_ptr::Ptr{Cvoid}
+    lengths_ptr::Ptr{Int64}
+    validity_ptr::Ptr{UInt8}
+    sel_ptr::Ptr{Int64}
+    len::Csize_t
+end
+
+"""
+    GatheredColumnDescriptor
+
+FFI descriptor for a column to be gathered from multiple SliceRefs.
+Pass an array of these to `write_scattered_columns`.
+
+- `slices_ptr`: pointer to array of SliceRef structs
+- `num_slices`: number of SliceRef entries
+- `total_rows`: sum of all slice lengths
+- `column_type`: ColumnType enum value
+- `is_nullable`: whether the column may contain null values
+"""
+struct GatheredColumnDescriptor
+    slices_ptr::Ptr{SliceRef}
+    num_slices::Csize_t
+    total_rows::Csize_t
+    column_type::Int32
+    is_nullable::Bool
+end
+
+"""
     ColumnType
 
 Enum for column data types, matching the Rust FFI constants.
@@ -633,6 +724,47 @@ function Base.push!(
 end
 
 """
+    push!(batch::ColumnBatch, data::Vector{String}, str_ptrs::Vector{Ptr{UInt8}}, str_lens::Vector{Int64}; validity=nothing, length=nothing, column_type=nothing)
+
+Add a string column to the batch using pre-allocated pointer/length buffers.
+The caller is responsible for filling `str_ptrs` and `str_lens` before calling this.
+Avoids allocating new pointer/length arrays on every write.
+"""
+function Base.push!(
+    batch::ColumnBatch,
+    data::Vector{String},
+    str_ptrs::Vector{Ptr{UInt8}},
+    str_lens::Vector{Int64};
+    validity::Union{Nothing, BitVector}=nothing,
+    length::Union{Nothing, Int}=nothing,
+    column_type::Union{Nothing, ColumnType}=nothing,
+)
+    num_rows = length === nothing ? Base.length(str_ptrs) : length
+    is_nullable = validity !== nothing
+    col_type = column_type === nothing ? COLUMN_TYPE_STRING : column_type
+
+    push!(batch.arrays_to_preserve, data, str_ptrs, str_lens)
+
+    validity_ptr = if is_nullable
+        push!(batch.arrays_to_preserve, validity)
+        Ptr{UInt8}(pointer(validity.chunks))
+    else
+        Ptr{UInt8}(C_NULL)
+    end
+
+    desc = ColumnDescriptor(
+        Ptr{Cvoid}(pointer(str_ptrs)),
+        pointer(str_lens),
+        validity_ptr,
+        Csize_t(num_rows),
+        Int32(col_type),
+        is_nullable
+    )
+    push!(batch.descriptors, desc)
+    return batch
+end
+
+"""
     push!(batch::ColumnBatch, data::Vector{T}; validity=nothing, length=nothing, column_type=nothing) where T
 
 Add a column to the batch. The column type is inferred from the element type unless
@@ -766,4 +898,226 @@ write_columns(writer, batch)
 """
 function write_columns(writer::DataFileWriter, batch::ColumnBatch)
     write_columns(writer, batch.descriptors, batch.arrays_to_preserve)
+end
+
+# ==========================================================================================
+# High-level gathered-column API
+# ==========================================================================================
+
+"""
+    GatheredColumn
+
+Accumulates one or more source slices for a single column. Rust gathers the data
+directly from source buffers when the batch is written, avoiding a Julia-side staging
+copy for numeric columns.
+
+Typical usage:
+
+```julia
+col = GatheredColumn(COLUMN_TYPE_INT64)
+add_slice!(col, src_array)                        # sequential: all rows
+add_slice!(col, src_array2; sel=sel_indices)      # scattered: rows at sel_indices
+add_slice!(col, src_array3; validity=valid_bv)    # nullable slice
+```
+
+String columns are not supported on the scattered path; use `ColumnBatch` instead.
+"""
+mutable struct GatheredColumn
+    slices::Vector{SliceRef}
+    total_rows::Int
+    column_type::ColumnType
+    is_nullable::Bool
+    preserve::Vector{Any}   # source arrays kept alive until write
+end
+
+GatheredColumn(column_type::ColumnType; nullable::Bool=false) =
+    GatheredColumn(SliceRef[], 0, column_type, nullable, Any[])
+
+"""
+    add_slice!(col::GatheredColumn, data::AbstractVector{T};
+               sel=nothing, validity=nothing)
+
+Append a slice of `data` to `col`.
+
+- `sel`: optional `Vector{Int64}` of 1-based row indices into `data` to select.
+  If omitted, all rows of `data` are used sequentially.
+- `validity`: optional `BitVector` (length = number of selected rows, `true` = valid).
+  Providing this marks the column as nullable.
+"""
+function add_slice!(
+    col::GatheredColumn,
+    data::AbstractVector{T};
+    sel::Union{Nothing, Vector{Int64}} = nothing,
+    validity::Union{Nothing, BitVector} = nothing,
+) where T
+    len = sel === nothing ? length(data) : length(sel)
+
+    sel_ptr = if sel !== nothing
+        push!(col.preserve, sel)
+        pointer(sel)
+    else
+        Ptr{Int64}(C_NULL)
+    end
+
+    validity_ptr = if validity !== nothing
+        col.is_nullable = true
+        push!(col.preserve, validity)
+        Ptr{UInt8}(pointer(validity.chunks))
+    else
+        Ptr{UInt8}(C_NULL)
+    end
+
+    push!(col.preserve, data)
+    push!(col.slices, SliceRef(
+        Ptr{Cvoid}(pointer(data)),
+        Ptr{Int64}(C_NULL),   # lengths_ptr unused for non-string types
+        validity_ptr,
+        sel_ptr,
+        Csize_t(len),
+    ))
+    col.total_rows += len
+    return col
+end
+
+"""
+    add_string_slice!(col::GatheredColumn, str_ptrs, str_lens; validity=nothing)
+
+Append a string slice to `col`. `str_ptrs` is a `Vector{Ptr{UInt8}}` of pointers to
+UTF-8 string data and `str_lens` is a `Vector{Int64}` of corresponding byte lengths.
+The caller is responsible for keeping the pointed-to string bytes alive.
+"""
+function add_string_slice!(
+    col::GatheredColumn,
+    str_ptrs::Vector{Ptr{UInt8}},
+    str_lens::Vector{Int64};
+    validity::Union{Nothing, BitVector} = nothing,
+)
+    len = length(str_ptrs)
+
+    validity_ptr = if validity !== nothing
+        col.is_nullable = true
+        push!(col.preserve, validity)
+        Ptr{UInt8}(pointer(validity.chunks))
+    else
+        Ptr{UInt8}(C_NULL)
+    end
+
+    push!(col.preserve, str_ptrs, str_lens)
+    push!(col.slices, SliceRef(
+        Ptr{Cvoid}(pointer(str_ptrs)),
+        pointer(str_lens),
+        validity_ptr,
+        Ptr{Int64}(C_NULL),
+        Csize_t(len),
+    ))
+    col.total_rows += len
+    return col
+end
+
+"""
+    GatheredBatch
+
+Collects a `GatheredColumn` per output column, then writes all of them in one call.
+
+```julia
+batch = GatheredBatch()
+push!(batch, col_int64)
+push!(batch, col_float64)
+write_scattered_columns_sync(writer, batch)
+```
+
+You can also push a single-slice column inline without building a `GatheredColumn`
+explicitly:
+
+```julia
+batch = GatheredBatch()
+push!(batch, src_ints,   COLUMN_TYPE_INT64)
+push!(batch, src_floats, COLUMN_TYPE_FLOAT64; sel=indices, validity=valid_bv)
+write_scattered_columns_sync(writer, batch)
+```
+"""
+mutable struct GatheredBatch
+    columns::Vector{GatheredColumn}
+end
+
+GatheredBatch() = GatheredBatch(GatheredColumn[])
+
+"""
+    push!(batch::GatheredBatch, col::GatheredColumn)
+
+Append an already-built `GatheredColumn` to the batch.
+"""
+Base.push!(batch::GatheredBatch, col::GatheredColumn) = (push!(batch.columns, col); batch)
+
+"""
+    push!(batch::GatheredBatch, data::AbstractVector, column_type::ColumnType;
+          sel=nothing, validity=nothing, nullable=false)
+
+Convenience: create a single-slice `GatheredColumn` from `data` and append it.
+"""
+function Base.push!(
+    batch::GatheredBatch,
+    data::AbstractVector,
+    column_type::ColumnType;
+    sel::Union{Nothing, Vector{Int64}} = nothing,
+    validity::Union{Nothing, BitVector} = nothing,
+    nullable::Bool = validity !== nothing,
+)
+    col = GatheredColumn(column_type; nullable)
+    add_slice!(col, data; sel, validity)
+    push!(batch.columns, col)
+    return batch
+end
+
+"""
+    write_scattered_columns_sync(writer::DataFileWriter, batch::GatheredBatch[, extra_preserve])
+
+Gather column data from Julia memory synchronously, then encode asynchronously.
+
+Gathers all column data from Julia memory in the calling thread using a plain blocking
+`ccall`. Encode runs asynchronously in the global worker pool.
+
+`extra_preserve` (optional) is an additional collection of objects whose memory must
+stay alive during the gather (e.g. source string arrays for zero-copy string columns).
+
+The source data pointed to by the `GatheredBatch` slices and `extra_preserve` must be
+valid for the duration of this call. After the call returns, all Julia pointers have
+been consumed and the source data may be safely released.
+"""
+function write_scattered_columns_sync(
+    writer::DataFileWriter,
+    batch::GatheredBatch,
+    extra_preserve = nothing,
+)
+    isempty(batch.columns) && throw(IcebergException("GatheredBatch has no columns"))
+    writer.ptr == C_NULL && throw(IcebergException("Writer has been freed"))
+
+    all_slice_arrays = Vector{Vector{SliceRef}}(undef, length(batch.columns))
+    descriptors = Vector{GatheredColumnDescriptor}(undef, length(batch.columns))
+    preserve = Any[]
+
+    for (i, col) in enumerate(batch.columns)
+        slices = col.slices
+        all_slice_arrays[i] = slices
+        append!(preserve, col.preserve)
+        push!(preserve, slices)
+        descriptors[i] = GatheredColumnDescriptor(
+            pointer(slices),
+            Csize_t(length(slices)),
+            Csize_t(col.total_rows),
+            Int32(col.column_type),
+            col.is_nullable,
+        )
+    end
+    extra_preserve !== nothing && append!(preserve, extra_preserve)
+
+    ret = GC.@preserve preserve all_slice_arrays descriptors begin
+        @ccall rust_lib.iceberg_writer_write_scattered_columns_sync(
+            writer.ptr::Ptr{Cvoid},
+            pointer(descriptors)::Ptr{GatheredColumnDescriptor},
+            length(descriptors)::Csize_t,
+        )::Int32
+    end
+    ret == 0 || throw(IcebergException("write_scattered_columns_sync: gather failed (see writer close for details)"))
+    return nothing
 end
