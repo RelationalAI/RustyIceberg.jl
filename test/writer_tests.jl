@@ -1303,3 +1303,123 @@ end
 
     println("\n✅ write_columns (GatheredBatch) API tests completed!")
 end
+
+@testset "Writer WriterConfig parquet properties" begin
+    println("Testing WriterConfig parquet writer properties...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    try
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+        println("✅ Catalog created successfully")
+
+        call_count = Ref(0)
+
+        # Write n_rows with the given config, commit, read back, return the NamedTuple.
+        # Creates and cleans up its own namespace/table.
+        function write_read_config(config::RustyIceberg.WriterConfig, n_rows::Int=5)
+            call_count[] += 1
+            uid = "$(round(Int, time() * 1000))_$(call_count[])"
+            ns = ["test_wrcfg_$uid"]
+            tn = "wrcfg_$uid"
+            schema = Schema([
+                Field(Int32(1), "id",    IcebergLong();   required=true),
+                Field(Int32(2), "value", IcebergDouble(); required=false),
+            ])
+            table = C_NULL
+            updated_table = C_NULL
+            data_files = nothing
+            try
+                table = RustyIceberg.create_table(catalog, ns, tn, schema)
+                data_files = RustyIceberg.with_data_file_writer(table, config) do writer
+                    write(writer, (
+                        id    = Int64.(1:n_rows),
+                        value = Float64.(1:n_rows) .* 1.1,
+                    ))
+                end
+                updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+                    RustyIceberg.with_fast_append(tx) do action
+                        RustyIceberg.add_data_files(action, data_files)
+                    end
+                end
+                return read_table_data(updated_table)
+            finally
+                if updated_table != C_NULL
+                    RustyIceberg.free_table(updated_table)
+                end
+                if data_files !== nothing && data_files.ptr != C_NULL
+                    RustyIceberg.free_data_files!(data_files)
+                end
+                if table != C_NULL
+                    RustyIceberg.free_table(table)
+                    RustyIceberg.drop_table(catalog, ns, tn)
+                    RustyIceberg.drop_namespace(catalog, ns)
+                end
+            end
+        end
+
+        # --- Compression codecs ---
+        for codec in [RustyIceberg.SNAPPY, RustyIceberg.GZIP, RustyIceberg.LZ4, RustyIceberg.ZSTD]
+            tbl = write_read_config(RustyIceberg.WriterConfig(compression=codec))
+            @test !isnothing(tbl)
+            @test length(tbl.id) == 5
+            perm = sortperm(tbl.id)
+            @test tbl.id[perm] == Int64[1, 2, 3, 4, 5]
+            @test tbl.value[perm] ≈ Float64[1, 2, 3, 4, 5] .* 1.1
+            println("✅ Compression $codec: data correct")
+        end
+
+        # --- plain_encoding=true (bypasses DELTA_BINARY_PACKED for INT64/INT32) ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(plain_encoding=true))
+        @test !isnothing(tbl) && length(tbl.id) == 5
+        @test tbl.id[sortperm(tbl.id)] == Int64[1, 2, 3, 4, 5]
+        println("✅ plain_encoding=true: data correct")
+
+        # --- dictionary_enabled=false ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(dictionary_enabled=false))
+        @test !isnothing(tbl) && length(tbl.id) == 5
+        @test tbl.id[sortperm(tbl.id)] == Int64[1, 2, 3, 4, 5]
+        println("✅ dictionary_enabled=false: data correct")
+
+        # --- statistics_enabled=false ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(statistics_enabled=false))
+        @test !isnothing(tbl) && length(tbl.id) == 5
+        @test tbl.id[sortperm(tbl.id)] == Int64[1, 2, 3, 4, 5]
+        println("✅ statistics_enabled=false: data correct")
+
+        # --- max_row_group_size=3 with 10 rows → forces ≥4 row groups ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(max_row_group_size=3), 10)
+        @test !isnothing(tbl) && length(tbl.id) == 10
+        @test tbl.id[sortperm(tbl.id)] == Int64.(1:10)
+        println("✅ max_row_group_size=3 (10 rows, multiple row groups): all rows intact")
+
+        # --- write_batch_size=2 (rows encoded per column chunk within a row group) ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(write_batch_size=2))
+        @test !isnothing(tbl) && length(tbl.id) == 5
+        @test tbl.id[sortperm(tbl.id)] == Int64[1, 2, 3, 4, 5]
+        println("✅ write_batch_size=2: data correct")
+
+        # --- Combined: ZSTD + plain_encoding + no dict + large write_batch_size ---
+        config = RustyIceberg.WriterConfig(
+            compression        = RustyIceberg.ZSTD,
+            plain_encoding     = true,
+            dictionary_enabled = false,
+            write_batch_size   = 65536,
+        )
+        tbl = write_read_config(config, 8)
+        @test !isnothing(tbl) && length(tbl.id) == 8
+        @test tbl.id[sortperm(tbl.id)] == Int64.(1:8)
+        println("✅ Combined (ZSTD + plain + no dict + large batch_size): data correct")
+
+    finally
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+            println("✅ Catalog cleaned up")
+        end
+    end
+
+    println("\n✅ WriterConfig parquet properties tests completed!")
+end
