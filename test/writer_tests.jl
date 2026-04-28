@@ -1333,6 +1333,7 @@ end
             updated_table = C_NULL
             data_files = nothing
             try
+                RustyIceberg.create_namespace(catalog, ns)
                 table = RustyIceberg.create_table(catalog, ns, tn, schema)
                 data_files = RustyIceberg.with_data_file_writer(table, config) do writer
                     write(writer, (
