@@ -10,6 +10,7 @@ use iceberg::table::Table;
 use iceberg::TableIdent;
 use std::ffi::{c_char, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::Mutex as AsyncMutex;
 
 // FFI exports
@@ -18,6 +19,103 @@ use object_store_ffi::{export_runtime_op, with_cancellation, NotifyGuard, Respon
 // Utility imports
 use crate::util::{parse_c_string, parse_properties};
 use crate::PropertyEntry;
+
+// ===========================================================================
+// Split-scan performance monitoring
+// ===========================================================================
+
+pub(crate) struct SplitScanStats {
+    pub(crate) files_opened: AtomicUsize,
+    pub(crate) batches_produced: AtomicUsize,
+    pub(crate) bytes_produced: AtomicU64,
+    /// Time inside serialized_stream.next() per batch: fetch + decode + serialize.
+    pub(crate) fetch_serialize_ns: AtomicU64,
+    /// Time background task is blocked on tx.send() (channel full = Julia slow).
+    pub(crate) channel_backpressure_ns: AtomicU64,
+    /// Time Julia waits in iceberg_next_batch for the next batch (rx.recv() latency).
+    pub(crate) next_batch_wait_ns: AtomicU64,
+}
+
+impl SplitScanStats {
+    const fn new() -> Self {
+        Self {
+            files_opened: AtomicUsize::new(0),
+            batches_produced: AtomicUsize::new(0),
+            bytes_produced: AtomicU64::new(0),
+            fetch_serialize_ns: AtomicU64::new(0),
+            channel_backpressure_ns: AtomicU64::new(0),
+            next_batch_wait_ns: AtomicU64::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        self.files_opened.store(0, Ordering::Relaxed);
+        self.batches_produced.store(0, Ordering::Relaxed);
+        self.bytes_produced.store(0, Ordering::Relaxed);
+        self.fetch_serialize_ns.store(0, Ordering::Relaxed);
+        self.channel_backpressure_ns.store(0, Ordering::Relaxed);
+        self.next_batch_wait_ns.store(0, Ordering::Relaxed);
+    }
+
+    fn print_summary(&self) {
+        let files = self.files_opened.load(Ordering::Relaxed);
+        let batches = self.batches_produced.load(Ordering::Relaxed);
+        let bytes = self.bytes_produced.load(Ordering::Relaxed);
+        let fetch_ms = self.fetch_serialize_ns.load(Ordering::Relaxed) as f64 / 1e6;
+        let bp_ms = self.channel_backpressure_ns.load(Ordering::Relaxed) as f64 / 1e6;
+        let wait_ms = self.next_batch_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
+        let bytes_mb = bytes as f64 / (1024.0 * 1024.0);
+
+        const BOX: usize = 68;
+        let row = |content: &str| {
+            let pad = (BOX - 6).saturating_sub(content.len());
+            println!("│  {}{:pad$}  │", content, "", pad = pad);
+        };
+        let dashes = |n: usize| -> String { "─".repeat(n) };
+        let sep = |label: &str| {
+            let fill = (BOX - 10).saturating_sub(label.len());
+            println!("│  {} {} {}  │", dashes(2), label, dashes(fill));
+        };
+        let border = |left: char, right: char| {
+            println!("{}{}{}", left, dashes(BOX - 2), right);
+        };
+
+        border('┌', '┐');
+        row("Split-Scan Stats");
+        row("");
+        row(&format!("files opened:    {:>9}", files));
+        row(&format!(
+            "batches:         {:>9}       serialized: {:.1} MB",
+            batches, bytes_mb
+        ));
+        sep("per-batch timings (sum across all files)");
+        row(&format!(
+            "fetch+serialize: {:>9.1} ms    (I/O + decode + IPC)",
+            fetch_ms
+        ));
+        row(&format!(
+            "channel wait:    {:>9.1} ms    (backpressure — Julia slow)",
+            bp_ms
+        ));
+        row(&format!(
+            "next_batch wait: {:>9.1} ms    (Julia waiting for prefetch)",
+            wait_ms
+        ));
+        border('└', '┘');
+    }
+}
+
+pub(crate) static SPLIT_SCAN_STATS: SplitScanStats = SplitScanStats::new();
+
+#[no_mangle]
+pub extern "C" fn iceberg_print_split_scan_stats() {
+    SPLIT_SCAN_STATS.print_summary();
+}
+
+#[no_mangle]
+pub extern "C" fn iceberg_reset_split_scan_stats() {
+    SPLIT_SCAN_STATS.reset();
+}
 
 /// Direct table structure - no opaque wrapper
 #[repr(C)]
@@ -183,9 +281,7 @@ impl IcebergIncrementalAppendFileStream {
         }
     }
 
-    pub async fn next(
-        &self,
-    ) -> Result<Option<IcebergIncrementalAppendFile>, anyhow::Error> {
+    pub async fn next(&self) -> Result<Option<IcebergIncrementalAppendFile>, anyhow::Error> {
         let mut rx = self.receiver.lock().await;
         match rx.recv().await {
             Some(Ok(task)) => Ok(Some(IcebergIncrementalAppendFile { task })),
@@ -193,7 +289,9 @@ impl IcebergIncrementalAppendFileStream {
             None => {
                 let mut h = self.producer_handle.lock().await;
                 if let Some(handle) = h.take() {
-                    handle.await.map_err(|e| anyhow::anyhow!("Planner panicked: {}", e))?;
+                    handle
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Planner panicked: {}", e))?;
                 }
                 Ok(None)
             }
@@ -225,15 +323,19 @@ impl IcebergIncrementalPosDeleteFileStream {
                 match item {
                     Ok(DeleteScanTask::PositionalDeletes(file_path, dv)) => {
                         let positions: Vec<u64> = dv.iter().collect();
-                        let task =
-                            IcebergIncrementalPosDeleteFile { file_path, positions };
+                        let task = IcebergIncrementalPosDeleteFile {
+                            file_path,
+                            positions,
+                        };
                         if tx.send(Ok(task)).await.is_err() {
                             break;
                         }
                     }
                     Ok(_) => {} // skip DeletedFile and EqualityDeletes
                     Err(e) => {
-                        let _ = tx.send(Err(anyhow::anyhow!("Delete task error: {}", e))).await;
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!("Delete task error: {}", e)))
+                            .await;
                         break;
                     }
                 }
@@ -245,9 +347,7 @@ impl IcebergIncrementalPosDeleteFileStream {
         }
     }
 
-    pub async fn next(
-        &self,
-    ) -> Result<Option<IcebergIncrementalPosDeleteFile>, anyhow::Error> {
+    pub async fn next(&self) -> Result<Option<IcebergIncrementalPosDeleteFile>, anyhow::Error> {
         let mut rx = self.receiver.lock().await;
         match rx.recv().await {
             Some(Ok(task)) => Ok(Some(task)),
@@ -255,7 +355,9 @@ impl IcebergIncrementalPosDeleteFileStream {
             None => {
                 let mut h = self.producer_handle.lock().await;
                 if let Some(handle) = h.take() {
-                    handle.await.map_err(|e| anyhow::anyhow!("Planner panicked: {}", e))?;
+                    handle
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Planner panicked: {}", e))?;
                 }
                 Ok(None)
             }
@@ -270,8 +372,7 @@ pub(crate) fn read_incremental_append_file(
     task: AppendedFileScanTask,
 ) -> iceberg::Result<iceberg::scan::ArrowRecordBatchStream> {
     use futures::{stream, StreamExt};
-    let append_stream =
-        stream::once(async { Ok(task) }).boxed();
+    let append_stream = stream::once(async { Ok(task) }).boxed();
     let delete_stream = stream::empty::<Result<DeleteScanTask, iceberg::Error>>().boxed();
     let streams = (append_stream, delete_stream);
     let (arrow_stream, _): UnzippedIncrementalBatchRecordStream =
@@ -285,8 +386,7 @@ pub type IcebergArrowStreamResponse = IcebergBoxedResponse<IcebergArrowStream>;
 pub type IcebergArrowReaderContextResponse = IcebergBoxedResponse<IcebergArrowReaderContext>;
 pub type IcebergFileScanTaskStreamResponse = IcebergBoxedResponse<IcebergFileScanTaskStream>;
 pub type IcebergFileScanTaskResponse = IcebergBoxedResponse<IcebergFileScanTask>;
-pub type IcebergIncrementalAppendFileResponse =
-    IcebergBoxedResponse<IcebergIncrementalAppendFile>;
+pub type IcebergIncrementalAppendFileResponse = IcebergBoxedResponse<IcebergIncrementalAppendFile>;
 pub type IcebergIncrementalPosDeleteFileResponse =
     IcebergBoxedResponse<IcebergIncrementalPosDeleteFile>;
 
@@ -298,9 +398,15 @@ unsafe impl Send for IcebergNextFileScanTaskResponse {}
 
 impl RawResponse for IcebergNextFileScanTaskResponse {
     type Payload = Option<IcebergFileScanTask>;
-    fn result_mut(&mut self) -> &mut CResult { &mut self.0.result }
-    fn context_mut(&mut self) -> &mut *const Context { &mut self.0.context }
-    fn error_message_mut(&mut self) -> &mut *mut c_char { &mut self.0.error_message }
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.0.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.0.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.0.error_message
+    }
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload.flatten() {
             Some(task) => self.0.value = Box::into_raw(Box::new(task)),
@@ -378,14 +484,18 @@ pub extern "C" fn iceberg_arrow_stream_free(stream: *mut IcebergArrowStream) {
 #[no_mangle]
 pub extern "C" fn iceberg_arrow_reader_context_free(ctx: *mut IcebergArrowReaderContext) {
     if !ctx.is_null() {
-        unsafe { let _ = Box::from_raw(ctx); }
+        unsafe {
+            let _ = Box::from_raw(ctx);
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn iceberg_file_scan_task_stream_free(stream: *mut IcebergFileScanTaskStream) {
     if !stream.is_null() {
-        unsafe { let _ = Box::from_raw(stream); }
+        unsafe {
+            let _ = Box::from_raw(stream);
+        }
     }
 }
 
@@ -393,7 +503,9 @@ pub extern "C" fn iceberg_file_scan_task_stream_free(stream: *mut IcebergFileSca
 #[no_mangle]
 pub extern "C" fn iceberg_file_scan_task_free(task: *mut IcebergFileScanTask) {
     if !task.is_null() {
-        unsafe { let _ = Box::from_raw(task); }
+        unsafe {
+            let _ = Box::from_raw(task);
+        }
     }
 }
 
@@ -402,7 +514,9 @@ pub extern "C" fn iceberg_incremental_append_file_stream_free(
     stream: *mut IcebergIncrementalAppendFileStream,
 ) {
     if !stream.is_null() {
-        unsafe { let _ = Box::from_raw(stream); }
+        unsafe {
+            let _ = Box::from_raw(stream);
+        }
     }
 }
 
@@ -411,17 +525,19 @@ pub extern "C" fn iceberg_incremental_pos_delete_file_stream_free(
     stream: *mut IcebergIncrementalPosDeleteFileStream,
 ) {
     if !stream.is_null() {
-        unsafe { let _ = Box::from_raw(stream); }
+        unsafe {
+            let _ = Box::from_raw(stream);
+        }
     }
 }
 
 /// Free an append file. Do NOT call after passing it to read_append_file — that consumes it.
 #[no_mangle]
-pub extern "C" fn iceberg_incremental_append_file_free(
-    task: *mut IcebergIncrementalAppendFile,
-) {
+pub extern "C" fn iceberg_incremental_append_file_free(task: *mut IcebergIncrementalAppendFile) {
     if !task.is_null() {
-        unsafe { let _ = Box::from_raw(task); }
+        unsafe {
+            let _ = Box::from_raw(task);
+        }
     }
 }
 
@@ -431,7 +547,9 @@ pub extern "C" fn iceberg_incremental_pos_delete_file_free(
     task: *mut IcebergIncrementalPosDeleteFile,
 ) {
     if !task.is_null() {
-        unsafe { let _ = Box::from_raw(task); }
+        unsafe {
+            let _ = Box::from_raw(task);
+        }
     }
 }
 
@@ -489,14 +607,18 @@ export_runtime_op!(
     stream_ref,
     async {
         use futures::TryStreamExt;
+        use std::time::Instant;
         let mut stream_guard = stream_ref.stream.lock().await;
 
-        match stream_guard.try_next().await {
-            Ok(Some(record_batch)) => {
-                Ok(Some(record_batch))
-            }
+        let t = Instant::now();
+        let result = stream_guard.try_next().await;
+        SPLIT_SCAN_STATS
+            .next_batch_wait_ns
+            .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        match result {
+            Ok(Some(record_batch)) => Ok(Some(record_batch)),
             Ok(None) => {
-                // End of stream
                 tracing::debug!("End of stream reached");
                 Ok(None)
             }

@@ -230,7 +230,7 @@ end
 Read a single file scan into an Arrow stream. **Consumes `fs`** — do not call
 `free_file_scan` afterwards.
 """
-function read_file_scan!(reader::ArrowReaderContext, fs::FileScanHandle)
+function read_file!(reader::ArrowReaderContext, fs::FileScanHandle)
     response = ArrowStreamResponse()
     async_ccall(response) do handle
         @ccall rust_lib.iceberg_read_file_scan_task(
@@ -310,4 +310,14 @@ since read_file_scan! consumes the handle.
 """
 function free_file!(fs::FileScanHandle)
     @ccall rust_lib.iceberg_file_scan_task_free(fs.ptr::Ptr{Cvoid})::Cvoid
+end
+
+"""Print a performance summary for the split-scan path to stdout."""
+function print_split_scan_stats()
+    @ccall rust_lib.iceberg_print_split_scan_stats()::Cvoid
+end
+
+"""Reset all split-scan performance counters."""
+function reset_split_scan_stats!()
+    @ccall rust_lib.iceberg_reset_split_scan_stats()::Cvoid
 end

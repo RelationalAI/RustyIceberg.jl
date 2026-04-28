@@ -1,5 +1,6 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
+use std::time::Instant;
 
 use futures::{stream, StreamExt};
 use iceberg::arrow::ArrowReaderBuilder;
@@ -239,7 +240,7 @@ pub extern "C" fn iceberg_create_reader(
     let scan_ptr = unsafe { &*scan };
 
     let mut builder = ArrowReaderBuilder::new(scan_ptr.file_io.clone())
-        .with_row_group_filtering_enabled(true)
+        .with_row_group_filtering_enabled(false)
         .with_row_selection_enabled(false);
 
     let data_file_concurrency = if reader_concurrency > 0 {
@@ -268,7 +269,11 @@ pub extern "C" fn iceberg_create_reader(
         None
     };
 
-    let batch_prefetch_depth = if batch_prefetch_depth == 0 { 4 } else { batch_prefetch_depth };
+    let batch_prefetch_depth = if batch_prefetch_depth == 0 {
+        4
+    } else {
+        batch_prefetch_depth
+    };
     Box::into_raw(Box::new(IcebergArrowReaderContext {
         reader: builder.build(),
         serialization_concurrency,
@@ -331,13 +336,37 @@ export_runtime_op!(
         // Eagerly drain into a bounded channel so batches are prefetched while
         // Julia processes the previous one. The background task runs independently
         // of Julia's next_batch calls.
+        crate::table::SPLIT_SCAN_STATS
+            .files_opened
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::mpsc::channel(batch_prefetch_depth);
         tokio::spawn(async move {
             futures::pin_mut!(serialized_stream);
+            let mut fetch_start = Instant::now();
             while let Some(item) = serialized_stream.next().await {
+                let fetch_ns = fetch_start.elapsed().as_nanos() as u64;
+                crate::table::SPLIT_SCAN_STATS
+                    .fetch_serialize_ns
+                    .fetch_add(fetch_ns, std::sync::atomic::Ordering::Relaxed);
+
+                if let Ok(ref batch) = item {
+                    crate::table::SPLIT_SCAN_STATS
+                        .batches_produced
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    crate::table::SPLIT_SCAN_STATS
+                        .bytes_produced
+                        .fetch_add(batch.length as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                let send_start = Instant::now();
                 if tx.send(item).await.is_err() {
                     break; // Julia dropped the stream
                 }
+                crate::table::SPLIT_SCAN_STATS
+                    .channel_backpressure_ns
+                    .fetch_add(send_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+
+                fetch_start = Instant::now();
             }
         });
         let stream = futures::stream::unfold(rx, |mut rx| async move {
