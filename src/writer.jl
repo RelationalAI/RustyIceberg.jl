@@ -1003,7 +1003,7 @@ Collects a `GatheredColumn` per output column, then writes all of them in one ca
 batch = GatheredBatch()
 push!(batch, col_int64)
 push!(batch, col_float64)
-write_scattered_columns_sync(writer, batch)
+write_columns(writer, batch)
 ```
 
 You can also push a single-slice column inline without building a `GatheredColumn`
@@ -1013,7 +1013,7 @@ explicitly:
 batch = GatheredBatch()
 push!(batch, src_ints,   COLUMN_TYPE_INT64)
 push!(batch, src_floats, COLUMN_TYPE_FLOAT64; sel=indices, validity=valid_bv)
-write_scattered_columns_sync(writer, batch)
+write_columns(writer, batch)
 ```
 """
 mutable struct GatheredBatch
