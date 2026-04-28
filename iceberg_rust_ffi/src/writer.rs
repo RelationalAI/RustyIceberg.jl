@@ -145,12 +145,17 @@ static GLOBAL_ENCODE_POOL: OnceLock<GlobalWorkerPool> = OnceLock::new();
 static ENCODE_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
 /// Set the number of encode worker threads in the global pool.
-/// Must be called before creating any writers; has no effect afterwards.
+/// Must be called before any writer is created. Returns 0 on success, 1 if the pool is
+/// already initialized (call ignored).
 #[no_mangle]
-pub extern "C" fn iceberg_set_encode_workers(n: i32) {
+pub extern "C" fn iceberg_set_encode_workers(n: i32) -> i32 {
+    if GLOBAL_ENCODE_POOL.get().is_some() {
+        return 1;
+    }
     if n > 0 {
         ENCODE_WORKERS.store(n as usize, Ordering::Relaxed);
     }
+    0
 }
 
 /// Initialize the global encode pool on first call.

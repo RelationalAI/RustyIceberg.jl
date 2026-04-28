@@ -151,13 +151,16 @@ end
 
 Set the number of threads in the global Parquet encode worker pool.
 
-Must be called before creating any `DataFileWriter`; has no effect once the pool
-has been initialized (i.e. after the first writer is created). Defaults to
-`Sys.CPU_THREADS` if not set.
+Must be called before the first `DataFileWriter` is created (i.e. before the pool is
+initialized). Throws if the pool is already running. Defaults to `Sys.CPU_THREADS`
+if not set.
 """
 function set_encode_workers!(n::Int)
     n > 0 || throw(ArgumentError("n must be positive, got $n"))
-    @ccall rust_lib.iceberg_set_encode_workers(n::Cint)::Cvoid
+    ret = @ccall rust_lib.iceberg_set_encode_workers(n::Cint)::Int32
+    ret == 0 || throw(IcebergException(
+        "set_encode_workers! must be called before creating any DataFileWriter"
+    ))
     return nothing
 end
 
