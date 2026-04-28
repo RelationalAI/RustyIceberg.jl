@@ -512,7 +512,7 @@ end
     GatheredColumnDescriptor
 
 FFI descriptor for a column to be gathered from multiple SliceRefs.
-Pass an array of these to `write_scattered_columns`.
+Pass an array of these to `write_columns`.
 
 - `slices_ptr`: pointer to array of SliceRef structs
 - `num_slices`: number of SliceRef entries
@@ -1092,7 +1092,7 @@ function write_columns(
     extra_preserve !== nothing && append!(preserve, extra_preserve)
 
     ret = GC.@preserve preserve all_slice_arrays descriptors begin
-        @ccall rust_lib.iceberg_writer_write_scattered_columns_sync(
+        @ccall rust_lib.iceberg_writer_write_gathered_columns(
             writer.ptr::Ptr{Cvoid},
             pointer(descriptors)::Ptr{GatheredColumnDescriptor},
             length(descriptors)::Csize_t,

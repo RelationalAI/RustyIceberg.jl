@@ -254,21 +254,17 @@ pub type IcebergDataFileWriterResponse = IcebergBoxedResponse<IcebergDataFileWri
 /// Type alias for data files response (returns IcebergDataFiles handle)
 pub type IcebergWriterCloseResponse = IcebergBoxedResponse<IcebergDataFiles>;
 
-/// Synchronous scatter-gather write: gathers all column data from Julia memory into
-/// Arrow arrays in the calling thread, submits the RecordBatch to the global encode
-/// pool, then returns immediately (encode is still async).
+/// Gather column data from Julia memory into Arrow arrays in the calling thread, then
+/// submit the RecordBatch to the global encode pool asynchronously.
 ///
-/// Unlike `iceberg_writer_write_scattered_columns` (which requires a Tokio async context
-/// and uses a callback), this function is designed for plain C `ccall` from Julia:
-/// - Julia keeps source arrays alive via `GC.@preserve` for the duration of this call.
-/// - After this function returns, all Julia pointers have been consumed; Julia may safely
-///   release the source data.
-/// - Encode is still asynchronous in the global pool; call `iceberg_writer_close` to
-///   wait for all pending encodes.
+/// Julia keeps source arrays alive via `GC.@preserve` for the duration of this call.
+/// After this function returns, all Julia pointers have been consumed and Julia may safely
+/// release the source data. Encode is still asynchronous in the global pool; call
+/// `iceberg_writer_close` to wait for all pending encodes.
 ///
 /// Returns 0 on success, -1 on error (error stored in writer state, propagated on close).
 #[no_mangle]
-pub extern "C" fn iceberg_writer_write_scattered_columns_sync(
+pub extern "C" fn iceberg_writer_write_gathered_columns(
     writer: *mut IcebergDataFileWriter,
     columns: *const GatheredColumnDescriptor,
     num_columns: usize,
