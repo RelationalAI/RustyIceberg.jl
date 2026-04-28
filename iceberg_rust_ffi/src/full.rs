@@ -9,13 +9,14 @@ use iceberg::scan::TableScan;
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::scan_common::*;
 use crate::{
     IcebergArrowReaderContext, IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanTask,
     IcebergFileScanTaskStream, IcebergFileScanTaskStreamResponse, IcebergNextFileScanTaskResponse,
-    IcebergTable,
+    IcebergNextWarmFileScanResponse, IcebergTable, IcebergWarmFileScan, IcebergWarmFileScanStream,
+    IcebergWarmFileScanStreamResponse,
 };
 
 const SNAPSHOT_ID_NONE: i64 = -1;
@@ -404,5 +405,124 @@ pub extern "C" fn iceberg_file_scan_task_file_path(
     match std::ffi::CString::new(task_ref.task.data_file_path.as_str()) {
         Ok(s) => s.into_raw(),
         Err(_) => std::ptr::null_mut(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Warm file stream API: plan_files_warm → next_warm_file → read_warm_file
+// ---------------------------------------------------------------------------
+
+// Async: plan files and start batch-prefetch streams concurrently.
+// Returns a stream of IcebergWarmFileScan items in manifest order,
+// each with its batch channel already running.
+export_runtime_op!(
+    iceberg_plan_files_warm,
+    IcebergWarmFileScanStreamResponse,
+    || {
+        if scan.is_null() {
+            return Err(anyhow::anyhow!("Null scan pointer"));
+        }
+        if reader_ctx.is_null() {
+            return Err(anyhow::anyhow!("Null reader context pointer"));
+        }
+        let scan_ptr = unsafe { &*scan };
+        let ctx = unsafe { &*reader_ctx };
+        let task_prefetch_depth = if scan_ptr.task_prefetch_depth == 0 {
+            crate::table::DEFAULT_TASK_PREFETCH_DEPTH
+        } else {
+            scan_ptr.task_prefetch_depth
+        };
+        let reader = ctx.reader.clone();
+        let batch_prefetch_depth = ctx.batch_prefetch_depth;
+        Ok((&scan_ptr.scan, task_prefetch_depth, reader, batch_prefetch_depth))
+    },
+    result_tuple,
+    async {
+        let (scan_ref, task_prefetch_depth, reader, batch_prefetch_depth) = result_tuple;
+        let task_stream = scan_ref.plan_files().await?;
+        let (outer_tx, outer_rx) =
+            mpsc::channel::<Result<IcebergWarmFileScan, anyhow::Error>>(task_prefetch_depth);
+        let handle = tokio::spawn(crate::warm_file_stream::run_warm(
+            task_stream,
+            reader,
+            task_prefetch_depth,
+            batch_prefetch_depth,
+            outer_tx,
+        ));
+        Ok::<IcebergWarmFileScanStream, anyhow::Error>(IcebergWarmFileScanStream {
+            receiver: tokio::sync::Mutex::new(outer_rx),
+            producer_handle: tokio::sync::Mutex::new(Some(handle)),
+        })
+    },
+    scan: *mut IcebergScan,
+    reader_ctx: *mut IcebergArrowReaderContext
+);
+
+// Async: pull the next warm file. Returns null value at end-of-stream.
+export_runtime_op!(
+    iceberg_next_warm_file,
+    IcebergNextWarmFileScanResponse,
+    || {
+        if stream.is_null() {
+            return Err(anyhow::anyhow!("Null warm file stream pointer"));
+        }
+        let stream_ref = unsafe { &*stream };
+        Ok(stream_ref)
+    },
+    stream_ref,
+    async { stream_ref.next().await },
+    stream: *mut IcebergWarmFileScanStream
+);
+
+/// Extract (and take ownership of) the Arrow stream from a warm file handle.
+/// Consumes the stream slot — caller must NOT call this twice on the same handle.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_take_stream(
+    file: *mut IcebergWarmFileScan,
+) -> *mut crate::table::IcebergArrowStream {
+    if file.is_null() {
+        return ptr::null_mut();
+    }
+    let file_ref = unsafe { &mut *file };
+    let empty = IcebergArrowStream {
+        stream: tokio::sync::Mutex::new(futures::stream::empty().boxed()),
+    };
+    let stream = std::mem::replace(&mut file_ref.stream, empty);
+    Box::into_raw(Box::new(stream))
+}
+
+/// Record count for a warm file handle. Returns -1 if not available.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_record_count(file: *const IcebergWarmFileScan) -> i64 {
+    if file.is_null() {
+        return -1;
+    }
+    unsafe { &*file }.record_count.map_or(-1, |n| n as i64)
+}
+
+/// File path for a warm file handle. Caller must free with `iceberg_destroy_cstring`.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_path(
+    file: *const IcebergWarmFileScan,
+) -> *mut std::ffi::c_char {
+    if file.is_null() {
+        return ptr::null_mut();
+    }
+    unsafe { &*file }.file_path.clone().into_raw()
+}
+
+/// Free a warm file handle.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_free(file: *mut IcebergWarmFileScan) {
+    if !file.is_null() {
+        drop(unsafe { Box::from_raw(file) });
+    }
+}
+
+/// Free a warm file stream.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_stream_free(stream: *mut IcebergWarmFileScanStream) {
+    if !stream.is_null() {
+        drop(unsafe { Box::from_raw(stream) });
     }
 }

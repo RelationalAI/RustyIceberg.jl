@@ -1177,7 +1177,7 @@ end
                 fs = RustyIceberg.next_file!(file_stream)
                 fs === nothing && break
                 task_count += 1
-                stream = RustyIceberg.read_file_scan!(reader, fs)
+                stream = RustyIceberg.read_file!(reader, fs)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1242,7 +1242,7 @@ end
             while true
                 fs = RustyIceberg.next_file!(file_stream)
                 fs === nothing && break
-                stream = RustyIceberg.read_file_scan!(reader, fs)
+                stream = RustyIceberg.read_file!(reader, fs)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1284,7 +1284,7 @@ end
             while true
                 fs = RustyIceberg.next_file!(file_stream)
                 fs === nothing && break
-                stream = RustyIceberg.read_file_scan!(reader, fs)
+                stream = RustyIceberg.read_file!(reader, fs)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1328,7 +1328,7 @@ end
                     total_from_counts += count
                 end
 
-                stream = RustyIceberg.read_file_scan!(reader, fs)
+                stream = RustyIceberg.read_file!(reader, fs)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1386,7 +1386,7 @@ end
             while true
                 fs = RustyIceberg.next_file!(file_stream)
                 fs === nothing && break
-                stream = RustyIceberg.read_file_scan!(reader, fs)
+                stream = RustyIceberg.read_file!(reader, fs)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL
@@ -1424,7 +1424,7 @@ end
                 fs = RustyIceberg.next_file!(file_stream)
                 fs === nothing && break
                 task_count += 1
-                stream = RustyIceberg.read_file_scan!(reader, fs)
+                stream = RustyIceberg.read_file!(reader, fs)
                 try
                     batch_ptr = RustyIceberg.next_batch(stream)
                     while batch_ptr != C_NULL

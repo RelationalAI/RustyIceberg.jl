@@ -312,6 +312,130 @@ function free_file!(fs::FileScanHandle)
     @ccall rust_lib.iceberg_file_scan_task_free(fs.ptr::Ptr{Cvoid})::Cvoid
 end
 
+# ---------------------------------------------------------------------------
+# Warm file stream API
+#
+# plan_files_warm → next_file! → read_file! → next_batch / free_batch!
+#
+# Up to task_prefetch_depth files are read concurrently in background Tokio
+# tasks. Julia receives them in manifest order via next_file!, each with its
+# batch channel already running. Per-file memory is capped at 100 MB via a
+# semaphore released as batches are drained.
+#
+# Usage:
+#   stream = plan_files_warm(scan, reader)
+#   while (f = next_file!(stream)) !== nothing
+#       path  = file_path(f)
+#       count = record_count(f)
+#       bstream = read_file!(f)       # takes stream ownership
+#       while (bp = next_batch(bstream)) != C_NULL
+#           # process batch
+#           free_batch!(bp)
+#       end
+#       free_stream!(bstream)
+#       free_warm_file!(f)
+#   end
+#   free_warm_file_stream!(stream)
+# ---------------------------------------------------------------------------
+
+"""Opaque handle to a warm file stream (plan_files_warm result)."""
+mutable struct WarmFileScanStream
+    ptr::Ptr{Cvoid}
+end
+
+"""Handle to one warm file — metadata + already-running batch stream."""
+mutable struct WarmFileScanHandle
+    ptr::Ptr{Cvoid}
+end
+
+"""
+    plan_files_warm(scan::Scan, reader::ArrowReaderContext) -> WarmFileScanStream
+
+Plan files and start batch-prefetch streams for up to `task_prefetch_depth`
+files concurrently. Returns a stream of warm file handles in manifest order.
+"""
+function plan_files_warm(scan::Scan, reader::ArrowReaderContext)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_plan_files_warm(
+            scan.ptr::Ptr{Cvoid},
+            reader.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_plan_files_warm", IcebergException)
+    return WarmFileScanStream(response.value)
+end
+
+"""
+    next_file!(stream::WarmFileScanStream) -> Union{WarmFileScanHandle, Nothing}
+
+Pull the next warm file in manifest order. Returns `nothing` at end-of-stream.
+"""
+function next_file!(stream::WarmFileScanStream)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_warm_file(
+            stream.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_next_warm_file", IcebergException)
+    return response.value == C_NULL ? nothing : WarmFileScanHandle(response.value)
+end
+
+"""
+    read_file!(f::WarmFileScanHandle) -> ArrowStream
+
+Extract the already-running batch stream. Consumes the stream slot — call once per handle.
+"""
+function read_file!(f::WarmFileScanHandle)
+    ptr = @ccall rust_lib.iceberg_warm_file_take_stream(f.ptr::Ptr{Cvoid})::Ptr{Cvoid}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to extract stream from warm file handle"))
+    end
+    return ArrowStream(ptr)
+end
+
+"""Record count for a warm file handle. Returns `nothing` if not available."""
+function record_count(f::WarmFileScanHandle)
+    n = @ccall rust_lib.iceberg_warm_file_record_count(f.ptr::Ptr{Cvoid})::Int64
+    return n == -1 ? nothing : n
+end
+
+"""File path for a warm file handle."""
+function file_path(f::WarmFileScanHandle)
+    ptr = @ccall rust_lib.iceberg_warm_file_path(f.ptr::Ptr{Cvoid})::Ptr{Cchar}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to get file path from warm file handle"))
+    end
+    path = unsafe_string(ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cvoid
+    return path
+end
+
+"""Free a warm file handle (drops metadata and any unconsumed batch stream)."""
+function free_warm_file!(f::WarmFileScanHandle)
+    @ccall rust_lib.iceberg_warm_file_free(f.ptr::Ptr{Cvoid})::Cvoid
+end
+
+"""Free a warm file stream."""
+function free_warm_file_stream!(stream::WarmFileScanStream)
+    @ccall rust_lib.iceberg_warm_file_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
+end
+
+"""Print warm-scan performance stats to stdout."""
+function print_warm_scan_stats()
+    @ccall rust_lib.iceberg_print_warm_scan_stats()::Cvoid
+end
+
+"""Reset warm-scan performance counters."""
+function reset_warm_scan_stats!()
+    @ccall rust_lib.iceberg_reset_warm_scan_stats()::Cvoid
+end
+
 """Print a performance summary for the split-scan path to stdout."""
 function print_split_scan_stats()
     @ccall rust_lib.iceberg_print_split_scan_stats()::Cvoid

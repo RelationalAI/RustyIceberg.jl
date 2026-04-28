@@ -15,6 +15,7 @@ use object_store_ffi::{
 mod full;
 mod incremental;
 mod scan_common;
+mod warm_file_stream;
 
 // Catalog module
 mod catalog;
@@ -41,8 +42,7 @@ mod util;
 pub use catalog::{IcebergBoolResponse, IcebergCatalog, IcebergCatalogResponse};
 pub use full::IcebergScan;
 pub use incremental::{
-    IcebergIncrementalScan, IcebergIncrementalTaskStreamsResponse,
-    IcebergUnzippedStreamsResponse,
+    IcebergIncrementalScan, IcebergIncrementalTaskStreamsResponse, IcebergUnzippedStreamsResponse,
 };
 pub use response::{
     IcebergBoxedResponse, IcebergNestedStringListResponse, IcebergPropertyResponse,
@@ -58,6 +58,10 @@ pub use table::{
     IcebergNextFileScanTaskResponse, IcebergTable, IcebergTableResponse,
 };
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
+pub use warm_file_stream::{
+    IcebergNextWarmFileScanResponse, IcebergWarmFileScan, IcebergWarmFileScanStream,
+    IcebergWarmFileScanStreamResponse,
+};
 pub use writer::{
     IcebergDataFileWriter, IcebergDataFileWriterResponse, IcebergWriterCloseResponse,
 };
@@ -193,9 +197,9 @@ pub(crate) fn pos_delete_positions_to_arrow_stream(
     positions: Vec<u64>,
     batch_size: usize,
 ) -> Result<futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>> {
-    use std::sync::Arc;
     use arrow_array::{Int64Array, StringArray};
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+    use std::sync::Arc;
 
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("file_path", DataType::Utf8, false),
