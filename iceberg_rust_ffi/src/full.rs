@@ -231,6 +231,7 @@ export_runtime_op!(
 pub extern "C" fn iceberg_create_reader(
     scan: *mut IcebergScan,
     reader_concurrency: usize,
+    batch_prefetch_depth: usize,
 ) -> *mut IcebergArrowReaderContext {
     if scan.is_null() {
         return ptr::null_mut();
@@ -267,10 +268,12 @@ pub extern "C" fn iceberg_create_reader(
         None
     };
 
+    let batch_prefetch_depth = if batch_prefetch_depth == 0 { 4 } else { batch_prefetch_depth };
     Box::into_raw(Box::new(IcebergArrowReaderContext {
         reader: builder.build(),
         serialization_concurrency,
         batch_size,
+        batch_prefetch_depth,
     }))
 }
 
@@ -308,13 +311,14 @@ export_runtime_op!(
         let ctx = unsafe { &*reader_ctx };
         let reader = ctx.reader.clone();
         let serialization_concurrency = ctx.serialization_concurrency;
+        let batch_prefetch_depth = ctx.batch_prefetch_depth;
         let task_ref = unsafe { Box::from_raw(task) };
         let file_scan_task = task_ref.task;
-        Ok((reader, serialization_concurrency, file_scan_task))
+        Ok((reader, serialization_concurrency, batch_prefetch_depth, file_scan_task))
     },
     result_tuple,
     async {
-        let (reader, serialization_concurrency, file_scan_task) = result_tuple;
+        let (reader, serialization_concurrency, batch_prefetch_depth, file_scan_task) = result_tuple;
 
         // Wrap the single task in a one-element stream, as reader.read() takes a FileScanTaskStream as input
         let task_stream = stream::once(async { Ok(file_scan_task) }).boxed();
@@ -323,8 +327,25 @@ export_runtime_op!(
             record_batch_stream,
             serialization_concurrency,
         );
+
+        // Eagerly drain into a bounded channel so batches are prefetched while
+        // Julia processes the previous one. The background task runs independently
+        // of Julia's next_batch calls.
+        let (tx, rx) = tokio::sync::mpsc::channel(batch_prefetch_depth);
+        tokio::spawn(async move {
+            futures::pin_mut!(serialized_stream);
+            while let Some(item) = serialized_stream.next().await {
+                if tx.send(item).await.is_err() {
+                    break; // Julia dropped the stream
+                }
+            }
+        });
+        let stream = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })
+        .boxed();
         Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
-            stream: AsyncMutex::new(serialized_stream),
+            stream: AsyncMutex::new(stream),
         })
     },
     reader_ctx: *mut IcebergArrowReaderContext,

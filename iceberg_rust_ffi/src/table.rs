@@ -62,6 +62,8 @@ pub struct IcebergArrowReaderContext {
     pub serialization_concurrency: usize,
     /// Batch size used for positional-delete Arrow conversion; None = use DEFAULT_DELETE_BATCH_SIZE.
     pub batch_size: Option<usize>,
+    /// Capacity of the per-file batch prefetch channel; 0 = use default.
+    pub batch_prefetch_depth: usize,
 }
 
 pub(crate) const DEFAULT_DELETE_BATCH_SIZE: usize = 1024;

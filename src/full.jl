@@ -187,16 +187,18 @@ function plan_files(scan::Scan)
 end
 
 """
-    create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))::ArrowReaderContext
+    create_reader(scan::Scan; reader_concurrency::UInt=UInt(0), batch_prefetch_depth::UInt=UInt(0))::ArrowReaderContext
 
 Create a shared reader context from the scan's configuration.
 Pass this to every `read_file_scan!` call.
 `reader_concurrency` overrides the scan-level data_file_concurrency_limit when > 0.
+`batch_prefetch_depth` sets the per-file batch prefetch queue depth (0 = default of 4).
 """
-function create_reader(scan::Scan; reader_concurrency::UInt=UInt(0))
+function create_reader(scan::Scan; reader_concurrency::UInt=UInt(0), batch_prefetch_depth::UInt=UInt(0))
     ptr = @ccall rust_lib.iceberg_create_reader(
         scan.ptr::Ptr{Cvoid},
-        reader_concurrency::Csize_t
+        reader_concurrency::Csize_t,
+        batch_prefetch_depth::Csize_t
     )::Ptr{Cvoid}
     if ptr == C_NULL
         throw(IcebergException("Failed to create reader from scan"))

@@ -437,6 +437,7 @@ pub extern "C" fn iceberg_incremental_create_reader(
         reader: builder.build(),
         serialization_concurrency,
         batch_size,
+        batch_prefetch_depth: 4,
     }))
 }
 
