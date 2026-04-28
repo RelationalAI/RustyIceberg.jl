@@ -11,15 +11,12 @@ using iceberg_rust_ffi_jll
 export Table, Scan, IncrementalScan, ArrowBatch, StaticConfig, ArrowStream
 export init_runtime
 export IcebergException
-export new_incremental_scan, free_scan!
-export table_open, free_table!, new_scan
-export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_schema
-export scan!, next_batch, free_batch!, free_stream!
-export FileScanStream, ArrowReaderContext, FileScanHandle
-export plan_files, create_reader, next_file!, read_file!, read_file_scan!
-export record_count, file_path, free_file_stream!, free_reader!, free_file!
-export AppendFileStream, DeleteFileStream
-export AppendFileHandle, DeleteFileHandle
+export new_incremental_scan, free_incremental_scan!
+export table_open, free_table, new_scan, free_scan!
+export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_current_snapshot_id, table_schema
+export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
+export with_file_column!, with_pos_column!
+export scan!, next_batch, free_batch, free_stream
 export FILE_COLUMN, POS_COLUMN
 export Catalog, catalog_create_rest, catalog_create_memory, free_catalog!
 export load_table, list_tables, list_namespaces, table_exists, create_table, drop_table, drop_namespace, create_namespace
@@ -491,6 +488,18 @@ function table_last_updated_ms(table::Table)
         throw(IcebergException("Failed to get table last updated timestamp"))
     end
     return timestamp
+end
+
+"""
+    table_current_snapshot_id(table::Table)::Union{Int64,Nothing}
+
+Get the current snapshot ID of an Iceberg table.
+Returns the snapshot ID if the table has at least one committed snapshot, or `nothing`
+if the table has no snapshots yet (e.g. immediately after creation, before any commit).
+"""
+function table_current_snapshot_id(table::Table)::Union{Int64,Nothing}
+    id = @ccall rust_lib.iceberg_table_current_snapshot_id(table::Table)::Int64
+    return id == -1 ? nothing : id
 end
 
 """

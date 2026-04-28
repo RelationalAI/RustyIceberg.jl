@@ -1043,6 +1043,11 @@ end
         @test last_updated > 0
         println("✅ Table last updated (ms): $last_updated")
 
+        # A freshly created table has no snapshots yet
+        snapshot_id = RustyIceberg.table_current_snapshot_id(table_1)
+        @test isnothing(snapshot_id)
+        println("✅ Table current snapshot ID is nothing (no snapshots yet)")
+
         # Verify table schema
         schema_json = RustyIceberg.table_schema(table_1)
         @test !isempty(schema_json)

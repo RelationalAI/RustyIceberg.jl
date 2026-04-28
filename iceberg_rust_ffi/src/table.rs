@@ -692,6 +692,24 @@ pub extern "C" fn iceberg_table_last_updated_ms(table: *mut IcebergTable) -> i64
     table_ref.table.metadata().last_updated_ms()
 }
 
+/// Get the current snapshot ID of the table.
+/// Returns the snapshot ID if the table has at least one committed snapshot,
+/// or -1 if the table has no snapshots yet.
+/// Note: -1 is safe as a sentinel because iceberg-rust maps the Iceberg spec's
+/// EMPTY_SNAPSHOT_ID (-1) to `None`, so `current_snapshot_id()` never returns `Some(-1)`.
+#[no_mangle]
+pub extern "C" fn iceberg_table_current_snapshot_id(table: *mut IcebergTable) -> i64 {
+    if table.is_null() {
+        return -1;
+    }
+    let table_ref = unsafe { &*table };
+    table_ref
+        .table
+        .metadata()
+        .current_snapshot_id()
+        .unwrap_or(-1)
+}
+
 /// Get table current schema as JSON string
 #[no_mangle]
 pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char {
