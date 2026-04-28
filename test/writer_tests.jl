@@ -1301,5 +1301,5 @@ end
         end
     end
 
-    println("\n✅ write_scattered_columns_sync API tests completed!")
+    println("\n✅ write_columns (GatheredBatch) API tests completed!")
 end
