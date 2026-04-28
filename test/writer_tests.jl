@@ -1149,8 +1149,8 @@ end
     println("\n✅ write_columns decimal nullable tests completed!")
 end
 
-@testset "Writer write_scattered_columns_sync API" begin
-    println("Testing write_scattered_columns_sync (gathered-column) API...")
+@testset "Writer write_columns (GatheredBatch) API" begin
+    println("Testing write_columns with GatheredBatch (gathered-column) API...")
 
     catalog_uri = get_catalog_uri()
     props = get_catalog_properties()
@@ -1239,8 +1239,8 @@ end
             push!(batch, tag_col)
             println("✅ tag column built (string via add_string_slice!)")
 
-            RustyIceberg.write_scattered_columns_sync(writer, batch)
-            println("✅ Batch written via write_scattered_columns_sync")
+            RustyIceberg.write_columns(writer, batch)
+            println("✅ Batch written via write_columns (GatheredBatch)")
         end
         @test data_files !== nothing && data_files.ptr != C_NULL
         println("✅ Writer closed")

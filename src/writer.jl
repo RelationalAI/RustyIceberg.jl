@@ -1050,7 +1050,7 @@ function Base.push!(
 end
 
 """
-    write_scattered_columns_sync(writer::DataFileWriter, batch::GatheredBatch[, extra_preserve])
+    write_columns(writer::DataFileWriter, batch::GatheredBatch[, extra_preserve])
 
 Gather column data from Julia memory synchronously, then encode asynchronously.
 
@@ -1064,7 +1064,7 @@ The source data pointed to by the `GatheredBatch` slices and `extra_preserve` mu
 valid for the duration of this call. After the call returns, all Julia pointers have
 been consumed and the source data may be safely released.
 """
-function write_scattered_columns_sync(
+function write_columns(
     writer::DataFileWriter,
     batch::GatheredBatch,
     extra_preserve = nothing,
@@ -1098,6 +1098,6 @@ function write_scattered_columns_sync(
             length(descriptors)::Csize_t,
         )::Int32
     end
-    ret == 0 || throw(IcebergException("write_scattered_columns_sync: gather failed (see writer close for details)"))
+    ret == 0 || throw(IcebergException("write_columns (gathered): gather failed (see writer close for details)"))
     return nothing
 end
