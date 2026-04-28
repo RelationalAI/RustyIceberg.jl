@@ -1216,26 +1216,14 @@ end
             push!(batch, score_col)
             println("✅ score column built (scattered + nullable)")
 
-            # tag: string column via add_string_slice!
+            # tag: string column via the high-level add_string_slice! overload
             # Row 0: "alpha", row 1: null, row 2: "gamma", row 3: null
-            tag_strings = ["alpha", "", "gamma", ""]  # empty at null positions
-            tag_ptrs = Vector{Ptr{UInt8}}(undef, 4)
-            tag_lens = Vector{Int64}(undef, 4)
-            tag_valid = BitVector([true, false, true, false])
-            for i in 1:4
-                if tag_valid[i]
-                    tag_ptrs[i] = pointer(tag_strings[i])
-                    tag_lens[i] = ncodeunits(tag_strings[i])
-                else
-                    tag_ptrs[i] = Ptr{UInt8}(C_NULL)
-                    tag_lens[i] = 0
-                end
-            end
-
             tag_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_STRING; nullable=true)
-            RustyIceberg.add_string_slice!(tag_col, tag_ptrs, tag_lens; validity=tag_valid)
-            # Preserve source strings so pointers stay valid until write completes
-            push!(tag_col.preserve, tag_strings)
+            RustyIceberg.add_string_slice!(
+                tag_col,
+                ["alpha", "", "gamma", ""];
+                validity=BitVector([true, false, true, false])
+            )
             push!(batch, tag_col)
             println("✅ tag column built (string via add_string_slice!)")
 

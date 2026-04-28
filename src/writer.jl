@@ -901,6 +901,9 @@ col = GatheredColumn(COLUMN_TYPE_INT64)
 add_slice!(col, src_array)                        # sequential: all rows
 add_slice!(col, src_array2; sel=sel_indices)      # scattered: rows at sel_indices
 add_slice!(col, src_array3; validity=valid_bv)    # nullable slice
+
+str_col = GatheredColumn(COLUMN_TYPE_STRING; nullable=true)
+add_string_slice!(str_col, ["a", "", "c"]; validity=BitVector([true, false, true]))
 ```
 
 For string columns use `add_string_slice!` instead of `add_slice!`. Selection vectors
@@ -966,11 +969,50 @@ function add_slice!(
 end
 
 """
+    add_string_slice!(col::GatheredColumn, strings::Vector{String}; validity=nothing)
+
+Append a string slice to `col` from a plain `Vector{String}`.
+
+- `validity`: optional `BitVector` (`true` = valid, `false` = null). Marking a row null
+  does not require a placeholder in `strings`, but the vector must still be the same length.
+
+```julia
+col = GatheredColumn(COLUMN_TYPE_STRING; nullable=true)
+add_string_slice!(col, ["hello", "", "world"]; validity=BitVector([true, false, true]))
+```
+
+For performance-critical paths where pointer/length arrays are pre-allocated, use the
+lower-level `add_string_slice!(col, str_ptrs, str_lens; validity)` overload directly.
+"""
+function add_string_slice!(
+    col::GatheredColumn,
+    strings::Vector{String};
+    validity::Union{Nothing, BitVector} = nothing,
+)
+    n = length(strings)
+    is_nullable = validity !== nothing
+    str_ptrs = Vector{Ptr{UInt8}}(undef, n)
+    str_lens = Vector{Int64}(undef, n)
+    for i in 1:n
+        if is_nullable && !validity[i]
+            str_ptrs[i] = Ptr{UInt8}(C_NULL)
+            str_lens[i] = 0
+        else
+            str_ptrs[i] = pointer(strings[i])
+            str_lens[i] = ncodeunits(strings[i])
+        end
+    end
+    push!(col.preserve, strings)  # keep String objects alive so pointers remain valid
+    return add_string_slice!(col, str_ptrs, str_lens; validity)
+end
+
+"""
     add_string_slice!(col::GatheredColumn, str_ptrs, str_lens; validity=nothing)
 
-Append a string slice to `col`. `str_ptrs` is a `Vector{Ptr{UInt8}}` of pointers to
-UTF-8 string data and `str_lens` is a `Vector{Int64}` of corresponding byte lengths.
-The caller is responsible for keeping the pointed-to string bytes alive.
+Low-level overload: append a string slice from pre-built pointer/length arrays.
+`str_ptrs` is a `Vector{Ptr{UInt8}}` of pointers to UTF-8 string data and `str_lens`
+is a `Vector{Int64}` of corresponding byte lengths. The caller is responsible for keeping
+the pointed-to string bytes alive until `write_columns` returns.
 """
 function add_string_slice!(
     col::GatheredColumn,
