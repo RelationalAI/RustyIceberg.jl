@@ -34,6 +34,9 @@ pub struct IcebergScan {
     /// How many parquet files to process concurrently in the pipeline.
     /// Set by with_data_file_concurrency_limit (0 = auto-detect).
     pub file_concurrency: usize,
+    /// How many FileScan items to queue in the outer channel of the nested pipeline.
+    /// 0 = use file_concurrency as the default.
+    pub file_prefetch_depth: usize,
 }
 
 unsafe impl Send for IcebergScan {}
@@ -55,6 +58,7 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
         file_io,
         batch_size: None,
         file_concurrency: 0,
+        file_prefetch_depth: 0,
     }))
 }
 
@@ -86,6 +90,7 @@ pub extern "C" fn iceberg_scan_with_data_file_concurrency_limit(
         file_io: scan_ref.file_io,
         batch_size: scan_ref.batch_size,
         file_concurrency: n,
+        file_prefetch_depth: scan_ref.file_prefetch_depth,
     }));
     CResult::Ok
 }
@@ -116,6 +121,8 @@ impl_with_serialization_concurrency_limit!(
     iceberg_scan_with_serialization_concurrency_limit,
     IcebergScan
 );
+
+impl_with_file_prefetch_depth!(iceberg_scan_with_file_prefetch_depth, IcebergScan);
 
 impl_scan_builder_method!(
     iceberg_scan_with_snapshot_id,
@@ -159,12 +166,17 @@ export_runtime_op!(
 
         let file_io = scan_ptr.file_io.clone();
         let batch_size = scan_ptr.batch_size;
+        let prefetch_depth = if scan_ptr.file_prefetch_depth == 0 {
+            concurrency
+        } else {
+            scan_ptr.file_prefetch_depth
+        };
 
-        Ok((scan_ref.as_ref().unwrap(), concurrency, file_io, batch_size))
+        Ok((scan_ref.as_ref().unwrap(), concurrency, prefetch_depth, file_io, batch_size))
     },
     result_tuple,
     async {
-        let (scan_ref, concurrency, file_io, batch_size) = result_tuple;
+        let (scan_ref, concurrency, prefetch_depth, file_io, batch_size) = result_tuple;
 
         // Collect the ordered file task list from iceberg-rs.
         use futures::TryStreamExt;
@@ -173,7 +185,7 @@ export_runtime_op!(
 
         // Hand off to the file-parallel pipeline.
         let stream = crate::ordered_file_pipeline::create_pipeline(
-            tasks, file_io, batch_size, concurrency,
+            tasks, file_io, batch_size, concurrency, prefetch_depth,
         )
         .await?;
 
@@ -215,19 +227,24 @@ export_runtime_op!(
 
         let file_io = scan_ptr.file_io.clone();
         let batch_size = scan_ptr.batch_size;
+        let prefetch_depth = if scan_ptr.file_prefetch_depth == 0 {
+            concurrency
+        } else {
+            scan_ptr.file_prefetch_depth
+        };
 
-        Ok((scan_ref.as_ref().unwrap(), concurrency, file_io, batch_size))
+        Ok((scan_ref.as_ref().unwrap(), concurrency, prefetch_depth, file_io, batch_size))
     },
     result_tuple,
     async {
-        let (scan_ref, concurrency, file_io, batch_size) = result_tuple;
+        let (scan_ref, concurrency, prefetch_depth, file_io, batch_size) = result_tuple;
 
         use futures::TryStreamExt;
         let tasks: Vec<iceberg::scan::FileScanTask> =
             scan_ref.plan_files().await?.try_collect().await?;
 
         let stream = crate::ordered_file_pipeline::create_nested_pipeline(
-            tasks, file_io, batch_size, concurrency,
+            tasks, file_io, batch_size, concurrency, prefetch_depth,
         )
         .await?;
 

@@ -207,6 +207,23 @@ function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
 end
 
 """
+    with_file_prefetch_depth!(scan::Scan, n::UInt)
+
+Set how many FileScan tasks are queued ahead in the outer FileScanStream.
+Higher values keep the Julia consumer busy but use more memory.
+"""
+function with_file_prefetch_depth!(scan::Scan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_file_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+    if result != 0
+        throw(IcebergException("Failed to set file prefetch depth", result))
+    end
+    return nothing
+end
+
+"""
     with_snapshot_id!(scan::Scan, snapshot_id::Int64)
 
 Set the snapshot ID for the scan.

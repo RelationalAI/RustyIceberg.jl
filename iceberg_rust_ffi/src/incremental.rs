@@ -26,6 +26,7 @@ pub struct IcebergIncrementalScan {
     pub file_io: Option<iceberg::io::FileIO>,
     pub batch_size: Option<usize>,
     pub file_concurrency: usize,
+    pub file_prefetch_depth: usize,
 }
 
 unsafe impl Send for IcebergIncrementalScan {}
@@ -109,6 +110,7 @@ pub extern "C" fn iceberg_new_incremental_scan(
         file_io: None,
         batch_size: None,
         file_concurrency: 0,
+        file_prefetch_depth: 0,
     }))
 }
 

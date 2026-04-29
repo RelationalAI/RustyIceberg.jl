@@ -109,6 +109,7 @@ pub async fn create_nested_pipeline(
     file_io: FileIO,
     batch_size: Option<usize>,
     concurrency: usize,
+    prefetch_depth: usize,
 ) -> anyhow::Result<IcebergFileScanStream> {
     if concurrency > MAX_FILE_CONCURRENCY {
         anyhow::bail!(
@@ -118,7 +119,7 @@ pub async fn create_nested_pipeline(
 
     STATS.reset();
 
-    let (tx, rx) = mpsc::channel::<Result<FileScan, iceberg::Error>>(concurrency);
+    let (tx, rx) = mpsc::channel::<Result<FileScan, iceberg::Error>>(prefetch_depth);
 
     tokio::spawn(run_nested(tasks, file_io, batch_size, concurrency, tx));
 
@@ -141,11 +142,12 @@ pub async fn create_pipeline(
     file_io: FileIO,
     batch_size: Option<usize>,
     concurrency: usize,
+    prefetch_depth: usize,
 ) -> anyhow::Result<IcebergArrowStream> {
     // Outer channel: flatten task → Julia (via IcebergArrowStream).
     let (tx, rx) = mpsc::channel(concurrency * 2);
 
-    let nested = create_nested_pipeline(tasks, file_io, batch_size, concurrency).await?;
+    let nested = create_nested_pipeline(tasks, file_io, batch_size, concurrency, prefetch_depth).await?;
 
     tokio::spawn(run_flat(nested, tx));
 

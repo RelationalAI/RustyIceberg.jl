@@ -41,6 +41,7 @@ macro_rules! impl_select_columns {
                 file_io: scan_ref.file_io,
                 batch_size: scan_ref.batch_size,
                 file_concurrency: scan_ref.file_concurrency,
+                file_prefetch_depth: scan_ref.file_prefetch_depth,
             }));
 
             CResult::Ok
@@ -90,6 +91,7 @@ macro_rules! impl_scan_builder_method {
                 file_io: scan_ref.file_io,
                 batch_size: scan_ref.batch_size,
                 file_concurrency: scan_ref.file_concurrency,
+                file_prefetch_depth: scan_ref.file_prefetch_depth,
             }));
 
             CResult::Ok
@@ -120,6 +122,7 @@ macro_rules! impl_with_batch_size {
                 file_io: scan_ref.file_io,
                 batch_size: Some(n),
                 file_concurrency: scan_ref.file_concurrency,
+                file_prefetch_depth: scan_ref.file_prefetch_depth,
             }));
 
             CResult::Ok
@@ -150,6 +153,7 @@ macro_rules! impl_scan_build {
                         file_io: scan_ref.file_io,
                         batch_size: scan_ref.batch_size,
                         file_concurrency: scan_ref.file_concurrency,
+                        file_prefetch_depth: scan_ref.file_prefetch_depth,
                     }));
                     CResult::Ok
                 }
@@ -190,10 +194,27 @@ macro_rules! impl_with_serialization_concurrency_limit {
     };
 }
 
+/// Macro to generate with_file_prefetch_depth function for any scan type
+macro_rules! impl_with_file_prefetch_depth {
+    ($fn_name:ident, $scan_type:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type, n: usize) -> CResult {
+            if scan.is_null() || (*scan).is_null() {
+                return CResult::Error;
+            }
+            let mut scan_ref = unsafe { Box::from_raw(*scan) };
+            scan_ref.file_prefetch_depth = n;
+            *scan = Box::into_raw(scan_ref);
+            CResult::Ok
+        }
+    };
+}
+
 // Re-export macros for use in other modules
 pub(crate) use impl_scan_build;
 pub(crate) use impl_scan_builder_method;
 pub(crate) use impl_scan_free;
 pub(crate) use impl_select_columns;
 pub(crate) use impl_with_batch_size;
+pub(crate) use impl_with_file_prefetch_depth;
 pub(crate) use impl_with_serialization_concurrency_limit;
