@@ -1228,6 +1228,40 @@ end
     nations_path  = "s3://warehouse/tpch.sf01/nation/metadata/00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
     customer_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
 
+    @testset "nested_arrow_stream called directly after build!" begin
+        # scan_nested! = build! + nested_arrow_stream; exercise the two-step path.
+        table = RustyIceberg.table_open(nations_path)
+        scan  = RustyIceberg.new_scan(table)
+        RustyIceberg.build!(scan)
+        outer = RustyIceberg.nested_arrow_stream(scan)
+        @test outer != C_NULL
+
+        row_count = 0
+        try
+            fs_ptr = RustyIceberg.next_file_scan(outer)
+            while fs_ptr != C_NULL
+                inner = RustyIceberg.file_scan_arrow_stream(fs_ptr)
+                batch_ptr = RustyIceberg.next_batch(inner)
+                while batch_ptr != C_NULL
+                    batch = unsafe_load(batch_ptr)
+                    arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                    row_count += nrow(DataFrame(arrow_table))
+                    RustyIceberg.free_batch(batch_ptr)
+                    batch_ptr = RustyIceberg.next_batch(inner)
+                end
+                RustyIceberg.free_file_scan!(fs_ptr)
+                fs_ptr = RustyIceberg.next_file_scan(outer)
+            end
+        finally
+            RustyIceberg.free_file_scan_stream!(outer)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+
+        @test row_count == 25
+        println("✅ nested_arrow_stream called directly after build! returns correct data")
+    end
+
     @testset "Basic iteration — filenames and record counts" begin
         table = RustyIceberg.table_open(nations_path)
         scan  = RustyIceberg.new_scan(table)
@@ -1286,7 +1320,7 @@ end
                 while batch_ptr != C_NULL
                     batch = unsafe_load(batch_ptr)
                     arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
-                    nested_rows += length(arrow_table)
+                    nested_rows += nrow(DataFrame(arrow_table))
                     RustyIceberg.free_batch(batch_ptr)
                     batch_ptr = RustyIceberg.next_batch(inner)
                 end
@@ -1310,7 +1344,7 @@ end
             while batch_ptr != C_NULL
                 batch = unsafe_load(batch_ptr)
                 arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
-                flat_rows += length(arrow_table)
+                flat_rows += nrow(DataFrame(arrow_table))
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream_f)
             end
