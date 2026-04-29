@@ -35,6 +35,9 @@ mod writer;
 // Column-based writer module (zero-copy from Julia)
 mod writer_columns;
 
+// Profiling stats for the file-parallel pipeline
+mod pipeline_stats;
+
 // Ordered file-parallel pipeline
 mod ordered_file_pipeline;
 
