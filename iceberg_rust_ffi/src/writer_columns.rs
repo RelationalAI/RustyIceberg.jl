@@ -13,7 +13,7 @@ use arrow_array::{
     },
     ArrayRef, BooleanArray, PrimitiveArray, StringArray,
 };
-use arrow_buffer::{BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
+use arrow_buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 
 /// Column type codes (must match Julia's ColumnType enum)
 pub const COLUMN_TYPE_INT32: i32 = 0;
@@ -253,7 +253,19 @@ pub(crate) unsafe fn build_arrow_array_gathered(
             // str_ptrs/str_lens arrays up-front — any row selection is already applied
             // before add_string_slice! is called. sel_ptr is therefore always null here.
             // data_ptr = *const *const u8, lengths_ptr = *const i64.
-            let mut all_strings: Vec<Option<&str>> = Vec::with_capacity(total);
+            //
+            // Build the Arrow StringArray directly: one pass copies string bytes into a
+            // contiguous values buffer and tracks cumulative offsets. This avoids the
+            // intermediate Vec<Option<&str>> and skips UTF-8 validation — Julia strings
+            // are guaranteed valid UTF-8.
+            let null_buf = if desc.is_nullable {
+                build_null_buffer_scattered(slices, total)
+            } else {
+                None
+            };
+            let mut offsets = Vec::<i32>::with_capacity(total + 1);
+            offsets.push(0i32);
+            let mut values = Vec::<u8>::new();
             for slice in slices {
                 if slice.lengths_ptr.is_null() {
                     return Err(anyhow::anyhow!("String column requires lengths_ptr"));
@@ -262,24 +274,26 @@ pub(crate) unsafe fn build_arrow_array_gathered(
                     std::slice::from_raw_parts(slice.data_ptr as *const *const u8, slice.len);
                 let lens = std::slice::from_raw_parts(slice.lengths_ptr, slice.len);
                 for i in 0..slice.len {
-                    let is_null = if !slice.validity_ptr.is_null() {
-                        (*slice.validity_ptr.add(i / 8) >> (i % 8)) & 1 == 0
-                    } else {
-                        false
-                    };
-                    if is_null {
-                        all_strings.push(None);
-                    } else {
-                        let s = std::str::from_utf8(std::slice::from_raw_parts(
+                    let is_null = !slice.validity_ptr.is_null()
+                        && ((*slice.validity_ptr.add(i / 8) >> (i % 8)) & 1) == 0;
+                    if !is_null {
+                        values.extend_from_slice(std::slice::from_raw_parts(
                             ptrs[i],
                             lens[i] as usize,
-                        ))
-                        .map_err(|e| anyhow::anyhow!("Invalid UTF-8: {}", e))?;
-                        all_strings.push(Some(s));
+                        ));
                     }
+                    offsets.push(values.len() as i32);
                 }
             }
-            Arc::new(StringArray::from(all_strings))
+            // SAFETY: offsets are monotonically non-decreasing by construction; values
+            // bytes come from Julia String objects (valid UTF-8) kept alive in col.preserve.
+            Arc::new(unsafe {
+                StringArray::new_unchecked(
+                    OffsetBuffer::new(ScalarBuffer::from(offsets)),
+                    Buffer::from_vec(values),
+                    null_buf,
+                )
+            })
         }
         COLUMN_TYPE_UUID => {
             let mut data: Vec<u8> = Vec::with_capacity(total * 16);
