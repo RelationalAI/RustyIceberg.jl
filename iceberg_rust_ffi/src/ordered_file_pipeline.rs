@@ -79,9 +79,10 @@ struct PipelineStats {
     /// Time blocked on per-file semaphore (backpressure from consumer).
     semaphore_wait_ns: AtomicU64,
 
-    // ── Consumer ──
-    /// Time the flat consumer (`run_flat`) spends waiting for the next file.
-    consumer_wait_ns: AtomicU64,
+    // ── Dispatch ──
+    /// Time `run_nested` blocks on the outer channel waiting for the consumer
+    /// to call `next_file_scan` (backpressure from a slow consumer).
+    file_dispatch_wait_ns: AtomicU64,
 
     // ── Memory ──
     /// Live counter of serialized bytes buffered across all file tasks.
@@ -103,7 +104,7 @@ impl PipelineStats {
             fetch_decode_ns: AtomicU64::new(0),
             serialize_ns: AtomicU64::new(0),
             semaphore_wait_ns: AtomicU64::new(0),
-            consumer_wait_ns: AtomicU64::new(0),
+            file_dispatch_wait_ns: AtomicU64::new(0),
             buffered_bytes: AtomicU64::new(0),
             peak_buffered_bytes: AtomicU64::new(0),
         }
@@ -120,7 +121,7 @@ impl PipelineStats {
         self.fetch_decode_ns.store(0, Ordering::Relaxed);
         self.serialize_ns.store(0, Ordering::Relaxed);
         self.semaphore_wait_ns.store(0, Ordering::Relaxed);
-        self.consumer_wait_ns.store(0, Ordering::Relaxed);
+        self.file_dispatch_wait_ns.store(0, Ordering::Relaxed);
         self.buffered_bytes.store(0, Ordering::Relaxed);
         self.peak_buffered_bytes.store(0, Ordering::Relaxed);
     }
@@ -162,7 +163,7 @@ impl PipelineStats {
         let fd_ms = self.fetch_decode_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let ser_ms = self.serialize_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let sem_ms = self.semaphore_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
-        let con_ms = self.consumer_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
+        let dispatch_ms = self.file_dispatch_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let peak_buf = self.peak_buffered_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
 
         let bytes_mb = bytes as f64 / (1024.0 * 1024.0);
@@ -211,9 +212,9 @@ impl PipelineStats {
         row(&format!("reader setup:    {:>9.1} ms    (open, metadata, deletes)", setup_ms));
         row(&format!("fetch+decode:    {:>9.1} ms    (I/O + ZSTD + decode)", fd_ms));
         row(&format!("serialize IPC:   {:>9.1} ms    (RecordBatch -> Arrow IPC)", ser_ms));
-        row(&format!("semaphore wait:  {:>9.1} ms    (backpressure)", sem_ms));
-        sep("consumer");
-        row(&format!("ordering stall:  {:>9.1} ms    (waiting for head file)", con_ms));
+        row(&format!("batch push wait: {:>9.1} ms    (backpressure)", sem_ms));
+        sep("dispatch");
+        row(&format!("file push wait:  {:>9.1} ms    (backpressure)", dispatch_ms));
         sep("memory");
         row(&format!("peak buffered:   {:>9.1} MB    (limit: {} MB/task)", peak_buf, limit_mb));
         border('└', '┘');
@@ -396,6 +397,12 @@ async fn run_nested(
 ) {
     use futures::stream::FuturesUnordered;
 
+    // For the nested path this records "time until last FileScan was handed to
+    // the consumer". For the flat path run_flat overwrites it with the full
+    // end-to-end time once all batches are drained, so the flat metric is
+    // unaffected.
+    let pipeline_start = Instant::now();
+
     let mut in_flight = FuturesUnordered::new();
     let mut task_iter = tasks.into_iter();
 
@@ -420,7 +427,7 @@ async fn run_nested(
                     record_count,
                     stream,
                 };
-                if tx.send(Ok(file_scan)).await.is_err() {
+                if timed!(file_dispatch_wait_ns, tx.send(Ok(file_scan))).is_err() {
                     return; // outer consumer dropped the stream
                 }
             }
@@ -430,6 +437,8 @@ async fn run_nested(
             }
         }
     }
+
+    STATS.store_elapsed(&STATS.pipeline_wall_ns, pipeline_start);
 }
 
 /// Spawn a single file task. Returns a future that resolves immediately to
@@ -568,4 +577,197 @@ async fn process_file_inner(
 
     STATS.files_completed.fetch_add(1, Ordering::Relaxed);
     Ok(())
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn fresh() -> PipelineStats {
+        PipelineStats::new()
+    }
+
+    // ── reset ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reset_clears_every_field() {
+        let s = fresh();
+        s.pipeline_wall_ns.store(1, Ordering::Relaxed);
+        s.files_completed.store(2, Ordering::Relaxed);
+        s.batches_produced.store(3, Ordering::Relaxed);
+        s.bytes_produced.store(4, Ordering::Relaxed);
+        s.peak_concurrency.store(5, Ordering::Relaxed);
+        s.active_tasks.store(6, Ordering::Relaxed);
+        s.reader_setup_ns.store(7, Ordering::Relaxed);
+        s.fetch_decode_ns.store(8, Ordering::Relaxed);
+        s.serialize_ns.store(9, Ordering::Relaxed);
+        s.semaphore_wait_ns.store(10, Ordering::Relaxed);
+        s.file_dispatch_wait_ns.store(11, Ordering::Relaxed);
+        s.buffered_bytes.store(12, Ordering::Relaxed);
+        s.peak_buffered_bytes.store(13, Ordering::Relaxed);
+
+        s.reset();
+
+        assert_eq!(s.pipeline_wall_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.files_completed.load(Ordering::Relaxed), 0);
+        assert_eq!(s.batches_produced.load(Ordering::Relaxed), 0);
+        assert_eq!(s.bytes_produced.load(Ordering::Relaxed), 0);
+        assert_eq!(s.peak_concurrency.load(Ordering::Relaxed), 0);
+        assert_eq!(s.active_tasks.load(Ordering::Relaxed), 0);
+        assert_eq!(s.reader_setup_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.fetch_decode_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.serialize_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.semaphore_wait_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.file_dispatch_wait_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.buffered_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(s.peak_buffered_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    // ── track_task_start / track_task_end ─────────────────────────────────────
+
+    #[test]
+    fn task_start_increments_active_and_updates_peak() {
+        let s = fresh();
+        s.track_task_start();
+        assert_eq!(s.active_tasks.load(Ordering::Relaxed), 1);
+        assert_eq!(s.peak_concurrency.load(Ordering::Relaxed), 1);
+
+        s.track_task_start();
+        assert_eq!(s.active_tasks.load(Ordering::Relaxed), 2);
+        assert_eq!(s.peak_concurrency.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn task_end_decrements_active_without_touching_peak() {
+        let s = fresh();
+        s.track_task_start();
+        s.track_task_start();
+        s.track_task_end();
+        assert_eq!(s.active_tasks.load(Ordering::Relaxed), 1);
+        assert_eq!(s.peak_concurrency.load(Ordering::Relaxed), 2); // high-water mark unchanged
+    }
+
+    #[test]
+    fn peak_concurrency_is_high_water_mark() {
+        let s = fresh();
+        s.track_task_start(); // active 1, peak 1
+        s.track_task_start(); // active 2, peak 2
+        s.track_task_start(); // active 3, peak 3
+        s.track_task_end();   // active 2, peak 3
+        s.track_task_end();   // active 1, peak 3
+        s.track_task_end();   // active 0, peak 3
+        s.track_task_start(); // active 1 — below previous peak, peak stays 3
+        assert_eq!(s.active_tasks.load(Ordering::Relaxed), 1);
+        assert_eq!(s.peak_concurrency.load(Ordering::Relaxed), 3);
+    }
+
+    // ── track_buffer_add / track_buffer_release ───────────────────────────────
+
+    #[test]
+    fn buffer_add_increments_bytes_and_peak() {
+        let s = fresh();
+        s.track_buffer_add(100);
+        assert_eq!(s.buffered_bytes.load(Ordering::Relaxed), 100);
+        assert_eq!(s.peak_buffered_bytes.load(Ordering::Relaxed), 100);
+
+        s.track_buffer_add(50);
+        assert_eq!(s.buffered_bytes.load(Ordering::Relaxed), 150);
+        assert_eq!(s.peak_buffered_bytes.load(Ordering::Relaxed), 150);
+    }
+
+    #[test]
+    fn buffer_release_decrements_bytes_without_touching_peak() {
+        let s = fresh();
+        s.track_buffer_add(200);
+        s.track_buffer_release(80);
+        assert_eq!(s.buffered_bytes.load(Ordering::Relaxed), 120);
+        assert_eq!(s.peak_buffered_bytes.load(Ordering::Relaxed), 200); // peak unchanged
+    }
+
+    #[test]
+    fn buffer_peak_does_not_decrease_after_release_and_smaller_add() {
+        let s = fresh();
+        s.track_buffer_add(500); // peak → 500
+        s.track_buffer_release(500); // current → 0
+        s.track_buffer_add(10); // current → 10, peak stays 500
+        assert_eq!(s.buffered_bytes.load(Ordering::Relaxed), 10);
+        assert_eq!(s.peak_buffered_bytes.load(Ordering::Relaxed), 500);
+    }
+
+    // ── add_elapsed ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn add_elapsed_accumulates_into_field() {
+        let s = fresh();
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        s.add_elapsed(&s.reader_setup_ns, start);
+        let after_first = s.reader_setup_ns.load(Ordering::Relaxed);
+        assert!(after_first > 0, "first add_elapsed should record > 0 ns");
+
+        let start2 = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        s.add_elapsed(&s.reader_setup_ns, start2);
+        let after_second = s.reader_setup_ns.load(Ordering::Relaxed);
+        assert!(after_second > after_first, "second add_elapsed should accumulate");
+    }
+
+    #[test]
+    fn add_elapsed_is_independent_per_field() {
+        let s = fresh();
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        s.add_elapsed(&s.fetch_decode_ns, start);
+
+        // Unrelated fields stay at 0.
+        assert_eq!(s.serialize_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.semaphore_wait_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.reader_setup_ns.load(Ordering::Relaxed), 0);
+        assert!(s.fetch_decode_ns.load(Ordering::Relaxed) > 0);
+    }
+
+    // ── store_elapsed ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn store_elapsed_overwrites_previous_value() {
+        let s = fresh();
+        s.pipeline_wall_ns.store(999_999_999, Ordering::Relaxed); // some large value
+
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        s.store_elapsed(&s.pipeline_wall_ns, start);
+        let stored = s.pipeline_wall_ns.load(Ordering::Relaxed);
+
+        // Stored value is the elapsed time, which is much less than 999_999_999 ns (1 s).
+        assert!(stored > 0);
+        assert!(stored < 999_999_999, "store_elapsed should overwrite, not accumulate");
+    }
+
+    #[test]
+    fn file_dispatch_wait_accumulates_via_add_elapsed() {
+        let s = fresh();
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        s.add_elapsed(&s.file_dispatch_wait_ns, start);
+        assert!(s.file_dispatch_wait_ns.load(Ordering::Relaxed) > 0);
+        // Other fields are unaffected.
+        assert_eq!(s.semaphore_wait_ns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn store_elapsed_does_not_affect_other_fields() {
+        let s = fresh();
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        s.store_elapsed(&s.pipeline_wall_ns, start);
+
+        assert_eq!(s.reader_setup_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.fetch_decode_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.serialize_ns.load(Ordering::Relaxed), 0);
+    }
 }
