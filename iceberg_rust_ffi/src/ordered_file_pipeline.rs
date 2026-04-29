@@ -134,6 +134,21 @@ impl PipelineStats {
         self.active_tasks.fetch_sub(1, Ordering::Relaxed);
     }
 
+    fn add_elapsed(&self, field: &AtomicU64, start: Instant) {
+        field.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn store_elapsed(&self, field: &AtomicU64, start: Instant) {
+        field.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    async fn timed<F: std::future::Future>(&self, field: &AtomicU64, fut: F) -> F::Output {
+        let start = Instant::now();
+        let result = fut.await;
+        self.add_elapsed(field, start);
+        result
+    }
+
     fn track_buffer_add(&self, bytes: u64) {
         let prev = self.buffered_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.peak_buffered_bytes
@@ -355,9 +370,7 @@ async fn run_flat(
         }
     }
 
-    STATS
-        .pipeline_wall_ns
-        .store(pipeline_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    STATS.store_elapsed(&STATS.pipeline_wall_ns, pipeline_start);
 }
 
 /// Main nested consumer loop. Orchestrates file-level parallelism while
@@ -487,9 +500,7 @@ async fn process_file_inner(
     let batch_stream = reader
         .read(task_stream)
         .map_err(|e| unexpected(e))?;
-    STATS
-        .reader_setup_ns
-        .fetch_add(setup_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    STATS.add_elapsed(&STATS.reader_setup_ns, setup_start);
 
     tokio::pin!(batch_stream);
 
@@ -498,11 +509,7 @@ async fn process_file_inner(
         // Each .next() call fetches compressed parquet pages from storage,
         // decompresses (ZSTD), decodes column encodings, and assembles a
         // RecordBatch. These are inseparable without forking parquet-rs.
-        let fd_start = Instant::now();
-        let batch_opt = batch_stream.next().await;
-        STATS
-            .fetch_decode_ns
-            .fetch_add(fd_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let batch_opt = STATS.timed(&STATS.fetch_decode_ns, batch_stream.next()).await;
 
         let batch = match batch_opt {
             Some(Ok(b)) => b,
@@ -513,14 +520,11 @@ async fn process_file_inner(
         // ── Phase 3: Serialize to Arrow IPC ─────────────────────────────
         // CPU-bound work, offloaded to the blocking thread pool to avoid
         // starving the tokio executor.
-        let ser_start = Instant::now();
-        let serialized = tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch))
+        let serialized = STATS
+            .timed(&STATS.serialize_ns, tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch)))
             .await
             .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
             .map_err(|e| unexpected(e))?;
-        STATS
-            .serialize_ns
-            .fetch_add(ser_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let byte_len = serialized.length;
         STATS.batches_produced.fetch_add(1, Ordering::Relaxed);
@@ -532,14 +536,10 @@ async fn process_file_inner(
         // Acquire permits equal to the serialized size. If this file task
         // has produced > MAX_BUFFERED_BYTES_PER_TASK ahead of the consumer,
         // this yields (async, not thread-blocking) until permits are freed.
-        let sem_start = Instant::now();
-        let _permit = semaphore
-            .acquire_many(byte_len as u32)
+        let _permit = STATS
+            .timed(&STATS.semaphore_wait_ns, semaphore.acquire_many(byte_len as u32))
             .await
             .map_err(|e| unexpected(format!("semaphore: {e}")))?;
-        STATS
-            .semaphore_wait_ns
-            .fetch_add(sem_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         // Detach the permit — the consumer releases it via add_permits().
         std::mem::forget(_permit);
 
