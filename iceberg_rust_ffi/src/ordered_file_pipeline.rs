@@ -301,10 +301,11 @@ pub async fn create_nested_pipeline(
     batch_size: Option<usize>,
     concurrency: usize,
 ) -> anyhow::Result<IcebergFileScanStream> {
-    assert!(
-        concurrency <= MAX_FILE_CONCURRENCY,
-        "file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}"
-    );
+    if concurrency > MAX_FILE_CONCURRENCY {
+        anyhow::bail!(
+            "file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}"
+        );
+    }
 
     STATS.reset();
 
@@ -332,11 +333,6 @@ pub async fn create_pipeline(
     batch_size: Option<usize>,
     concurrency: usize,
 ) -> anyhow::Result<IcebergArrowStream> {
-    assert!(
-        concurrency <= MAX_FILE_CONCURRENCY,
-        "file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}"
-    );
-
     // Outer channel: flatten task → Julia (via IcebergArrowStream).
     let (tx, rx) = mpsc::channel(concurrency * 2);
 
@@ -382,12 +378,9 @@ async fn run_flat(
     STATS.store_elapsed(&STATS.pipeline_wall_ns, pipeline_start);
 }
 
-/// Main nested consumer loop. Orchestrates file-level parallelism while
-/// maintaining strict file ordering.
-///
-/// Uses FuturesOrdered to poll N file tasks concurrently but yield their
-/// (filename, record_count, receiver) tuples in push order. Wraps each
-/// receiver as an IcebergArrowStream and sends a FileScan to the outer channel.
+/// Main nested consumer loop. Keeps `concurrency` file tasks in flight concurrently using
+/// FuturesUnordered and wraps each completed task's receiver as an
+/// IcebergArrowStream before sending a FileScan to the outer channel.
 async fn run_nested(
     tasks: Vec<FileScanTask>,
     file_io: FileIO,
@@ -445,8 +438,8 @@ async fn run_nested(
 /// the file's metadata and the receiving end of its batch channel.
 ///
 /// The actual work (parquet I/O, decode, serialize) happens in the background
-/// tokio task. The future resolves to (filename, record_count, Receiver) so
-/// that FuturesOrdered can yield them in file order.
+/// tokio task. The future resolves immediately to (filename, record_count,
+/// Receiver) so that FuturesUnordered can poll it alongside other tasks.
 fn spawn_file_task_with_meta(
     task: FileScanTask,
     file_io: FileIO,

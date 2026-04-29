@@ -1414,7 +1414,7 @@ end
                     arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
                     df = DataFrame(arrow_table)
                     @test names(df) == ["c_custkey", "c_name"]
-                    @test length(arrow_table) <= 10
+                    @test nrow(df) <= 10
                     RustyIceberg.free_batch(batch_ptr)
                     batch_ptr = RustyIceberg.next_batch(inner)
                 end
