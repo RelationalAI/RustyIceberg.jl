@@ -142,13 +142,6 @@ impl PipelineStats {
         field.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
-    async fn timed<F: std::future::Future>(&self, field: &AtomicU64, fut: F) -> F::Output {
-        let start = Instant::now();
-        let result = fut.await;
-        self.add_elapsed(field, start);
-        result
-    }
-
     fn track_buffer_add(&self, bytes: u64) {
         let prev = self.buffered_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.peak_buffered_bytes
@@ -228,6 +221,21 @@ impl PipelineStats {
 }
 
 static STATS: PipelineStats = PipelineStats::new();
+
+/// Time an async expression and record its duration into a STATS field.
+///
+/// ```ignore
+/// let result = timed!(serialize_ns, { tokio::task::spawn_blocking(...) })
+///     .map_err(...)?;
+/// ```
+macro_rules! timed {
+    ($field:ident, $fut:expr) => {{
+        let _start = Instant::now();
+        let _result = $fut.await;
+        STATS.add_elapsed(&STATS.$field, _start);
+        _result
+    }};
+}
 
 // ── FFI exports for profiling (called from Julia benchmark teardown) ─────
 
@@ -509,7 +517,7 @@ async fn process_file_inner(
         // Each .next() call fetches compressed parquet pages from storage,
         // decompresses (ZSTD), decodes column encodings, and assembles a
         // RecordBatch. These are inseparable without forking parquet-rs.
-        let batch_opt = STATS.timed(&STATS.fetch_decode_ns, batch_stream.next()).await;
+        let batch_opt = timed!(fetch_decode_ns, batch_stream.next());
 
         let batch = match batch_opt {
             Some(Ok(b)) => b,
@@ -520,11 +528,12 @@ async fn process_file_inner(
         // ── Phase 3: Serialize to Arrow IPC ─────────────────────────────
         // CPU-bound work, offloaded to the blocking thread pool to avoid
         // starving the tokio executor.
-        let serialized = STATS
-            .timed(&STATS.serialize_ns, tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch)))
-            .await
-            .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
-            .map_err(|e| unexpected(e))?;
+        let serialized = timed!(
+            serialize_ns,
+            tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch))
+        )
+        .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
+        .map_err(|e| unexpected(e))?;
 
         let byte_len = serialized.length;
         STATS.batches_produced.fetch_add(1, Ordering::Relaxed);
@@ -536,9 +545,7 @@ async fn process_file_inner(
         // Acquire permits equal to the serialized size. If this file task
         // has produced > MAX_BUFFERED_BYTES_PER_TASK ahead of the consumer,
         // this yields (async, not thread-blocking) until permits are freed.
-        let _permit = STATS
-            .timed(&STATS.semaphore_wait_ns, semaphore.acquire_many(byte_len as u32))
-            .await
+        let _permit = timed!(semaphore_wait_ns, semaphore.acquire_many(byte_len as u32))
             .map_err(|e| unexpected(format!("semaphore: {e}")))?;
         // Detach the permit — the consumer releases it via add_permits().
         std::mem::forget(_permit);

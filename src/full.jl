@@ -314,7 +314,6 @@ end
 const FileScanStream = Ptr{Cvoid}
 
 const FileScanStreamResponse = Response{FileScanStream}
-Response{FileScanStream}() = Response{FileScanStream}(-1, C_NULL, C_NULL, C_NULL)
 
 """
     nested_arrow_stream(scan::Scan)::FileScanStream
@@ -350,7 +349,6 @@ end
 
 # Response type for next_file_scan
 const FileScanResponse = Response{Ptr{Cvoid}}
-Response{Ptr{Cvoid}}() = Response{Ptr{Cvoid}}(-1, C_NULL, C_NULL, C_NULL)
 
 """
     next_file_scan(stream::FileScanStream)::Ptr{Cvoid}
