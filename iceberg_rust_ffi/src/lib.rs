@@ -1,6 +1,10 @@
 use futures::StreamExt;
 use std::ffi::{c_char, c_void};
 
+pub(crate) fn unexpected(msg: impl std::fmt::Display) -> iceberg::Error {
+    iceberg::Error::new(iceberg::ErrorKind::Unexpected, msg.to_string())
+}
+
 use anyhow::Result;
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
@@ -162,20 +166,11 @@ pub(crate) fn transform_stream_with_parallel_serialization(
                         .await
                     {
                         Ok(Ok(arrow_batch)) => Ok(arrow_batch),
-                        Ok(Err(e)) => Err(iceberg::Error::new(
-                            iceberg::ErrorKind::Unexpected,
-                            e.to_string(),
-                        )),
-                        Err(e) => Err(iceberg::Error::new(
-                            iceberg::ErrorKind::Unexpected,
-                            format!("Serialization task panicked: {}", e),
-                        )),
+                        Ok(Err(e)) => Err(unexpected(e)),
+                        Err(e) => Err(unexpected(format!("Serialization task panicked: {e}"))),
                     }
                 }
-                Err(e) => Err(iceberg::Error::new(
-                    iceberg::ErrorKind::Unexpected,
-                    format!("Stream error: {}", e),
-                )),
+                Err(e) => Err(unexpected(format!("Stream error: {e}"))),
             }
         })
         .buffered(concurrency)

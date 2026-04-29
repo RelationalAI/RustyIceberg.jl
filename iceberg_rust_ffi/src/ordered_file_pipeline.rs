@@ -38,6 +38,7 @@ use iceberg::scan::FileScanTask;
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
 use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
+use crate::unexpected;
 
 /// Per-file cap on serialized bytes buffered ahead of the consumer.
 const MAX_BUFFERED_BYTES_PER_TASK: usize = 100 * 1024 * 1024;
@@ -485,7 +486,7 @@ async fn process_file_inner(
     let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
     let batch_stream = reader
         .read(task_stream)
-        .map_err(|e| iceberg::Error::new(iceberg::ErrorKind::Unexpected, e.to_string()))?;
+        .map_err(|e| unexpected(e))?;
     STATS
         .reader_setup_ns
         .fetch_add(setup_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -515,13 +516,8 @@ async fn process_file_inner(
         let ser_start = Instant::now();
         let serialized = tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch))
             .await
-            .map_err(|e| {
-                iceberg::Error::new(
-                    iceberg::ErrorKind::Unexpected,
-                    format!("serialize panicked: {e}"),
-                )
-            })?
-            .map_err(|e| iceberg::Error::new(iceberg::ErrorKind::Unexpected, e.to_string()))?;
+            .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
+            .map_err(|e| unexpected(e))?;
         STATS
             .serialize_ns
             .fetch_add(ser_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -540,12 +536,7 @@ async fn process_file_inner(
         let _permit = semaphore
             .acquire_many(byte_len as u32)
             .await
-            .map_err(|e| {
-                iceberg::Error::new(
-                    iceberg::ErrorKind::Unexpected,
-                    format!("semaphore: {e}"),
-                )
-            })?;
+            .map_err(|e| unexpected(format!("semaphore: {e}")))?;
         STATS
             .semaphore_wait_ns
             .fetch_add(sem_start.elapsed().as_nanos() as u64, Ordering::Relaxed);

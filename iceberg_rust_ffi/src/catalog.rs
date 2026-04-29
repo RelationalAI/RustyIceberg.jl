@@ -3,7 +3,7 @@ use crate::response::{
     IcebergStringListResponse,
 };
 /// Catalog support for iceberg_rust_ffi
-use crate::IcebergTable;
+use crate::{unexpected, IcebergTable};
 use anyhow::Result;
 use async_trait::async_trait;
 use iceberg::io::{
@@ -155,16 +155,14 @@ impl StorageCredentialsLoader for RestCredentialsLoader {
             .catalog
             .get()
             .and_then(|w| w.upgrade())
-            .ok_or_else(|| {
-                Error::new(ErrorKind::Unexpected, "Catalog reference is not available")
-            })?;
+            .ok_or_else(|| unexpected("Catalog reference is not available"))?;
         let response = catalog.load_table_credentials(table_ident).await?;
         response
             .storage_credentials
             .into_iter()
             .filter(|c| location.starts_with(&c.prefix))
             .max_by_key(|c| c.prefix.len())
-            .ok_or_else(|| Error::new(ErrorKind::Unexpected, "No matching credential for location"))
+            .ok_or_else(|| unexpected("No matching credential for location"))
     }
 }
 
