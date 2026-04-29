@@ -17,6 +17,9 @@ export table_location, table_uuid, table_format_version, table_last_sequence_num
 export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
 export with_file_column!, with_pos_column!
 export scan!, next_batch, free_batch, free_stream
+export scan_nested!, nested_arrow_stream, next_file_scan
+export FileScanStream, file_scan_record_count, file_scan_filename, file_scan_arrow_stream
+export free_file_scan!, free_file_scan_stream!
 export FILE_COLUMN, POS_COLUMN
 export Catalog, catalog_create_rest, free_catalog
 export load_table, list_tables, list_namespaces, table_exists, create_table, drop_table, drop_namespace, create_namespace

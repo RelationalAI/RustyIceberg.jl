@@ -7,7 +7,10 @@ use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
 use crate::scan_common::*;
-use crate::{IcebergArrowStream, IcebergArrowStreamResponse, IcebergTable};
+use crate::{
+    IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanStream,
+    IcebergFileScanStreamResponse, IcebergTable,
+};
 
 /// Holds state for a full table scan across its lifecycle:
 ///   1. Construction: `builder` is set, everything else is None/0.
@@ -24,7 +27,7 @@ pub struct IcebergScan {
     pub serialization_concurrency: usize,
     /// Cloned from the Table at construction time. Passed to the pipeline so
     /// each per-file ArrowReader can open its own parquet file.
-    pub file_io: Option<FileIO>,
+    pub file_io: FileIO,
     /// Captured when Julia calls with_batch_size. Forwarded to each per-file
     /// ArrowReaderBuilder inside the pipeline.
     pub batch_size: Option<usize>,
@@ -49,7 +52,7 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
         builder: Some(scan_builder),
         scan: None,
         serialization_concurrency: 0,
-        file_io: Some(file_io),
+        file_io,
         batch_size: None,
         file_concurrency: 0,
     }))
@@ -154,11 +157,7 @@ export_runtime_op!(
             concurrency
         };
 
-        // Take file_io — it's moved into the pipeline (one clone per file task).
-        let file_io = scan_ptr
-            .file_io
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("file_io not available"))?;
+        let file_io = scan_ptr.file_io.clone();
         let batch_size = scan_ptr.batch_size;
 
         Ok((scan_ref.as_ref().unwrap(), concurrency, file_io, batch_size))
@@ -184,3 +183,55 @@ export_runtime_op!(
 );
 
 impl_scan_free!(iceberg_scan_free, IcebergScan);
+
+// ── Nested stream creation ───────────────────────────────────────────────
+//
+// Returns an IcebergFileScanStream whose items are per-file (filename,
+// record_count, inner-batch-stream) tuples, yielded in strict file order.
+// The flat iceberg_arrow_stream is implemented as a flattening wrapper over
+// this same nested pipeline.
+
+export_runtime_op!(
+    iceberg_file_scan_stream,
+    IcebergFileScanStreamResponse,
+    || {
+        if scan.is_null() {
+            return Err(anyhow::anyhow!("Null scan pointer provided"));
+        }
+        let scan_ptr = unsafe { &mut *scan };
+        let scan_ref = &scan_ptr.scan;
+        if scan_ref.is_none() {
+            return Err(anyhow::anyhow!("Scan not initialized"));
+        }
+
+        let concurrency = scan_ptr.file_concurrency;
+        let concurrency = if concurrency == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            concurrency
+        };
+
+        let file_io = scan_ptr.file_io.clone();
+        let batch_size = scan_ptr.batch_size;
+
+        Ok((scan_ref.as_ref().unwrap(), concurrency, file_io, batch_size))
+    },
+    result_tuple,
+    async {
+        let (scan_ref, concurrency, file_io, batch_size) = result_tuple;
+
+        use futures::TryStreamExt;
+        let tasks: Vec<iceberg::scan::FileScanTask> =
+            scan_ref.plan_files().await?.try_collect().await?;
+
+        let stream = crate::ordered_file_pipeline::create_nested_pipeline(
+            tasks, file_io, batch_size, concurrency,
+        )
+        .await?;
+
+        Ok::<IcebergFileScanStream, anyhow::Error>(stream)
+    },
+    scan: *mut IcebergScan
+);

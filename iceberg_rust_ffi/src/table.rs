@@ -1,6 +1,7 @@
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
+use crate::ordered_file_pipeline::FileScan;
 use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
@@ -77,6 +78,67 @@ impl RawResponse for IcebergBatchResponse {
     }
 }
 
+/// Outer stream of per-file scans from the nested pipeline.
+pub struct IcebergFileScanStream {
+    pub stream: AsyncMutex<
+        futures::stream::BoxStream<'static, Result<FileScan, iceberg::Error>>,
+    >,
+}
+
+unsafe impl Send for IcebergFileScanStream {}
+
+/// C-compatible per-file scan item returned to Julia.
+/// Owns `filename` (must be freed via iceberg_file_scan_free) and `stream`.
+#[repr(C)]
+pub struct IcebergFileScan {
+    /// Null-terminated file path. Owned; freed by iceberg_file_scan_free.
+    pub filename: *mut c_char,
+    pub record_count: i64,
+    /// Inner batch stream. Owned; freed by iceberg_file_scan_free.
+    /// Callers must NOT call iceberg_arrow_stream_free on this pointer.
+    pub stream: *mut IcebergArrowStream,
+}
+
+unsafe impl Send for IcebergFileScan {}
+
+pub type IcebergFileScanStreamResponse = IcebergBoxedResponse<IcebergFileScanStream>;
+
+/// Response for iceberg_next_file_scan (mirrors IcebergBatchResponse).
+#[repr(transparent)]
+pub struct IcebergFileScanResponse(pub IcebergBoxedResponse<IcebergFileScan>);
+
+unsafe impl Send for IcebergFileScanResponse {}
+
+impl RawResponse for IcebergFileScanResponse {
+    type Payload = Option<FileScan>;
+
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.0.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.0.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.0.error_message
+    }
+    fn set_payload(&mut self, payload: Option<Self::Payload>) {
+        match payload.flatten() {
+            Some(fs) => {
+                let filename = std::ffi::CString::new(fs.filename)
+                    .unwrap_or_default()
+                    .into_raw();
+                let stream = Box::into_raw(Box::new(fs.stream));
+                self.0.value = Box::into_raw(Box::new(IcebergFileScan {
+                    filename,
+                    record_count: fs.record_count,
+                    stream,
+                }));
+            }
+            None => self.0.value = ptr::null_mut(),
+        }
+    }
+}
+
 /// Synchronous operations for table and batch management
 
 /// Free a table
@@ -113,6 +175,77 @@ pub extern "C" fn iceberg_arrow_stream_free(stream: *mut IcebergArrowStream) {
         }
     }
 }
+
+/// Free a file scan (its owned filename and inner stream).
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_free(scan: *mut IcebergFileScan) {
+    if scan.is_null() {
+        return;
+    }
+    unsafe {
+        let scan = Box::from_raw(scan);
+        if !scan.filename.is_null() {
+            let _ = std::ffi::CString::from_raw(scan.filename);
+        }
+        if !scan.stream.is_null() {
+            let _ = Box::from_raw(scan.stream);
+        }
+    }
+}
+
+/// Free a file scan stream.
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_stream_free(stream: *mut IcebergFileScanStream) {
+    if !stream.is_null() {
+        unsafe {
+            let _ = Box::from_raw(stream);
+        }
+    }
+}
+
+/// Return the record count of a file scan. Returns -1 on null input.
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_record_count(scan: *const IcebergFileScan) -> i64 {
+    if scan.is_null() {
+        return -1;
+    }
+    unsafe { (*scan).record_count }
+}
+
+/// Return a borrowed pointer to the null-terminated filename of a file scan.
+/// The pointer is valid for the lifetime of the IcebergFileScan.
+/// The caller must NOT free this pointer; iceberg_file_scan_free handles it.
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_filename(scan: *const IcebergFileScan) -> *const c_char {
+    if scan.is_null() {
+        return ptr::null();
+    }
+    unsafe { (*scan).filename }
+}
+
+// Get next file scan from outer stream (async)
+export_runtime_op!(
+    iceberg_next_file_scan,
+    IcebergFileScanResponse,
+    || {
+        if stream.is_null() {
+            return Err(anyhow::anyhow!("Null file scan stream pointer"));
+        }
+        let stream_ref = unsafe { &*stream };
+        Ok(stream_ref)
+    },
+    stream_ref,
+    async {
+        use futures::StreamExt;
+        let mut guard = stream_ref.stream.lock().await;
+        match guard.next().await {
+            Some(Ok(fs)) => Ok(Some(fs)),
+            Some(Err(e)) => Err(anyhow::anyhow!("Error reading file scan: {}", e)),
+            None => Ok(None),
+        }
+    },
+    stream: *mut IcebergFileScanStream
+);
 
 // FFI Export functions for table operations
 // These functions are exported to be called from Julia via the FFI

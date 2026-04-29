@@ -15,10 +15,10 @@
 //!   3. Serializes each batch to Arrow IPC (via spawn_blocking)
 //!   4. Sends serialized batches into a per-file mpsc channel
 //!
-//! A consumer (`run`) uses FuturesOrdered to drain files in order:
-//!   - FuturesOrdered yields per-file receivers in the order files were pushed
-//!   - The consumer drains file 0's channel batch-by-batch, then file 1's, etc.
-//!   - Each drained batch is forwarded to the outer channel (read by Julia)
+//! A consumer (`run_nested`) uses FuturesUnordered to maintain N tasks in
+//! flight and yield per-file FileScan values as they become ready. Each
+//! FileScan wraps the file's batch channel as an IcebergArrowStream with
+//! integrated semaphore-permit release.
 //!
 //! # Memory bounding
 //! Each file task has its own Semaphore(MAX_BUFFERED_BYTES_PER_TASK). After
@@ -37,7 +37,7 @@ use iceberg::io::FileIO;
 use iceberg::scan::FileScanTask;
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
-use crate::table::{ArrowBatch, IcebergArrowStream};
+use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
 
 /// Per-file cap on serialized bytes buffered ahead of the consumer.
 const MAX_BUFFERED_BYTES_PER_TASK: usize = 100 * 1024 * 1024;
@@ -79,8 +79,7 @@ struct PipelineStats {
     semaphore_wait_ns: AtomicU64,
 
     // ── Consumer ──
-    /// Time the consumer spends waiting on FuturesOrdered for the next
-    /// file's receiver (ordering stall — head file not ready yet).
+    /// Time the flat consumer (`run_flat`) spends waiting for the next file.
     consumer_wait_ns: AtomicU64,
 
     // ── Memory ──
@@ -239,11 +238,69 @@ struct BufferedBatch {
     semaphore: Arc<Semaphore>,
 }
 
-/// Create the file-parallel pipeline and return it as an IcebergArrowStream.
+/// Internal per-file scan result: filename, record count, and a prefetched
+/// inner batch stream. Used as the item type of the nested pipeline channel.
+pub struct FileScan {
+    pub filename: String,
+    pub record_count: i64,
+    pub stream: IcebergArrowStream,
+}
+
+/// Convert a per-file mpsc receiver into an IcebergArrowStream.
+/// Semaphore permits are released and STATS updated as each batch is yielded.
+fn make_file_stream(
+    file_rx: mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
+) -> IcebergArrowStream {
+    let stream = futures::stream::unfold(file_rx, |mut rx| async move {
+        rx.recv().await.map(|item| {
+            let result = item.map(|buf| {
+                buf.semaphore.add_permits(buf.byte_len);
+                STATS.track_buffer_release(buf.byte_len as u64);
+                buf.batch
+            });
+            (result, rx)
+        })
+    })
+    .boxed();
+    IcebergArrowStream {
+        stream: AsyncMutex::new(stream),
+    }
+}
+
+/// Create the nested file-parallel pipeline and return it as an
+/// IcebergFileScanStream. Each item in the outer stream is a FileScan
+/// carrying the filename, record count, and a prefetched inner batch stream.
+pub async fn create_nested_pipeline(
+    tasks: Vec<FileScanTask>,
+    file_io: FileIO,
+    batch_size: Option<usize>,
+    concurrency: usize,
+) -> anyhow::Result<IcebergFileScanStream> {
+    assert!(
+        concurrency <= MAX_FILE_CONCURRENCY,
+        "file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}"
+    );
+
+    STATS.reset();
+
+    let (tx, rx) = mpsc::channel::<Result<FileScan, iceberg::Error>>(concurrency);
+
+    tokio::spawn(run_nested(tasks, file_io, batch_size, concurrency, tx));
+
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+    .boxed();
+
+    Ok(IcebergFileScanStream {
+        stream: AsyncMutex::new(stream),
+    })
+}
+
+/// Create the flat file-parallel pipeline and return it as an IcebergArrowStream.
 ///
-/// Spawns a background `run` task that processes files concurrently and
-/// feeds serialized batches into an mpsc channel. The returned stream
-/// wraps the receiving end of that channel.
+/// Implemented by creating the nested pipeline and flattening it, so all
+/// ordering, backpressure, and stats logic lives in one place.
 pub async fn create_pipeline(
     tasks: Vec<FileScanTask>,
     file_io: FileIO,
@@ -255,14 +312,13 @@ pub async fn create_pipeline(
         "file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}"
     );
 
-    STATS.reset();
-
-    // Outer channel: run() → Julia (via IcebergArrowStream).
+    // Outer channel: flatten task → Julia (via IcebergArrowStream).
     let (tx, rx) = mpsc::channel(concurrency * 2);
 
-    tokio::spawn(run(tasks, file_io, batch_size, concurrency, tx));
+    let nested = create_nested_pipeline(tasks, file_io, batch_size, concurrency).await?;
 
-    // Wrap the mpsc receiver as a BoxStream for IcebergArrowStream.
+    tokio::spawn(run_flat(nested, tx));
+
     let stream = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|item| (item, rx))
     })
@@ -273,94 +329,112 @@ pub async fn create_pipeline(
     })
 }
 
-/// Spawn a single file task. Returns a future that resolves immediately
-/// to the receiving end of the file's batch channel.
-///
-/// The actual work (parquet I/O, decode, serialize) happens in the
-/// background tokio task. The future resolves to the Receiver so that
-/// FuturesOrdered can yield receivers in file order.
-fn spawn_file_task(
-    task: FileScanTask,
-    file_io: FileIO,
-    batch_size: Option<usize>,
-) -> impl std::future::Future<
-    Output = Result<mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>, iceberg::Error>,
-> {
-    // Each file gets its own semaphore for independent backpressure.
-    let sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
-    let (file_tx, file_rx) = mpsc::channel(8);
-
-    tokio::spawn(process_file(task, file_io, batch_size, sem, file_tx));
-
-    async move { Ok(file_rx) }
-}
-
-/// Main consumer loop. Orchestrates file-level parallelism while
-/// maintaining strict file ordering.
-///
-/// Uses FuturesOrdered to poll N file tasks concurrently but yield their
-/// receivers in push order. For each file, drains its channel batch-by-batch,
-/// forwarding to the outer channel and releasing semaphore permits.
-async fn run(
-    tasks: Vec<FileScanTask>,
-    file_io: FileIO,
-    batch_size: Option<usize>,
-    concurrency: usize,
+/// Flatten the nested pipeline into a single batch channel (backwards-compat).
+async fn run_flat(
+    nested: IcebergFileScanStream,
     tx: mpsc::Sender<Result<ArrowBatch, iceberg::Error>>,
 ) {
-    use futures::stream::FuturesOrdered;
-
     let pipeline_start = Instant::now();
-    let mut in_flight = FuturesOrdered::new();
-    let mut task_iter = tasks.into_iter();
 
-    // Seed the first N file tasks.
-    for _ in 0..concurrency {
-        if let Some(task) = task_iter.next() {
-            in_flight.push_back(spawn_file_task(task, file_io.clone(), batch_size));
-        }
-    }
-
-    // FuturesOrdered::next() yields results in push order (file 0, 1, 2, ...).
-    while let Some(file_result) = in_flight.next().await {
-        // Eagerly start the next file to keep N tasks in flight.
-        if let Some(task) = task_iter.next() {
-            in_flight.push_back(spawn_file_task(task, file_io.clone(), batch_size));
-        }
-
-        let mut file_rx = match file_result {
-            Ok(rx) => rx,
+    let mut outer = nested.stream.lock().await;
+    while let Some(item) = outer.next().await {
+        match item {
+            Ok(file_scan) => {
+                let mut inner = file_scan.stream.stream.lock().await;
+                while let Some(batch_result) = inner.next().await {
+                    if tx.send(batch_result).await.is_err() {
+                        return;
+                    }
+                }
+            }
             Err(e) => {
                 let _ = tx.send(Err(e)).await;
                 return;
             }
-        };
-
-        // Drain this file's batches in row order, forwarding to Julia.
-        while let Some(batch_result) = file_rx.recv().await {
-            match batch_result {
-                Ok(buf) => {
-                    let sem = buf.semaphore.clone();
-                    let byte_len = buf.byte_len;
-                    if tx.send(Ok(buf.batch)).await.is_err() {
-                        return; // Julia side dropped the stream
-                    }
-                    // Release permits so the file task can produce more.
-                    sem.add_permits(byte_len);
-                    STATS.track_buffer_release(byte_len as u64);
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                    return;
-                }
-            }
         }
-        // file_rx exhausted → file task finished → move to next file
     }
 
     STATS
         .pipeline_wall_ns
         .store(pipeline_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
+
+/// Main nested consumer loop. Orchestrates file-level parallelism while
+/// maintaining strict file ordering.
+///
+/// Uses FuturesOrdered to poll N file tasks concurrently but yield their
+/// (filename, record_count, receiver) tuples in push order. Wraps each
+/// receiver as an IcebergArrowStream and sends a FileScan to the outer channel.
+async fn run_nested(
+    tasks: Vec<FileScanTask>,
+    file_io: FileIO,
+    batch_size: Option<usize>,
+    concurrency: usize,
+    tx: mpsc::Sender<Result<FileScan, iceberg::Error>>,
+) {
+    use futures::stream::FuturesUnordered;
+
+    let mut in_flight = FuturesUnordered::new();
+    let mut task_iter = tasks.into_iter();
+
+    // Seed the first N file tasks.
+    for _ in 0..concurrency {
+        if let Some(task) = task_iter.next() {
+            in_flight.push(spawn_file_task_with_meta(task, file_io.clone(), batch_size));
+        }
+    }
+
+    while let Some(file_result) = in_flight.next().await {
+        // Eagerly start the next file to keep N tasks in flight.
+        if let Some(task) = task_iter.next() {
+            in_flight.push(spawn_file_task_with_meta(task, file_io.clone(), batch_size));
+        }
+
+        match file_result {
+            Ok((filename, record_count, file_rx)) => {
+                let stream = make_file_stream(file_rx);
+                let file_scan = FileScan {
+                    filename,
+                    record_count,
+                    stream,
+                };
+                if tx.send(Ok(file_scan)).await.is_err() {
+                    return; // outer consumer dropped the stream
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+        }
+    }
+}
+
+/// Spawn a single file task. Returns a future that resolves immediately to
+/// the file's metadata and the receiving end of its batch channel.
+///
+/// The actual work (parquet I/O, decode, serialize) happens in the background
+/// tokio task. The future resolves to (filename, record_count, Receiver) so
+/// that FuturesOrdered can yield them in file order.
+fn spawn_file_task_with_meta(
+    task: FileScanTask,
+    file_io: FileIO,
+    batch_size: Option<usize>,
+) -> impl std::future::Future<
+    Output = Result<
+        (String, i64, mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>),
+        iceberg::Error,
+    >,
+> {
+    let filename = task.data_file_path().to_string();
+    let record_count = task.record_count.unwrap_or(0) as i64;
+
+    let sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
+    let (file_tx, file_rx) = mpsc::channel(8);
+
+    tokio::spawn(process_file(task, file_io, batch_size, sem, file_tx));
+
+    async move { Ok((filename, record_count, file_rx)) }
 }
 
 /// Wrapper around process_file_inner that ensures errors are sent to the
@@ -374,6 +448,7 @@ async fn process_file(
     semaphore: Arc<Semaphore>,
     tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) {
+    STATS.track_task_start();
     let result = process_file_inner(task, file_io, batch_size, semaphore, &tx).await;
     if let Err(e) = result {
         let _ = tx.send(Err(e)).await;
@@ -395,7 +470,6 @@ async fn process_file_inner(
     semaphore: Arc<Semaphore>,
     tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) -> Result<(), iceberg::Error> {
-    STATS.track_task_start();
 
     // ── Phase 1: Reader setup ───────────────────────────────────────────
     // Builds a per-file ArrowReader using the same iceberg-rs code path as
