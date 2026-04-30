@@ -57,7 +57,7 @@ using Test
         println("✅ Empty transaction committed successfully")
 
         # Free the updated table
-        RustyIceberg.free_table(updated_table)
+        RustyIceberg.free_table!(updated_table)
         println("✅ Updated table freed successfully")
 
     finally
@@ -67,7 +67,7 @@ using Test
             println("✅ Transaction cleaned up")
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
             println("✅ Table cleaned up")
         end
         if catalog !== nothing
@@ -115,7 +115,7 @@ end
         tx = RustyIceberg.Transaction(table)
         updated_table = RustyIceberg.commit(tx, catalog)
         @test updated_table != C_NULL
-        RustyIceberg.free_table(updated_table)
+        RustyIceberg.free_table!(updated_table)
 
         # Transaction is consumed after commit, second commit should fail
         error_caught = false
@@ -133,7 +133,7 @@ end
             RustyIceberg.free_transaction!(tx)
         end
         if table != C_NULL
-            RustyIceberg.free_table(table)
+            RustyIceberg.free_table!(table)
         end
         if catalog !== nothing
             RustyIceberg.free_catalog!(catalog)

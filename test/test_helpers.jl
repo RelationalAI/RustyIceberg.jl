@@ -29,10 +29,10 @@ function read_table_data(table)
             arrow_data_copy = copy(arrow_data)
             push!(all_batches, Arrow.Table(arrow_data_copy))
         end
-        RustyIceberg.free_batch(batch_ptr)
+        RustyIceberg.free_batch!(batch_ptr)
         batch_ptr = RustyIceberg.next_batch(stream)
     end
-    RustyIceberg.free_stream(stream)
+    RustyIceberg.free_stream!(stream)
     RustyIceberg.free_scan!(scan)
 
     if isempty(all_batches)

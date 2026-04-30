@@ -1,86 +1,158 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
+use std::time::Instant;
 
-use iceberg::scan::{TableScan, TableScanBuilder};
+use futures::{stream, StreamExt};
+use iceberg::arrow::ArrowReaderBuilder;
+use iceberg::io::FileIO;
+use iceberg::scan::TableScan;
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::scan_common::*;
-use crate::{IcebergArrowStream, IcebergArrowStreamResponse, IcebergTable};
+use crate::{
+    IcebergArrowReaderContext, IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanTask,
+    IcebergFileScanTaskStream, IcebergFileScanTaskStreamResponse, IcebergNextFileScanTaskResponse,
+    IcebergNextWarmFileScanResponse, IcebergTable, IcebergWarmFileScan, IcebergWarmFileScanStream,
+    IcebergWarmFileScanStreamResponse,
+};
 
-/// Struct for regular (full) scan builder and scan
+const SNAPSHOT_ID_NONE: i64 = -1;
+
+/// Struct for a built full table scan.
 #[repr(C)]
 pub struct IcebergScan {
-    pub builder: Option<TableScanBuilder<'static>>,
-    pub scan: Option<TableScan>,
+    pub scan: TableScan,
+    pub file_io: FileIO,
     /// 0 = auto-detect (num_cpus)
     pub serialization_concurrency: usize,
+    /// stored separately so create_reader can use it; 0 = use reader default
+    pub data_file_concurrency_limit: usize,
+    /// stored separately so create_reader can use it; 0 = no override
+    pub batch_size: usize,
+    /// File scan task prefetch depth for plan_files; 0 = DEFAULT_TASK_PREFETCH_DEPTH
+    pub task_prefetch_depth: usize,
 }
 
 unsafe impl Send for IcebergScan {}
 
-/// Create a new scan builder
+/// Create and build a new scan.
+///
+/// Numeric parameters use -1 as "not set / use default" sentinel.
+/// Returns NULL on any error (invalid table, failed build, bad column names, etc.)
 #[no_mangle]
-pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan {
+pub extern "C" fn iceberg_new_scan(
+    table: *mut IcebergTable,
+    column_names: *const *const c_char, // NULL = all columns
+    column_names_len: usize,
+    data_file_concurrency_limit: i64,      // -1 = use reader default
+    manifest_file_concurrency_limit: i64,  // -1 = don't set
+    manifest_entry_concurrency_limit: i64, // -1 = don't set
+    batch_size: i64,                       // -1 = no override
+    file_column: u8,                       // 0 = no, non-zero = yes
+    pos_column: u8,
+    serialization_concurrency: i64, // -1 = auto-detect
+    snapshot_id: i64,               // -1 = current (SNAPSHOT_ID_NONE)
+    task_prefetch_depth: i64,       // -1 = use DEFAULT_TASK_PREFETCH_DEPTH
+) -> *mut IcebergScan {
     if table.is_null() {
         return ptr::null_mut();
     }
     let table_ref = unsafe { &*table };
-    let scan_builder = table_ref.table.scan();
+    let file_io = table_ref.table.file_io().clone();
+    let mut builder = table_ref.table.scan();
+
+    // Apply column selection
+    if !column_names.is_null() && column_names_len > 0 {
+        let mut columns = Vec::new();
+        for i in 0..column_names_len {
+            let col_ptr = unsafe { *column_names.add(i) };
+            if col_ptr.is_null() {
+                return ptr::null_mut();
+            }
+            let col_str = unsafe {
+                match CStr::from_ptr(col_ptr).to_str() {
+                    Ok(s) => s,
+                    Err(_) => return ptr::null_mut(),
+                }
+            };
+            columns.push(col_str.to_string());
+        }
+        builder = builder.select(columns);
+    }
+
+    // Apply builder methods
+    if manifest_file_concurrency_limit >= 0 {
+        builder =
+            builder.with_manifest_file_concurrency_limit(manifest_file_concurrency_limit as usize);
+    }
+    if manifest_entry_concurrency_limit >= 0 {
+        builder = builder
+            .with_manifest_entry_concurrency_limit(manifest_entry_concurrency_limit as usize);
+    }
+    if batch_size >= 0 {
+        builder = builder.with_batch_size(Some(batch_size as usize));
+    }
+    if file_column != 0 {
+        builder = builder.with_file_column();
+    }
+    if pos_column != 0 {
+        builder = builder.with_pos_column();
+    }
+    if snapshot_id != SNAPSHOT_ID_NONE {
+        builder = builder.snapshot_id(snapshot_id);
+    }
+    if data_file_concurrency_limit >= 0 {
+        builder = builder.with_data_file_concurrency_limit(data_file_concurrency_limit as usize);
+    }
+
+    let scan = match builder.build() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    let resolved_serialization_concurrency = if serialization_concurrency < 0 {
+        0
+    } else {
+        serialization_concurrency as usize
+    };
+    let resolved_data_file_concurrency = if data_file_concurrency_limit < 0 {
+        0
+    } else {
+        data_file_concurrency_limit as usize
+    };
+    let resolved_batch_size = if batch_size < 0 {
+        0
+    } else {
+        batch_size as usize
+    };
+    let resolved_task_prefetch_depth = if task_prefetch_depth < 0 {
+        0
+    } else {
+        task_prefetch_depth as usize
+    };
+    tracing::info!(
+        data_file_concurrency = resolved_data_file_concurrency,
+        manifest_file_concurrency = manifest_file_concurrency_limit,
+        manifest_entry_concurrency = manifest_entry_concurrency_limit,
+        batch_size = resolved_batch_size,
+        serialization_concurrency = resolved_serialization_concurrency,
+        task_prefetch_depth = resolved_task_prefetch_depth,
+        "iceberg_new_scan"
+    );
     Box::into_raw(Box::new(IcebergScan {
-        builder: Some(scan_builder),
-        scan: None,
-        serialization_concurrency: 0,
+        scan,
+        file_io,
+        serialization_concurrency: resolved_serialization_concurrency,
+        data_file_concurrency_limit: resolved_data_file_concurrency,
+        batch_size: resolved_batch_size,
+        task_prefetch_depth: resolved_task_prefetch_depth,
     }))
 }
 
-// Use macros from scan_common for shared functionality
-impl_select_columns!(iceberg_select_columns, IcebergScan);
-
-impl_scan_builder_method!(
-    iceberg_scan_with_data_file_concurrency_limit,
-    IcebergScan,
-    with_data_file_concurrency_limit,
-    n: usize
-);
-
-impl_scan_builder_method!(
-    iceberg_scan_with_manifest_file_concurrency_limit,
-    IcebergScan,
-    with_manifest_file_concurrency_limit,
-    n: usize
-);
-
-impl_scan_builder_method!(
-    iceberg_scan_with_manifest_entry_concurrency_limit,
-    IcebergScan,
-    with_manifest_entry_concurrency_limit,
-    n: usize
-);
-
-impl_with_batch_size!(iceberg_scan_with_batch_size, IcebergScan);
-
-impl_scan_builder_method!(iceberg_scan_with_file_column, IcebergScan, with_file_column);
-
-impl_scan_builder_method!(iceberg_scan_with_pos_column, IcebergScan, with_pos_column);
-
-impl_scan_build!(iceberg_scan_build, IcebergScan);
-
-impl_with_serialization_concurrency_limit!(
-    iceberg_scan_with_serialization_concurrency_limit,
-    IcebergScan
-);
-
-impl_scan_builder_method!(
-    iceberg_scan_with_snapshot_id,
-    IcebergScan,
-    snapshot_id,
-    snapshot_id: i64
-);
-
-// Async function to initialize stream from a table scan
+// Async: get a single Arrow stream for the entire scan (non-split API)
 export_runtime_op!(
     iceberg_arrow_stream,
     IcebergArrowStreamResponse,
@@ -89,10 +161,6 @@ export_runtime_op!(
             return Err(anyhow::anyhow!("Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &*scan };
-        let scan_ref = &scan_ptr.scan;
-        if scan_ref.is_none() {
-            return Err(anyhow::anyhow!("Scan not initialized"));
-        }
 
         // Determine concurrency (0 = auto-detect)
         let serialization_concurrency = scan_ptr.serialization_concurrency;
@@ -104,7 +172,7 @@ export_runtime_op!(
             serialization_concurrency
         };
 
-        Ok((scan_ref.as_ref().unwrap(), serialization_concurrency))
+        Ok((&scan_ptr.scan, serialization_concurrency))
     },
     result_tuple,
     async {
@@ -126,3 +194,335 @@ export_runtime_op!(
 );
 
 impl_scan_free!(iceberg_scan_free, IcebergScan);
+
+// ---------------------------------------------------------------------------
+// Split-scan API: plan_files → create_reader → next_file → read_file_scan
+// ---------------------------------------------------------------------------
+
+// Async: plan which files to read. Returns a concurrent-safe task stream.
+export_runtime_op!(
+    iceberg_plan_files,
+    IcebergFileScanTaskStreamResponse,
+    || {
+        if scan.is_null() {
+            return Err(anyhow::anyhow!("Null scan pointer provided"));
+        }
+        let scan_ptr = unsafe { &*scan };
+        let task_prefetch_depth = if scan_ptr.task_prefetch_depth == 0 {
+            crate::table::DEFAULT_TASK_PREFETCH_DEPTH
+        } else {
+            scan_ptr.task_prefetch_depth
+        };
+        Ok((&scan_ptr.scan, task_prefetch_depth))
+    },
+    result_tuple,
+    async {
+        let (scan_ref, task_prefetch_depth) = result_tuple;
+        let stream = scan_ref.plan_files().await?;
+        Ok::<IcebergFileScanTaskStream, anyhow::Error>(
+            IcebergFileScanTaskStream::new(stream, task_prefetch_depth)
+        )
+    },
+    scan: *mut IcebergScan
+);
+
+/// Sync: create a shared ArrowReader context from the scan's configuration.
+/// Pass the returned context to every read_file_scan call.
+/// `reader_concurrency` overrides the scan-level data_file_concurrency_limit when > 0.
+#[no_mangle]
+pub extern "C" fn iceberg_create_reader(
+    scan: *mut IcebergScan,
+    reader_concurrency: usize,
+    batch_prefetch_depth: usize,
+) -> *mut IcebergArrowReaderContext {
+    if scan.is_null() {
+        return ptr::null_mut();
+    }
+    let scan_ptr = unsafe { &*scan };
+
+    let mut builder = ArrowReaderBuilder::new(scan_ptr.file_io.clone())
+        .with_row_group_filtering_enabled(false)
+        .with_row_selection_enabled(false);
+
+    let data_file_concurrency = if reader_concurrency > 0 {
+        reader_concurrency
+    } else {
+        scan_ptr.data_file_concurrency_limit
+    };
+    if data_file_concurrency > 0 {
+        builder = builder.with_data_file_concurrency_limit(data_file_concurrency);
+    }
+    if scan_ptr.batch_size > 0 {
+        builder = builder.with_batch_size(scan_ptr.batch_size);
+    }
+
+    let serialization_concurrency = if scan_ptr.serialization_concurrency == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        scan_ptr.serialization_concurrency
+    };
+
+    let batch_size = if scan_ptr.batch_size > 0 {
+        Some(scan_ptr.batch_size)
+    } else {
+        None
+    };
+
+    let batch_prefetch_depth = if batch_prefetch_depth == 0 {
+        4
+    } else {
+        batch_prefetch_depth
+    };
+    Box::into_raw(Box::new(IcebergArrowReaderContext {
+        reader: builder.build(),
+        serialization_concurrency,
+        batch_size,
+        batch_prefetch_depth,
+    }))
+}
+
+// Async: pull the next file scan task. Returns null payload at end-of-stream.
+export_runtime_op!(
+    iceberg_next_file_scan_task,
+    IcebergNextFileScanTaskResponse,
+    || {
+        if task_stream.is_null() {
+            return Err(anyhow::anyhow!("Null task stream pointer"));
+        }
+        let stream_ref = unsafe { &*task_stream };
+        Ok(stream_ref)
+    },
+    stream_ref,
+    async {
+        stream_ref.next().await
+    },
+    task_stream: *mut IcebergFileScanTaskStream
+);
+
+// Async: read a single file scan task into an Arrow stream.
+// Clones the ArrowReader (cheap — shares delete-file cache via Arc).
+// Consumes the task — caller must NOT call free_file_scan after this.
+export_runtime_op!(
+    iceberg_read_file_scan_task,
+    IcebergArrowStreamResponse,
+    || {
+        if reader_ctx.is_null() {
+            return Err(anyhow::anyhow!("Null reader context pointer"));
+        }
+        if task.is_null() {
+            return Err(anyhow::anyhow!("Null task pointer"));
+        }
+        let ctx = unsafe { &*reader_ctx };
+        let reader = ctx.reader.clone();
+        let serialization_concurrency = ctx.serialization_concurrency;
+        let batch_prefetch_depth = ctx.batch_prefetch_depth;
+        let task_ref = unsafe { Box::from_raw(task) };
+        let file_scan_task = task_ref.task;
+        Ok((reader, serialization_concurrency, batch_prefetch_depth, file_scan_task))
+    },
+    result_tuple,
+    async {
+        let (reader, serialization_concurrency, batch_prefetch_depth, file_scan_task) = result_tuple;
+
+        // Wrap the single task in a one-element stream, as reader.read() takes a FileScanTaskStream as input
+        let task_stream = stream::once(async { Ok(file_scan_task) }).boxed();
+        let record_batch_stream = reader.read(task_stream)?;
+        let serialized_stream = crate::transform_stream_with_parallel_serialization(
+            record_batch_stream,
+            serialization_concurrency,
+        );
+
+        // Eagerly drain into a bounded channel so batches are prefetched while
+        // Julia processes the previous one. The background task runs independently
+        // of Julia's next_batch calls.
+        crate::table::SPLIT_SCAN_STATS
+            .files_opened
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::mpsc::channel(batch_prefetch_depth);
+        tokio::spawn(async move {
+            futures::pin_mut!(serialized_stream);
+            let mut fetch_start = Instant::now();
+            while let Some(item) = serialized_stream.next().await {
+                let fetch_ns = fetch_start.elapsed().as_nanos() as u64;
+                crate::table::SPLIT_SCAN_STATS
+                    .fetch_serialize_ns
+                    .fetch_add(fetch_ns, std::sync::atomic::Ordering::Relaxed);
+
+                if let Ok(ref batch) = item {
+                    crate::table::SPLIT_SCAN_STATS
+                        .batches_produced
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    crate::table::SPLIT_SCAN_STATS
+                        .bytes_produced
+                        .fetch_add(batch.length as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                let send_start = Instant::now();
+                if tx.send(item).await.is_err() {
+                    break; // Julia dropped the stream
+                }
+                crate::table::SPLIT_SCAN_STATS
+                    .channel_backpressure_ns
+                    .fetch_add(send_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+
+                fetch_start = Instant::now();
+            }
+        });
+        let stream = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })
+        .boxed();
+        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
+            stream: AsyncMutex::new(stream),
+        })
+    },
+    reader_ctx: *mut IcebergArrowReaderContext,
+    task: *mut IcebergFileScanTask
+);
+
+/// Returns the record count for a file scan task, or -1 if not available.
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_task_record_count(task: *const IcebergFileScanTask) -> i64 {
+    if task.is_null() {
+        return -1;
+    }
+    let task_ref = unsafe { &*task };
+    task_ref.task.record_count.map_or(-1, |n| n as i64)
+}
+
+/// Returns the data file path for a file scan task as an allocated C string.
+/// Caller must free with `iceberg_destroy_cstring`.
+#[no_mangle]
+pub extern "C" fn iceberg_file_scan_task_file_path(
+    task: *const IcebergFileScanTask,
+) -> *mut std::ffi::c_char {
+    if task.is_null() {
+        return std::ptr::null_mut();
+    }
+    let task_ref = unsafe { &*task };
+    match std::ffi::CString::new(task_ref.task.data_file_path.as_str()) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Warm file stream API: plan_files_warm → next_warm_file → read_warm_file
+// ---------------------------------------------------------------------------
+
+// Async: plan files and start batch-prefetch streams concurrently.
+// Returns a stream of IcebergWarmFileScan items in manifest order,
+// each with its batch channel already running.
+export_runtime_op!(
+    iceberg_plan_files_warm,
+    IcebergWarmFileScanStreamResponse,
+    || {
+        if scan.is_null() {
+            return Err(anyhow::anyhow!("Null scan pointer"));
+        }
+        if reader_ctx.is_null() {
+            return Err(anyhow::anyhow!("Null reader context pointer"));
+        }
+        let scan_ptr = unsafe { &*scan };
+        let ctx = unsafe { &*reader_ctx };
+        let task_prefetch_depth = if scan_ptr.task_prefetch_depth == 0 {
+            crate::table::DEFAULT_TASK_PREFETCH_DEPTH
+        } else {
+            scan_ptr.task_prefetch_depth
+        };
+        let reader = ctx.reader.clone();
+        let batch_prefetch_depth = ctx.batch_prefetch_depth;
+        Ok((&scan_ptr.scan, task_prefetch_depth, reader, batch_prefetch_depth))
+    },
+    result_tuple,
+    async {
+        let (scan_ref, task_prefetch_depth, reader, batch_prefetch_depth) = result_tuple;
+        let task_stream = scan_ref.plan_files().await?;
+        let (outer_tx, outer_rx) =
+            mpsc::channel::<Result<IcebergWarmFileScan, anyhow::Error>>(task_prefetch_depth);
+        let handle = tokio::spawn(crate::warm_file_stream::run_warm(
+            task_stream,
+            reader,
+            task_prefetch_depth,
+            batch_prefetch_depth,
+            outer_tx,
+        ));
+        Ok::<IcebergWarmFileScanStream, anyhow::Error>(IcebergWarmFileScanStream {
+            receiver: tokio::sync::Mutex::new(outer_rx),
+            producer_handle: tokio::sync::Mutex::new(Some(handle)),
+        })
+    },
+    scan: *mut IcebergScan,
+    reader_ctx: *mut IcebergArrowReaderContext
+);
+
+// Async: pull the next warm file. Returns null value at end-of-stream.
+export_runtime_op!(
+    iceberg_next_warm_file,
+    IcebergNextWarmFileScanResponse,
+    || {
+        if stream.is_null() {
+            return Err(anyhow::anyhow!("Null warm file stream pointer"));
+        }
+        let stream_ref = unsafe { &*stream };
+        Ok(stream_ref)
+    },
+    stream_ref,
+    async { stream_ref.next().await },
+    stream: *mut IcebergWarmFileScanStream
+);
+
+/// Extract (and take ownership of) the Arrow stream from a warm file handle.
+/// Consumes the stream slot — caller must NOT call this twice on the same handle.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_take_stream(
+    file: *mut IcebergWarmFileScan,
+) -> *mut crate::table::IcebergArrowStream {
+    if file.is_null() {
+        return ptr::null_mut();
+    }
+    let file_ref = unsafe { &mut *file };
+    let empty = IcebergArrowStream {
+        stream: tokio::sync::Mutex::new(futures::stream::empty().boxed()),
+    };
+    let stream = std::mem::replace(&mut file_ref.stream, empty);
+    Box::into_raw(Box::new(stream))
+}
+
+/// Record count for a warm file handle. Returns -1 if not available.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_record_count(file: *const IcebergWarmFileScan) -> i64 {
+    if file.is_null() {
+        return -1;
+    }
+    unsafe { &*file }.record_count.map_or(-1, |n| n as i64)
+}
+
+/// File path for a warm file handle. Caller must free with `iceberg_destroy_cstring`.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_path(
+    file: *const IcebergWarmFileScan,
+) -> *mut std::ffi::c_char {
+    if file.is_null() {
+        return ptr::null_mut();
+    }
+    unsafe { &*file }.file_path.clone().into_raw()
+}
+
+/// Free a warm file handle.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_free(file: *mut IcebergWarmFileScan) {
+    if !file.is_null() {
+        drop(unsafe { Box::from_raw(file) });
+    }
+}
+
+/// Free a warm file stream.
+#[no_mangle]
+pub extern "C" fn iceberg_warm_file_stream_free(stream: *mut IcebergWarmFileScanStream) {
+    if !stream.is_null() {
+        drop(unsafe { Box::from_raw(stream) });
+    }
+}

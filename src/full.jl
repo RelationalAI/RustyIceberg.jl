@@ -6,20 +6,17 @@
 A mutable wrapper around a pointer to a regular (full) table scan.
 
 This type enables multiple dispatch and safe memory management for Iceberg table scans.
-Use `new_scan` to create a scan, configure it with builder methods, and call `scan!`
-to build the scan and obtain an Arrow stream.
+Use `new_scan` to create a scan and call `scan!` to build it and obtain an Arrow stream.
 
 # Example
 ```julia
 table = table_open("s3://path/to/table/metadata.json")
-scan = new_scan(table)
-select_columns!(scan, ["col1", "col2"])
-with_batch_size!(scan, UInt(1024))
+scan = new_scan(table; column_names=["col1", "col2"], batch_size=Int64(1024))
 stream = scan!(scan)
 # ... process batches from stream
-free_stream(stream)
+free_stream!(stream)
 free_scan!(scan)
-free_table(table)
+free_table!(table)
 ```
 """
 mutable struct Scan
@@ -27,229 +24,68 @@ mutable struct Scan
 end
 
 """
-    new_scan(table::Table) -> Scan
+    new_scan(table::Table; kwargs...) -> Scan
 
-Create a scan for the given table.
+Create a scan for the given table. All scan parameters are configured via keyword arguments.
+
+# Keyword Arguments
+- `column_names`: columns to read (default: all columns)
+- `data_file_concurrency_limit`: data file concurrency (`-1` = reader default)
+- `manifest_file_concurrency_limit`: manifest file concurrency (`-1` = don't set)
+- `manifest_entry_concurrency_limit`: manifest entry concurrency (`-1` = don't set)
+- `batch_size`: Arrow record batch size (`-1` = no override)
+- `file_column`: include `_file` metadata column (default: `false`)
+- `pos_column`: include `_pos` metadata column (default: `false`)
+- `serialization_concurrency`: parallel batch serializations (`-1` = auto-detect)
+- `snapshot_id`: snapshot ID to scan (`-1` = current snapshot)
+- `task_prefetch_depth`: file scan task prefetch depth (`-1` = use default)
 """
-function new_scan(table::Table)
-    scan_ptr = @ccall rust_lib.iceberg_new_scan(table::Table)::Ptr{Cvoid}
+function new_scan(table::Table;
+    column_names::Union{Vector{String}, Nothing} = nothing,
+    data_file_concurrency_limit::Int64 = Int64(-1),
+    manifest_file_concurrency_limit::Int64 = Int64(-1),
+    manifest_entry_concurrency_limit::Int64 = Int64(-1),
+    batch_size::Int64 = Int64(-1),
+    file_column::Bool = false,
+    pos_column::Bool = false,
+    serialization_concurrency::Int64 = Int64(-1),
+    snapshot_id::Int64 = Int64(-1),
+    task_prefetch_depth::Int64 = Int64(-1),
+)
+    if column_names !== nothing
+        c_strings = [pointer(col) for col in column_names]
+        scan_ptr = GC.@preserve column_names c_strings @ccall rust_lib.iceberg_new_scan(
+            table::Table,
+            pointer(c_strings)::Ptr{Cstring},
+            length(column_names)::Csize_t,
+            data_file_concurrency_limit::Int64,
+            manifest_file_concurrency_limit::Int64,
+            manifest_entry_concurrency_limit::Int64,
+            batch_size::Int64,
+            file_column::Bool,
+            pos_column::Bool,
+            serialization_concurrency::Int64,
+            snapshot_id::Int64,
+            task_prefetch_depth::Int64,
+        )::Ptr{Cvoid}
+    else
+        scan_ptr = @ccall rust_lib.iceberg_new_scan(
+            table::Table,
+            C_NULL::Ptr{Cstring},
+            Csize_t(0)::Csize_t,
+            data_file_concurrency_limit::Int64,
+            manifest_file_concurrency_limit::Int64,
+            manifest_entry_concurrency_limit::Int64,
+            batch_size::Int64,
+            file_column::Bool,
+            pos_column::Bool,
+            serialization_concurrency::Int64,
+            snapshot_id::Int64,
+            task_prefetch_depth::Int64,
+        )::Ptr{Cvoid}
+    end
+    scan_ptr == C_NULL && throw(IcebergException("Failed to create scan"))
     return Scan(scan_ptr)
-end
-
-"""
-    select_columns!(scan::Scan, column_names::Vector{String})
-
-Select specific columns for the scan.
-"""
-function select_columns!(scan::Scan, column_names::Vector{String})
-    # Convert String vector to Cstring array
-    c_strings = [pointer(col) for col in column_names]
-    result = GC.@preserve scan c_strings @ccall rust_lib.iceberg_select_columns(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        pointer(c_strings)::Ptr{Cstring},
-        length(column_names)::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to select columns", result))
-    end
-    return nothing
-end
-
-"""
-    with_data_file_concurrency_limit!(scan::Scan, n::UInt)
-
-Sets the data file concurrency level for the scan.
-"""
-function with_data_file_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_data_file_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set data file concurrency limit", result))
-    end
-    return nothing
-end
-
-"""
-    with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
-
-Sets the manifest file concurrency level for the full scan.
-"""
-function with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_manifest_file_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set manifest file concurrency limit", result))
-    end
-    return nothing
-end
-
-"""
-    with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
-
-Sets the manifest entry concurrency level for the scan.
-"""
-function with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_manifest_entry_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set manifest entry concurrency limit", result))
-    end
-    return nothing
-end
-
-"""
-    with_batch_size!(scan::Scan, n::UInt)
-
-Sets the batch size for the scan.
-"""
-function with_batch_size!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_batch_size(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set batch size", result))
-    end
-    return nothing
-end
-
-"""
-    with_file_column!(scan::Scan)
-
-Add the _file metadata column to the scan.
-
-The _file column contains the file path for each row, which can be useful for
-tracking which data files contain specific rows.
-
-# Example
-```julia
-scan = new_scan(table)
-with_file_column!(scan)
-stream = scan!(scan)
-```
-"""
-function with_file_column!(scan::Scan)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_file_column(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to add file column to scan", result))
-    end
-    return nothing
-end
-
-"""
-    with_pos_column!(scan::Scan)
-
-Add the _pos metadata column to the scan.
-
-The _pos column contains the position of each row within its data file, which can
-be useful for tracking row locations and debugging.
-
-# Example
-```julia
-scan = new_scan(table)
-with_pos_column!(scan)
-stream = scan!(scan)
-```
-"""
-function with_pos_column!(scan::Scan)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_pos_column(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to add pos column to scan", result))
-    end
-    return nothing
-end
-
-"""
-    with_serialization_concurrency_limit!(scan::Scan, n::UInt)
-
-Set the serialization concurrency limit for the scan.
-
-This controls how many RecordBatch serializations can happen in parallel.
-- `n = 0`: Auto-detect based on CPU cores (default)
-- `n > 0`: Use exactly n concurrent serializations
-
-Higher values improve throughput for scans with many batches, but use more memory.
-
-# Example
-```julia
-scan = new_scan(table)
-with_serialization_concurrency_limit!(scan, UInt(8))  # Serialize up to 8 batches in parallel
-stream = scan!(scan)
-```
-"""
-function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_serialization_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set serialization concurrency limit", result))
-    end
-    return nothing
-end
-
-"""
-    with_snapshot_id!(scan::Scan, snapshot_id::Int64)
-
-Set the snapshot ID for the scan.
-
-By default, a scan uses the current (latest) snapshot of the table. This method allows
-you to scan a specific snapshot by ID, which is useful for reading historical data or
-comparing data across different points in time.
-
-# Example
-```julia
-table = table_open("s3://path/to/table/metadata.json")
-# List available snapshots (if method is available)
-scan = new_scan(table)
-with_snapshot_id!(scan, Int64(123))  # Scan snapshot with ID 123
-stream = scan!(scan)
-```
-"""
-function with_snapshot_id!(scan::Scan, snapshot_id::Int64)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_snapshot_id(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        snapshot_id::Int64
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set snapshot ID", result))
-    end
-    return nothing
-end
-
-"""
-    build!(scan::Scan)
-
-Build the provided table scan object.
-"""
-function build!(scan::Scan)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_build(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to build scan", result))
-    end
-    return nothing
 end
 
 # Type alias using generic Response{T}
@@ -280,10 +116,9 @@ end
 """
     scan!(scan::Scan) -> ArrowStream
 
-Build the provided table scan object and return an Arrow stream.
+Execute the scan and return an Arrow stream.
 """
 function scan!(scan::Scan)
-    build!(scan)
     return arrow_stream(scan)
 end
 
@@ -296,4 +131,317 @@ function free_scan!(scan::Scan)
     GC.@preserve scan @ccall rust_lib.iceberg_scan_free(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cvoid
+end
+
+# ---------------------------------------------------------------------------
+# Split-scan API
+#
+# Usage:
+#   reader = create_reader(scan)
+#   file_stream = plan_files(scan)
+#   while (fs = next_file!(file_stream)) !== nothing
+#       stream = read_file_scan!(reader, fs)   # consumes fs
+#       while (bp = next_batch(stream)) != C_NULL
+#           # ... process batch ...
+#           free_batch!(bp)
+#       end
+#       free_stream!(stream)
+#   end
+#   free_file_stream!(file_stream)
+#   free_reader!(reader)
+# ---------------------------------------------------------------------------
+
+"""Opaque pointer to a stream of FileScanTasks."""
+mutable struct FileScanStream
+    ptr::Ptr{Cvoid}
+end
+
+"""Shared ArrowReader context — pass to every read_file_scan! call."""
+mutable struct ArrowReaderContext
+    ptr::Ptr{Cvoid}
+end
+
+"""Handle to a single file scan task returned by next_file!."""
+mutable struct FileScanHandle
+    ptr::Ptr{Cvoid}
+end
+
+
+"""
+    plan_files(scan::Scan)::FileScanStream
+
+Plan which files to read. Returns a concurrent-safe task stream.
+The scan must be built first via `build!`.
+"""
+function plan_files(scan::Scan)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_plan_files(
+            scan.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_plan_files", IcebergException)
+    return FileScanStream(response.value)
+end
+
+"""
+    create_reader(scan::Scan; reader_concurrency::UInt=UInt(0), batch_prefetch_depth::UInt=UInt(0))::ArrowReaderContext
+
+Create a shared reader context from the scan's configuration.
+Pass this to every `read_file_scan!` call.
+`reader_concurrency` overrides the scan-level data_file_concurrency_limit when > 0.
+`batch_prefetch_depth` sets the per-file batch prefetch queue depth (0 = default of 4).
+"""
+function create_reader(scan::Scan; reader_concurrency::UInt=UInt(0), batch_prefetch_depth::UInt=UInt(0))
+    ptr = @ccall rust_lib.iceberg_create_reader(
+        scan.ptr::Ptr{Cvoid},
+        reader_concurrency::Csize_t,
+        batch_prefetch_depth::Csize_t
+    )::Ptr{Cvoid}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to create reader from scan"))
+    end
+    return ArrowReaderContext(ptr)
+end
+
+"""
+    next_file!(stream::FileScanStream)::Union{FileScanHandle, Nothing}
+
+Pull the next file scan from the stream. Returns `nothing` at end-of-stream.
+"""
+function next_file!(stream::FileScanStream)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_file_scan_task(
+            stream.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_next_file_scan_task", IcebergException)
+    return response.value == C_NULL ? nothing : FileScanHandle(response.value)
+end
+
+"""
+    read_file_scan!(reader::ArrowReaderContext, fs::FileScanHandle)::ArrowStream
+
+Read a single file scan into an Arrow stream. **Consumes `fs`** — do not call
+`free_file_scan` afterwards.
+"""
+function read_file!(reader::ArrowReaderContext, fs::FileScanHandle)
+    response = ArrowStreamResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_read_file_scan_task(
+            reader.ptr::Ptr{Cvoid},
+            fs.ptr::Ptr{Cvoid},
+            response::Ref{ArrowStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_read_file_scan_task", IcebergException)
+    return response.value
+end
+
+"""
+    record_count(fs::FileScanHandle)::Union{Int64, Nothing}
+
+Return the record count for this file scan, or `nothing` if not available.
+"""
+function record_count(fs::FileScanHandle)
+    count = @ccall rust_lib.iceberg_file_scan_task_record_count(
+        fs.ptr::Ptr{Cvoid}
+    )::Int64
+    return count == -1 ? nothing : count
+end
+
+"""
+    file_path(fs::FileScanHandle)::String
+
+Return the data file path for this file scan task.
+"""
+function file_path(fs::FileScanHandle)
+    ptr = @ccall rust_lib.iceberg_file_scan_task_file_path(
+        fs.ptr::Ptr{Cvoid}
+    )::Ptr{Cchar}
+    ptr == C_NULL && throw(IcebergException("Failed to get file path"))
+    path = unsafe_string(ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
+    return path
+end
+
+"""
+    file_metadata(scan::Scan) -> Vector{NamedTuple{(:path, :record_count), Tuple{String, Union{Int64, Nothing}}}}
+
+Return all file paths and record counts for a scan by draining the plan_files stream.
+No data files are opened. The returned record counts come from manifest metadata and
+may be `nothing` for delete files or partial scans.
+"""
+function file_metadata(scan::Scan)
+    stream = plan_files(scan)
+    result = NamedTuple{(:path, :record_count), Tuple{String, Union{Int64, Nothing}}}[]
+    try
+        while true
+            handle = next_file!(stream)
+            handle === nothing && break
+            push!(result, (path=file_path(handle), record_count=record_count(handle)))
+            free_file!(handle)
+        end
+    finally
+        free_file_stream!(stream)
+    end
+    return result
+end
+
+"""Free a file scan stream (from plan_files)."""
+function free_file_stream!(stream::FileScanStream)
+    @ccall rust_lib.iceberg_file_scan_task_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
+end
+
+"""Free an ArrowReaderContext (from create_reader)."""
+function free_reader!(reader::ArrowReaderContext)
+    @ccall rust_lib.iceberg_arrow_reader_context_free(reader.ptr::Ptr{Cvoid})::Cvoid
+end
+
+"""
+Free a FileScanHandle. Only call this if the handle was NOT passed to read_file_scan!,
+since read_file_scan! consumes the handle.
+"""
+function free_file!(fs::FileScanHandle)
+    @ccall rust_lib.iceberg_file_scan_task_free(fs.ptr::Ptr{Cvoid})::Cvoid
+end
+
+# ---------------------------------------------------------------------------
+# Warm file stream API
+#
+# plan_files_warm → next_file! → read_file! → next_batch / free_batch!
+#
+# Up to task_prefetch_depth files are read concurrently in background Tokio
+# tasks. Julia receives them in manifest order via next_file!, each with its
+# batch channel already running. Per-file memory is capped at 100 MB via a
+# semaphore released as batches are drained.
+#
+# Usage:
+#   stream = plan_files_warm(scan, reader)
+#   while (f = next_file!(stream)) !== nothing
+#       path  = file_path(f)
+#       count = record_count(f)
+#       bstream = read_file!(f)       # takes stream ownership
+#       while (bp = next_batch(bstream)) != C_NULL
+#           # process batch
+#           free_batch!(bp)
+#       end
+#       free_stream!(bstream)
+#       free_warm_file!(f)
+#   end
+#   free_warm_file_stream!(stream)
+# ---------------------------------------------------------------------------
+
+"""Opaque handle to a warm file stream (plan_files_warm result)."""
+mutable struct WarmFileScanStream
+    ptr::Ptr{Cvoid}
+end
+
+"""Handle to one warm file — metadata + already-running batch stream."""
+mutable struct WarmFileScanHandle
+    ptr::Ptr{Cvoid}
+end
+
+"""
+    plan_files_warm(scan::Scan, reader::ArrowReaderContext) -> WarmFileScanStream
+
+Plan files and start batch-prefetch streams for up to `task_prefetch_depth`
+files concurrently. Returns a stream of warm file handles in manifest order.
+"""
+function plan_files_warm(scan::Scan, reader::ArrowReaderContext)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_plan_files_warm(
+            scan.ptr::Ptr{Cvoid},
+            reader.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_plan_files_warm", IcebergException)
+    return WarmFileScanStream(response.value)
+end
+
+"""
+    next_file!(stream::WarmFileScanStream) -> Union{WarmFileScanHandle, Nothing}
+
+Pull the next warm file in manifest order. Returns `nothing` at end-of-stream.
+"""
+function next_file!(stream::WarmFileScanStream)
+    response = OpaqueResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_warm_file(
+            stream.ptr::Ptr{Cvoid},
+            response::Ref{OpaqueResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "iceberg_next_warm_file", IcebergException)
+    return response.value == C_NULL ? nothing : WarmFileScanHandle(response.value)
+end
+
+"""
+    read_file!(f::WarmFileScanHandle) -> ArrowStream
+
+Extract the already-running batch stream. Consumes the stream slot — call once per handle.
+"""
+function read_file!(f::WarmFileScanHandle)
+    ptr = @ccall rust_lib.iceberg_warm_file_take_stream(f.ptr::Ptr{Cvoid})::Ptr{Cvoid}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to extract stream from warm file handle"))
+    end
+    return ArrowStream(ptr)
+end
+
+"""Record count for a warm file handle. Returns `nothing` if not available."""
+function record_count(f::WarmFileScanHandle)
+    n = @ccall rust_lib.iceberg_warm_file_record_count(f.ptr::Ptr{Cvoid})::Int64
+    return n == -1 ? nothing : n
+end
+
+"""File path for a warm file handle."""
+function file_path(f::WarmFileScanHandle)
+    ptr = @ccall rust_lib.iceberg_warm_file_path(f.ptr::Ptr{Cvoid})::Ptr{Cchar}
+    if ptr == C_NULL
+        throw(IcebergException("Failed to get file path from warm file handle"))
+    end
+    path = unsafe_string(ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cvoid
+    return path
+end
+
+"""Free a warm file handle (drops metadata and any unconsumed batch stream)."""
+function free_warm_file!(f::WarmFileScanHandle)
+    @ccall rust_lib.iceberg_warm_file_free(f.ptr::Ptr{Cvoid})::Cvoid
+end
+
+"""Free a warm file stream."""
+function free_warm_file_stream!(stream::WarmFileScanStream)
+    @ccall rust_lib.iceberg_warm_file_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
+end
+
+"""Print warm-scan performance stats to stdout."""
+function print_warm_scan_stats()
+    @ccall rust_lib.iceberg_print_warm_scan_stats()::Cvoid
+end
+
+"""Reset warm-scan performance counters."""
+function reset_warm_scan_stats!()
+    @ccall rust_lib.iceberg_reset_warm_scan_stats()::Cvoid
+end
+
+"""Print a performance summary for the split-scan path to stdout."""
+function print_split_scan_stats()
+    @ccall rust_lib.iceberg_print_split_scan_stats()::Cvoid
+end
+
+"""Reset all split-scan performance counters."""
+function reset_split_scan_stats!()
+    @ccall rust_lib.iceberg_reset_split_scan_stats()::Cvoid
 end
