@@ -20,6 +20,7 @@ export scan!, next_batch, free_batch, free_stream
 export scan_nested!, nested_arrow_stream, next_file_scan
 export FileScanStream, file_scan_record_count, file_scan_filename, file_scan_arrow_stream
 export free_file_scan!, free_file_scan_stream!
+export print_pipeline_stats, reset_pipeline_stats
 export FILE_COLUMN, POS_COLUMN
 export Catalog, catalog_create_rest, free_catalog
 export load_table, list_tables, list_namespaces, table_exists, create_table, drop_table, drop_namespace, create_namespace
