@@ -364,8 +364,8 @@ fn submit_batch(
     }
 }
 
-/// Shared core for write functions: validates column count, builds a `RecordBatch`, and
-/// submits it to the encode pool.
+/// Validates column count, builds a `RecordBatch` from pre-built gathered descriptors,
+/// and submits it to the encode pool.
 unsafe fn write_gathered_inner<I>(
     writer_ref: &IcebergDataFileWriter,
     pool: &GlobalWorkerPool,
@@ -385,6 +385,49 @@ where
         ));
     }
     let batch = unsafe { build_record_batch(arrow_schema, col_descs) }?;
+    submit_batch(writer_ref, pool, batch)
+}
+
+/// Validates column count, builds a `RecordBatch` from flat `ColumnDescriptor`s (each
+/// treated as a single sequential slice), and submits it to the encode pool.
+///
+/// Each `SliceRef` is constructed on the stack and used within the same loop iteration,
+/// so no heap allocation is needed for the descriptor conversion.
+unsafe fn write_columns_inner(
+    writer_ref: &IcebergDataFileWriter,
+    pool: &GlobalWorkerPool,
+    arrow_schema: ArrowSchemaRef,
+    col_descs: &[ColumnDescriptor],
+) -> Result<(), anyhow::Error> {
+    if col_descs.len() != arrow_schema.fields().len() {
+        return Err(anyhow::anyhow!(
+            "Column count mismatch: got {} but schema has {}",
+            col_descs.len(),
+            arrow_schema.fields().len()
+        ));
+    }
+    let mut arrays = Vec::with_capacity(col_descs.len());
+    for (i, d) in col_descs.iter().enumerate() {
+        // SliceRef lives on the stack for exactly this iteration; the raw pointer
+        // is consumed by build_arrow_array_gathered before the next iteration begins.
+        let slice = SliceRef {
+            data_ptr: d.data_ptr,
+            lengths_ptr: d.lengths_ptr,
+            validity_ptr: d.validity_ptr,
+            sel_ptr: std::ptr::null(),
+            len: d.num_rows,
+        };
+        let desc = GatheredColumnDescriptor {
+            slices: &slice as *const SliceRef,
+            num_slices: 1,
+            total_rows: d.num_rows,
+            column_type: d.column_type,
+            is_nullable: d.is_nullable,
+        };
+        arrays.push(unsafe { build_arrow_array_gathered(&desc, arrow_schema.field(i))? });
+    }
+    let batch = RecordBatch::try_new(arrow_schema, arrays)
+        .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))?;
     submit_batch(writer_ref, pool, batch)
 }
 
@@ -457,33 +500,7 @@ pub extern "C" fn iceberg_writer_write_columns(
     };
     let arrow_schema = writer_ref.arrow_schema.clone();
     let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
-    // Wrap each ColumnDescriptor as a single-slice GatheredColumnDescriptor.
-    // Sequential access (sel_ptr = null) so data[0..num_rows] is read in order.
-    // `slices` must outlive `gathered` since GatheredColumnDescriptor.slices is a raw
-    // pointer into this Vec's allocation.
-    let slices: Vec<SliceRef> = col_descs
-        .iter()
-        .map(|d| SliceRef {
-            data_ptr: d.data_ptr,
-            lengths_ptr: d.lengths_ptr,
-            validity_ptr: d.validity_ptr,
-            sel_ptr: std::ptr::null(),
-            len: d.num_rows,
-        })
-        .collect();
-    let gathered = col_descs
-        .iter()
-        .zip(slices.iter())
-        .map(|(d, s)| GatheredColumnDescriptor {
-            slices: s as *const SliceRef,
-            num_slices: 1,
-            total_rows: d.num_rows,
-            column_type: d.column_type,
-            is_nullable: d.is_nullable,
-        });
-    if let Err(e) =
-        unsafe { write_gathered_inner(writer_ref, pool, arrow_schema, num_columns, gathered) }
-    {
+    if let Err(e) = unsafe { write_columns_inner(writer_ref, pool, arrow_schema, col_descs) } {
         store_writer_error(writer_ref, e);
         return -1;
     }
