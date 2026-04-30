@@ -1146,6 +1146,16 @@ function write_columns(
             length(descriptors)::Csize_t,
         )::Int32
     end
-    ret == 0 || throw(IcebergException("write_columns (gathered): gather failed (see writer close for details)"))
+    if ret != 0
+        err_ptr = @ccall rust_lib.iceberg_take_gather_error()::Ptr{Cchar}
+        msg = if err_ptr != C_NULL
+            s = unsafe_string(err_ptr)
+            @ccall rust_lib.iceberg_destroy_cstring(err_ptr::Ptr{Cchar})::Cint
+            s
+        else
+            "gather failed (see writer close for details)"
+        end
+        throw(IcebergException("write_columns (gathered): $(msg)"))
+    end
     return nothing
 end

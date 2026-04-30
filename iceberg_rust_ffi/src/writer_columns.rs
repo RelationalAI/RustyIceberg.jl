@@ -68,7 +68,7 @@ unsafe impl Sync for ColumnDescriptor {}
 /// `sel_ptr = null`  → sequential (identity) access: read data[0..len].
 /// `sel_ptr != null` → scattered access: read data[sel[i]-1] for i in 0..len (1-based Julia indices).
 /// `validity_ptr = null` → all rows valid (non-nullable or known all-valid slice).
-/// `lengths_ptr != null` → string column: data_ptr is Ptr{UInt8}[], lengths_ptr is Int64[].
+/// `lengths_ptr != null` → string column: data_ptr is Ptr{UInt8}[], lengths_ptr is Int64[] of byte lengths per string.
 /// Fields are all 8 bytes — no padding, total 40 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -99,8 +99,16 @@ pub struct GatheredColumnDescriptor {
 unsafe impl Send for GatheredColumnDescriptor {}
 unsafe impl Sync for GatheredColumnDescriptor {}
 
-/// Build the Arrow null buffer by scanning validity bits across all slices.
-/// Returns `None` if every slice has a null `validity_ptr` (all rows valid).
+/// Merges the per-slice validity bitmaps from all slices into a single output bitmap.
+///
+/// Each slice contributes `slice.len` output rows. Slices with a null `validity_ptr` are
+/// all-valid. Slices with a bitmap may be misaligned relative to the output (each slice
+/// starts at a different `out` offset), so bits are copied one at a time with a shift.
+/// The selection vector (`sel_ptr`) governs which *source data* elements to read; the
+/// validity bitmap is always indexed by output row position, so sequential and scattered
+/// slices are treated identically here.
+///
+/// Returns `None` if every slice is all-valid (no null buffer needed).
 unsafe fn build_null_buffer_scattered(
     slices: &[SliceRef],
     total_rows: usize,
@@ -112,20 +120,13 @@ unsafe fn build_null_buffer_scattered(
     let mut out = 0usize;
     for slice in slices {
         if slice.validity_ptr.is_null() {
-            // All valid — set bits 1
+            // All rows in this slice are valid — set one bit per output row.
             for i in 0..slice.len {
                 bits[(out + i) / 8] |= 1u8 << ((out + i) % 8);
             }
-        } else if slice.sel_ptr.is_null() {
-            // Sequential: copy bits with possible alignment shift
-            for i in 0..slice.len {
-                let b = (*slice.validity_ptr.add(i / 8) >> (i % 8)) & 1;
-                bits[(out + i) / 8] |= b << ((out + i) % 8);
-            }
         } else {
-            // Scattered: validity is per output row (0..len-1), same as sequential.
-            // The selection governs which *data* elements are picked, not which
-            // validity bits — the validity bitmap has one bit per output row.
+            // Copy validity bits from the slice's bitmap into the output bitmap,
+            // re-aligning from source bit position i to output bit position (out + i).
             for i in 0..slice.len {
                 let b = (*slice.validity_ptr.add(i / 8) >> (i % 8)) & 1;
                 bits[(out + i) / 8] |= b << ((out + i) % 8);

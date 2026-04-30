@@ -5,7 +5,9 @@
 /// `Arc<Mutex<ConcreteDataFileWriter>>` inside WriterState: only one pool thread encodes
 /// a given writer at a time, and the FIFO global queue ensures batches are submitted
 /// in order.
-use std::ffi::{c_char, c_void};
+use std::any::Any;
+use std::cell::RefCell;
+use std::ffi::{c_char, c_void, CString};
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -140,6 +142,95 @@ struct GlobalWorkerPool {
 
 static GLOBAL_ENCODE_POOL: OnceLock<GlobalWorkerPool> = OnceLock::new();
 
+// Thread-local storage for the most recent synchronous gather error.
+// Set by iceberg_writer_write_gathered_columns on failure; consumed by iceberg_take_gather_error.
+thread_local! {
+    static LAST_GATHER_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
+}
+
+fn store_gather_error(e: &anyhow::Error) {
+    let msg = format!("{:#}", e);
+    LAST_GATHER_ERROR.with(|cell| {
+        *cell.borrow_mut() = CString::new(msg).ok();
+    });
+}
+
+/// Returns a heap-allocated C string with the most recent gather error on this thread,
+/// or NULL if none. Must be called on the same thread as the failed write call, immediately
+/// after it returns. The caller must free the returned string with `iceberg_destroy_cstring`.
+#[no_mangle]
+pub extern "C" fn iceberg_take_gather_error() -> *mut c_char {
+    LAST_GATHER_ERROR.with(|cell| {
+        cell.borrow_mut()
+            .take()
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    })
+}
+
+/// Formats a Rust panic payload into an anyhow error, preserving the message where possible.
+fn format_panic_error(panic: Box<dyn Any + Send>) -> anyhow::Error {
+    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+        format!("encode worker panicked: {}", s)
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        format!("encode worker panicked: {}", s)
+    } else {
+        "encode worker panicked (no string payload)".to_string()
+    };
+    anyhow::anyhow!(msg)
+}
+
+/// Body of each encode worker thread: receives tasks from the shared channel and encodes them.
+fn encode_worker_loop(
+    task_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<EncodeTask>>>,
+    handle: tokio::runtime::Handle,
+) {
+    loop {
+        // Acquire the shared receiver lock, then wait for a task.
+        // The lock is released as soon as recv() returns, so workers are not serialized
+        // during encoding — only during task pickup.
+        let task = {
+            let mut rx = handle.block_on(task_rx.lock());
+            match handle.block_on(rx.recv()) {
+                Some(t) => t,
+                None => break, // sender dropped → pool shutting down
+            }
+        };
+
+        // Clone state before moving task into the closure so we can always decrement
+        // pending even if the closure panics.
+        let state = task.state.clone();
+        let handle_enc = handle.clone();
+        let encode_result = catch_unwind(AssertUnwindSafe(move || {
+            let mut guard = task.state.writer.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                Some(w) => handle_enc
+                    .block_on(w.write(task.batch))
+                    .map_err(|e| anyhow::anyhow!("write batch: {}", e)),
+                None => Err(anyhow::anyhow!("writer already closed")),
+            }
+        }));
+
+        let err = match encode_result {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(panic) => Some(format_panic_error(panic)),
+        };
+        if let Some(e) = err {
+            let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                *slot = Some(e);
+            }
+        }
+
+        // Always decrement pending; notify close() if this was the last task.
+        let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            state.done_notify.notify_one();
+        }
+    }
+}
+
 /// Desired encode worker count. 0 means "use available_parallelism".
 /// Must be set before the first iceberg_writer_new call.
 static ENCODE_WORKERS: AtomicUsize = AtomicUsize::new(0);
@@ -180,57 +271,7 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
             let handle = handle.clone();
             thread::Builder::new()
                 .name(format!("iceberg-encode-{}", i))
-                .spawn(move || {
-                    loop {
-                        // Acquire the shared receiver lock, then wait for a task.
-                        // The lock is released as soon as recv() returns, so workers
-                        // are not serialized during encoding — only during task pickup.
-                        let task = {
-                            let mut rx = handle.block_on(task_rx.lock());
-                            match handle.block_on(rx.recv()) {
-                                Some(t) => t,
-                                None => break, // sender dropped → pool shutting down
-                            }
-                        };
-
-                        // Clone state before moving task into the closure so we can
-                        // always decrement pending even if the closure panics.
-                        let state = task.state.clone();
-
-                        let handle_enc = handle.clone();
-                        let encode_result = catch_unwind(AssertUnwindSafe(move || {
-                            let result: anyhow::Result<()> = {
-                                let mut guard =
-                                    task.state.writer.lock().unwrap_or_else(|e| e.into_inner());
-                                match guard.as_mut() {
-                                    Some(w) => handle_enc
-                                        .block_on(w.write(task.batch))
-                                        .map_err(|e| anyhow::anyhow!("write batch: {}", e)),
-                                    None => Err(anyhow::anyhow!("writer already closed")),
-                                }
-                            };
-                            result
-                        }));
-
-                        let err = match encode_result {
-                            Ok(Ok(())) => None,
-                            Ok(Err(e)) => Some(e),
-                            Err(_panic) => Some(anyhow::anyhow!("encode worker panicked")),
-                        };
-                        if let Some(e) = err {
-                            let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
-                            if slot.is_none() {
-                                *slot = Some(e);
-                            }
-                        }
-
-                        // Always decrement pending; notify close() if this was the last task.
-                        let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
-                        if prev == 1 {
-                            state.done_notify.notify_one();
-                        }
-                    }
-                })
+                .spawn(move || encode_worker_loop(task_rx, handle))
                 .expect("failed to spawn iceberg encode worker");
         }
 
@@ -319,6 +360,7 @@ pub extern "C" fn iceberg_writer_write_gathered_columns(
     })() {
         Ok(b) => b,
         Err(e) => {
+            store_gather_error(&e);
             let mut slot = writer_ref
                 .writer_state
                 .error
@@ -352,7 +394,8 @@ pub extern "C" fn iceberg_writer_write_gathered_columns(
             if prev == 1 {
                 writer_ref.writer_state.done_notify.notify_one();
             }
-            eprintln!("[iceberg:sync] pool channel closed");
+            let e = anyhow::anyhow!("encode pool channel closed unexpectedly");
+            store_gather_error(&e);
             -1
         }
     }
