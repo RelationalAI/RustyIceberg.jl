@@ -1,8 +1,7 @@
 // ===========================================================================
-// Temporary profiling — will be removed before merging to production.
-//
-// Global atomic counters accumulate timing/size data across all file tasks.
-// Called from Julia via `@ccall iceberg_print_pipeline_stats()`.
+// Pipeline statistics — timing and throughput counters for the file-parallel
+// scan pipeline. Global atomics accumulate data across all file tasks and are
+// readable from Julia via `@ccall iceberg_print_pipeline_stats()`.
 // ===========================================================================
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

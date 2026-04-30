@@ -141,6 +141,26 @@ impl_scan_builder_method!(
 //      (ordered_file_pipeline.rs) which processes N files concurrently
 //      but yields batches in strict file-then-row order.
 
+/// Resolve the pipeline tuning parameters from a configured scan.
+/// Returns `(concurrency, prefetch_depth, file_io, batch_size)`.
+/// A stored value of 0 means "auto": concurrency defaults to available
+/// parallelism; prefetch_depth defaults to concurrency.
+fn resolve_pipeline_params(scan: &IcebergScan) -> (usize, usize, FileIO, Option<usize>) {
+    let concurrency = if scan.file_concurrency == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        scan.file_concurrency
+    };
+    let prefetch_depth = if scan.file_prefetch_depth == 0 {
+        concurrency
+    } else {
+        scan.file_prefetch_depth
+    };
+    (concurrency, prefetch_depth, scan.file_io.clone(), scan.batch_size)
+}
+
 export_runtime_op!(
     iceberg_arrow_stream,
     IcebergArrowStreamResponse,
@@ -153,25 +173,8 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Scan not initialized"));
         }
-
-        // File pipeline concurrency (0 = auto-detect from available CPUs)
-        let concurrency = scan_ptr.file_concurrency;
-        let concurrency = if concurrency == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        } else {
-            concurrency
-        };
-
-        let file_io = scan_ptr.file_io.clone();
-        let batch_size = scan_ptr.batch_size;
-        let prefetch_depth = if scan_ptr.file_prefetch_depth == 0 {
-            concurrency
-        } else {
-            scan_ptr.file_prefetch_depth
-        };
-
+        let (concurrency, prefetch_depth, file_io, batch_size) =
+            resolve_pipeline_params(scan_ptr);
         Ok((scan_ref.as_ref().unwrap(), concurrency, prefetch_depth, file_io, batch_size))
     },
     result_tuple,
@@ -215,24 +218,8 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Scan not initialized"));
         }
-
-        let concurrency = scan_ptr.file_concurrency;
-        let concurrency = if concurrency == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        } else {
-            concurrency
-        };
-
-        let file_io = scan_ptr.file_io.clone();
-        let batch_size = scan_ptr.batch_size;
-        let prefetch_depth = if scan_ptr.file_prefetch_depth == 0 {
-            concurrency
-        } else {
-            scan_ptr.file_prefetch_depth
-        };
-
+        let (concurrency, prefetch_depth, file_io, batch_size) =
+            resolve_pipeline_params(scan_ptr);
         Ok((scan_ref.as_ref().unwrap(), concurrency, prefetch_depth, file_io, batch_size))
     },
     result_tuple,
