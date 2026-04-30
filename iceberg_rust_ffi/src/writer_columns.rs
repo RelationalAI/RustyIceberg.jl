@@ -109,10 +109,7 @@ unsafe impl Sync for GatheredColumnDescriptor {}
 /// slices are treated identically here.
 ///
 /// Returns `None` if every slice is all-valid (no null buffer needed).
-unsafe fn build_null_buffer_scattered(
-    slices: &[SliceRef],
-    total_rows: usize,
-) -> Option<NullBuffer> {
+unsafe fn build_null_buffer_gathered(slices: &[SliceRef], total_rows: usize) -> Option<NullBuffer> {
     if !slices.iter().any(|s| !s.validity_ptr.is_null()) {
         return None;
     }
@@ -149,7 +146,7 @@ pub(crate) unsafe fn build_arrow_array_gathered(
     let slices = std::slice::from_raw_parts(desc.slices, desc.num_slices);
     let total = desc.total_rows;
     let null_buf = if desc.is_nullable {
-        build_null_buffer_scattered(slices, total)
+        build_null_buffer_gathered(slices, total)
     } else {
         None
     };
@@ -260,7 +257,7 @@ pub(crate) unsafe fn build_arrow_array_gathered(
             // intermediate Vec<Option<&str>> and skips UTF-8 validation — Julia strings
             // are guaranteed valid UTF-8.
             let null_buf = if desc.is_nullable {
-                build_null_buffer_scattered(slices, total)
+                build_null_buffer_gathered(slices, total)
             } else {
                 None
             };
