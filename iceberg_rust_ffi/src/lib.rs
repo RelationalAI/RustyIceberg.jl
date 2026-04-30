@@ -60,7 +60,7 @@ pub use table::{
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
 pub use warm_file_stream::{
     IcebergNextWarmFileScanResponse, IcebergWarmFileScan, IcebergWarmFileScanStream,
-    IcebergWarmFileScanStreamResponse,
+    IcebergWarmFileScanStreamResponse, IcebergWarmIncrementalStreamsResponse,
 };
 pub use writer::{
     IcebergDataFileWriter, IcebergDataFileWriterResponse, IcebergWriterCloseResponse,

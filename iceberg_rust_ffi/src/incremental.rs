@@ -16,6 +16,10 @@ use crate::table::{
     IcebergIncrementalAppendFileStream, IcebergIncrementalPosDeleteFile,
     IcebergIncrementalPosDeleteFileStream, DEFAULT_DELETE_BATCH_SIZE, DEFAULT_TASK_PREFETCH_DEPTH,
 };
+use crate::warm_file_stream::{
+    IcebergWarmFileScanStream, IcebergWarmFileScanStreamResponse,
+    IcebergWarmIncrementalStreamsResponse,
+};
 use crate::{IcebergArrowStream, IcebergArrowStreamResponse, IcebergTable};
 
 /// Sentinel value for optional snapshot IDs in the C API.
@@ -603,3 +607,60 @@ pub extern "C" fn iceberg_incremental_pos_delete_file_path(
         Err(_) => ptr::null_mut(),
     }
 }
+
+// Async: plan incremental files once, return warm append stream + delete stream.
+// Calls plan_files() exactly once to avoid double planning.
+export_runtime_op!(
+    iceberg_plan_incremental_warm,
+    IcebergWarmIncrementalStreamsResponse,
+    || {
+        if scan.is_null() {
+            return Err(anyhow::anyhow!("Null scan pointer"));
+        }
+        if reader_ctx.is_null() {
+            return Err(anyhow::anyhow!("Null reader context pointer"));
+        }
+        let scan_ptr = unsafe { &*scan };
+        let ctx = unsafe { &*reader_ctx };
+        let task_prefetch_depth = if scan_ptr.task_prefetch_depth == 0 {
+            DEFAULT_TASK_PREFETCH_DEPTH
+        } else {
+            scan_ptr.task_prefetch_depth
+        };
+        let reader = ctx.reader.clone();
+        let batch_prefetch_depth = ctx.batch_prefetch_depth;
+        Ok((&scan_ptr.scan, task_prefetch_depth, reader, batch_prefetch_depth))
+    },
+    result_tuple,
+    async {
+        let (scan_ref, task_prefetch_depth, reader, batch_prefetch_depth) = result_tuple;
+        let (append_stream, delete_stream) = scan_ref.plan_files().await?;
+
+        // Warm stream for append files.
+        let (outer_tx, outer_rx) =
+            tokio::sync::mpsc::channel::<Result<crate::IcebergWarmFileScan, anyhow::Error>>(
+                task_prefetch_depth,
+            );
+        let handle = tokio::spawn(crate::warm_file_stream::run_warm_append(
+            append_stream,
+            reader,
+            task_prefetch_depth,
+            batch_prefetch_depth,
+            outer_tx,
+        ));
+        let append_warm = IcebergWarmFileScanStream {
+            receiver: tokio::sync::Mutex::new(outer_rx),
+            producer_handle: tokio::sync::Mutex::new(Some(handle)),
+        };
+
+        // Standard prefetch stream for delete files (in-memory, no S3 reads).
+        let delete = IcebergIncrementalPosDeleteFileStream::new(delete_stream, task_prefetch_depth);
+
+        Ok::<(IcebergWarmFileScanStream, IcebergIncrementalPosDeleteFileStream), anyhow::Error>((
+            append_warm,
+            delete,
+        ))
+    },
+    scan: *mut IcebergIncrementalScan,
+    reader_ctx: *mut IcebergArrowReaderContext
+);

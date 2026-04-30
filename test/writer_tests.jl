@@ -102,7 +102,7 @@ using Tables
         @test snapshot_id_2 isa Int64
         @test snapshot_id_2 != snapshot_id_1
         println("✅ Snapshot ID after second commit: $snapshot_id_2 (differs from first)")
-        RustyIceberg.free_table(updated_table_2)
+        RustyIceberg.free_table!(updated_table_2)
 
         # Test 6: Verify table exists in catalog by loading it fresh
         println("\nTest 6: Verifying table exists in catalog...")

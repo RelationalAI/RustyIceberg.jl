@@ -15,10 +15,12 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use arrow_array::RecordBatch;
 use futures::future::BoxFuture;
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use iceberg::arrow::ArrowReader;
+use iceberg::scan::incremental::AppendedFileScanTask;
 use iceberg::scan::{FileScanTask, FileScanTaskStream};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
@@ -290,6 +292,47 @@ impl IcebergWarmFileScanStream {
 
 pub type IcebergWarmFileScanStreamResponse = IcebergBoxedResponse<IcebergWarmFileScanStream>;
 
+/// Response for iceberg_plan_incremental_warm — returns warm append stream +
+/// delete stream in one FFI call so plan_files() is only called once.
+#[repr(C)]
+pub struct IcebergWarmIncrementalStreamsResponse {
+    result: CResult,
+    pub append_warm_stream: *mut IcebergWarmFileScanStream,
+    pub delete_stream: *mut crate::table::IcebergIncrementalPosDeleteFileStream,
+    error_message: *mut c_char,
+    context: *const Context,
+}
+
+unsafe impl Send for IcebergWarmIncrementalStreamsResponse {}
+
+impl RawResponse for IcebergWarmIncrementalStreamsResponse {
+    type Payload = (
+        IcebergWarmFileScanStream,
+        crate::table::IcebergIncrementalPosDeleteFileStream,
+    );
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.error_message
+    }
+    fn set_payload(&mut self, payload: Option<Self::Payload>) {
+        match payload {
+            Some((append, delete)) => {
+                self.append_warm_stream = Box::into_raw(Box::new(append));
+                self.delete_stream = Box::into_raw(Box::new(delete));
+            }
+            None => {
+                self.append_warm_stream = std::ptr::null_mut();
+                self.delete_stream = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
 #[repr(transparent)]
 pub struct IcebergNextWarmFileScanResponse(pub IcebergBoxedResponse<IcebergWarmFileScan>);
 
@@ -350,44 +393,41 @@ pub(crate) fn spawn_file_task(
 
 /// Wrapper: sends error to channel and updates stats on failure.
 /// Dropping `tx` signals the consumer that this file is done.
-async fn process_file(
-    task: FileScanTask,
-    reader: ArrowReader,
-    semaphore: Arc<Semaphore>,
+/// Generic wrapper: runs an async producer, forwards any error, updates stats.
+async fn run_file_task<Fut>(
+    producer: impl FnOnce() -> Fut,
     tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
-) {
-    let result = process_file_inner(task, reader, semaphore, &tx).await;
+) where
+    Fut: std::future::Future<Output = Result<(), iceberg::Error>>,
+{
+    let result = producer().await;
     if let Err(e) = result {
         let _ = tx.send(Err(e)).await;
     }
     WARM_SCAN_STATS.track_task_end();
 }
 
-/// Process a single Parquet file through four timed phases:
-///   1. Reader setup — clone reader, call read(), open parquet footer
-///   2. Fetch + decode — batch_stream.next()
-///   3. Serialize — RecordBatch → Arrow IPC via spawn_blocking
-///   4. Backpressure — semaphore acquire
-async fn process_file_inner(
+async fn process_file(
     task: FileScanTask,
     reader: ArrowReader,
     semaphore: Arc<Semaphore>,
+    tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
+) {
+    run_file_task(
+        || process_file_inner(task, reader, semaphore, &tx),
+        tx.clone(),
+    )
+    .await;
+}
+
+/// Shared phases 2-4: drain a RecordBatch stream into the file channel.
+/// Called by both process_file_inner (full scan) and
+/// process_incremental_append_file_inner (incremental).
+async fn drain_batch_stream(
+    mut batch_stream: impl futures::Stream<Item = Result<RecordBatch, iceberg::Error>> + Unpin,
+    semaphore: Arc<Semaphore>,
     tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) -> Result<(), iceberg::Error> {
-    WARM_SCAN_STATS.track_task_start();
-
-    // ── Phase 1: Reader setup ───────────────────────────────────────────
-    let setup_start = Instant::now();
-    let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
-    let batch_stream = reader
-        .read(task_stream)
-        .map_err(|e| iceberg::Error::new(iceberg::ErrorKind::Unexpected, e.to_string()))?;
-    WARM_SCAN_STATS
-        .reader_setup_ns
-        .fetch_add(setup_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-    tokio::pin!(batch_stream);
-
     loop {
         // ── Phase 2: Fetch + decode ─────────────────────────────────────
         let fd_start = Instant::now();
@@ -433,7 +473,7 @@ async fn process_file_inner(
         WARM_SCAN_STATS
             .semaphore_wait_ns
             .fetch_add(sem_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        std::mem::forget(_permit); // consumer releases via add_permits()
+        std::mem::forget(_permit);
 
         WARM_SCAN_STATS.track_buffer_add(byte_len as u64);
 
@@ -450,26 +490,100 @@ async fn process_file_inner(
             .batch_send_ns
             .fetch_add(send_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if send_err {
-            return Ok(()); // consumer dropped the receiver
+            return Ok(());
         }
     }
-
     WARM_SCAN_STATS
         .files_completed
         .fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
-/// Orchestrator: drives the planning stream, keeps `task_prefetch_depth` file
-/// tasks in flight via FuturesOrdered, and sends `IcebergWarmFileScan` items
-/// (metadata + per-file batch stream) to `outer_tx` in manifest order.
-pub(crate) async fn run_warm(
-    task_stream: FileScanTaskStream,
+async fn process_file_inner(
+    task: FileScanTask,
+    reader: ArrowReader,
+    semaphore: Arc<Semaphore>,
+    tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
+) -> Result<(), iceberg::Error> {
+    WARM_SCAN_STATS.track_task_start();
+    let setup_start = Instant::now();
+    let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
+    let batch_stream = reader
+        .read(task_stream)
+        .map_err(|e| iceberg::Error::new(iceberg::ErrorKind::Unexpected, e.to_string()))?;
+    WARM_SCAN_STATS
+        .reader_setup_ns
+        .fetch_add(setup_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    tokio::pin!(batch_stream);
+    drain_batch_stream(batch_stream, semaphore, tx).await
+}
+
+// ===========================================================================
+// Incremental append file support
+// ===========================================================================
+
+pub(crate) fn spawn_incremental_append_task(
+    task: AppendedFileScanTask,
+    reader: ArrowReader,
+    batch_prefetch_depth: usize,
+) -> BoxFuture<'static, SpawnFileTaskResult> {
+    let file_path = CString::new(task.base.data_file_path.as_str())
+        .unwrap_or_else(|_| CString::new("").unwrap());
+    let record_count = task.base.record_count;
+    let sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_FILE));
+    let (file_tx, file_rx) = mpsc::channel(batch_prefetch_depth);
+    tokio::spawn(process_incremental_append_file(task, reader, sem, file_tx));
+    Box::pin(async move { Ok((file_path, record_count, file_rx)) })
+}
+
+async fn process_incremental_append_file(
+    task: AppendedFileScanTask,
+    reader: ArrowReader,
+    semaphore: Arc<Semaphore>,
+    tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
+) {
+    run_file_task(
+        || process_incremental_append_file_inner(task, reader, semaphore, &tx),
+        tx.clone(),
+    )
+    .await;
+}
+
+async fn process_incremental_append_file_inner(
+    task: AppendedFileScanTask,
+    reader: ArrowReader,
+    semaphore: Arc<Semaphore>,
+    tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
+) -> Result<(), iceberg::Error> {
+    WARM_SCAN_STATS.track_task_start();
+    let setup_start = Instant::now();
+    let batch_stream = crate::table::read_incremental_append_file(reader, task)
+        .map_err(|e| iceberg::Error::new(iceberg::ErrorKind::Unexpected, e.to_string()))?;
+    WARM_SCAN_STATS
+        .reader_setup_ns
+        .fetch_add(setup_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    tokio::pin!(batch_stream);
+    drain_batch_stream(batch_stream, semaphore, tx).await
+}
+
+/// Shared FuturesOrdered orchestrator. Drives any planning stream, keeps
+/// `task_prefetch_depth` file tasks in flight, and forwards
+/// `IcebergWarmFileScan` items to `outer_tx` in order.
+///
+/// `spawn_fn` maps a task + reader + batch_prefetch_depth to a boxed future
+/// that resolves immediately to the file's batch-channel receiver.
+async fn run_warm_orchestrator<T, S, F>(
+    task_stream: S,
     reader: ArrowReader,
     task_prefetch_depth: usize,
     batch_prefetch_depth: usize,
     outer_tx: mpsc::Sender<Result<IcebergWarmFileScan, anyhow::Error>>,
-) {
+    spawn_fn: F,
+) where
+    T: Send + 'static,
+    S: futures::Stream<Item = Result<T, iceberg::Error>> + Unpin + Send,
+    F: Fn(T, ArrowReader, usize) -> BoxFuture<'static, SpawnFileTaskResult>,
+{
     let pipeline_start = Instant::now();
     let mut in_flight: FuturesOrdered<BoxFuture<'static, SpawnFileTaskResult>> =
         FuturesOrdered::new();
@@ -477,11 +591,10 @@ pub(crate) async fn run_warm(
     futures::pin_mut!(task_stream);
     let mut stream_done = false;
 
-    // Seed first task_prefetch_depth tasks.
     for _ in 0..task_prefetch_depth {
         match task_stream.next().await {
             Some(Ok(task)) => {
-                in_flight.push_back(spawn_file_task(task, reader.clone(), batch_prefetch_depth));
+                in_flight.push_back(spawn_fn(task, reader.clone(), batch_prefetch_depth));
             }
             Some(Err(e)) => {
                 let _ = outer_tx
@@ -497,15 +610,10 @@ pub(crate) async fn run_warm(
     }
 
     while let Some(file_result) = in_flight.next().await {
-        // Eagerly seed next task to keep the window full.
         if !stream_done {
             match task_stream.next().await {
                 Some(Ok(task)) => {
-                    in_flight.push_back(spawn_file_task(
-                        task,
-                        reader.clone(),
-                        batch_prefetch_depth,
-                    ));
+                    in_flight.push_back(spawn_fn(task, reader.clone(), batch_prefetch_depth));
                 }
                 Some(Err(e)) => {
                     let _ = outer_tx
@@ -525,8 +633,6 @@ pub(crate) async fn run_warm(
             }
         };
 
-        // Wrap per-file receiver as an IcebergArrowStream. The unfold releases
-        // semaphore permits as Julia drains batches, unblocking the producer.
         let stream = futures::stream::unfold(
             file_rx,
             |mut rx: mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>| async move {
@@ -556,7 +662,7 @@ pub(crate) async fn run_warm(
             .file_send_ns
             .fetch_add(fsend_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if fsend_err {
-            return; // Julia dropped the outer stream
+            return;
         }
     }
 
@@ -564,4 +670,40 @@ pub(crate) async fn run_warm(
         pipeline_start.elapsed().as_nanos() as u64,
         Ordering::Relaxed,
     );
+}
+
+pub(crate) async fn run_warm(
+    task_stream: FileScanTaskStream,
+    reader: ArrowReader,
+    task_prefetch_depth: usize,
+    batch_prefetch_depth: usize,
+    outer_tx: mpsc::Sender<Result<IcebergWarmFileScan, anyhow::Error>>,
+) {
+    run_warm_orchestrator(
+        task_stream,
+        reader,
+        task_prefetch_depth,
+        batch_prefetch_depth,
+        outer_tx,
+        spawn_file_task,
+    )
+    .await;
+}
+
+pub(crate) async fn run_warm_append(
+    task_stream: futures::stream::BoxStream<'static, Result<AppendedFileScanTask, iceberg::Error>>,
+    reader: ArrowReader,
+    task_prefetch_depth: usize,
+    batch_prefetch_depth: usize,
+    outer_tx: mpsc::Sender<Result<IcebergWarmFileScan, anyhow::Error>>,
+) {
+    run_warm_orchestrator(
+        task_stream,
+        reader,
+        task_prefetch_depth,
+        batch_prefetch_depth,
+        outer_tx,
+        spawn_incremental_append_task,
+    )
+    .await;
 }

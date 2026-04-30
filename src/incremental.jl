@@ -395,6 +395,42 @@ function free_file_stream!(stream::DeleteFileStream)
     @ccall rust_lib.iceberg_incremental_pos_delete_file_stream_free(stream.ptr::Ptr{Cvoid})::Cvoid
 end
 
+"""Response type for iceberg_plan_incremental_warm."""
+mutable struct WarmIncrementalStreamsResponse
+    result::Cint
+    append_warm_stream::Ptr{Cvoid}
+    delete_stream::Ptr{Cvoid}
+    error_message::Ptr{Cchar}
+    context::Ptr{Cvoid}
+end
+WarmIncrementalStreamsResponse() = WarmIncrementalStreamsResponse(0, C_NULL, C_NULL, C_NULL, C_NULL)
+
+"""
+    plan_incremental_warm(scan::IncrementalScan, reader::ArrowReaderContext)
+        -> (WarmFileScanStream, DeleteFileStream)
+
+Plan incremental files in one pass. Returns a warm append stream (batches
+pre-fetched concurrently) and a standard delete file stream. Using a single
+planning call avoids scanning manifests twice.
+"""
+function plan_incremental_warm(scan::IncrementalScan, reader::ArrowReaderContext)
+    response = WarmIncrementalStreamsResponse()
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_plan_incremental_warm(
+            scan.ptr::Ptr{Cvoid},
+            reader.ptr::Ptr{Cvoid},
+            response::Ref{WarmIncrementalStreamsResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    if response.result != 0
+        msg = response.error_message != C_NULL ? unsafe_string(response.error_message) : "unknown error"
+        throw(IcebergException(msg))
+    end
+    return WarmFileScanStream(response.append_warm_stream),
+           DeleteFileStream(response.delete_stream)
+end
+
 """Free an append task handle. Only call if NOT passed to `read_file`."""
 function free_file!(task::AppendFileHandle)
     @ccall rust_lib.iceberg_incremental_append_file_free(task.ptr::Ptr{Cvoid})::Cvoid
