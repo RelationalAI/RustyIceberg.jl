@@ -364,6 +364,30 @@ fn submit_batch(
     }
 }
 
+/// Shared core for write functions: validates column count, builds a `RecordBatch`, and
+/// submits it to the encode pool.
+unsafe fn write_gathered_inner<I>(
+    writer_ref: &IcebergDataFileWriter,
+    pool: &GlobalWorkerPool,
+    arrow_schema: ArrowSchemaRef,
+    num_columns: usize,
+    col_descs: I,
+) -> Result<(), anyhow::Error>
+where
+    I: IntoIterator<Item = GatheredColumnDescriptor>,
+    I::IntoIter: ExactSizeIterator,
+{
+    if num_columns != arrow_schema.fields().len() {
+        return Err(anyhow::anyhow!(
+            "Column count mismatch: got {} but schema has {}",
+            num_columns,
+            arrow_schema.fields().len()
+        ));
+    }
+    let batch = unsafe { build_record_batch(arrow_schema, col_descs) }?;
+    submit_batch(writer_ref, pool, batch)
+}
+
 /// Gather column data from Julia memory into Arrow arrays in the calling thread, then
 /// submit the RecordBatch to the global encode pool asynchronously.
 ///
@@ -382,9 +406,7 @@ pub extern "C" fn iceberg_writer_write_gathered_columns(
     if writer.is_null() || columns.is_null() || num_columns == 0 {
         return -1;
     }
-
     let writer_ref = unsafe { &*writer };
-
     let pool = match GLOBAL_ENCODE_POOL.get() {
         Some(p) => p,
         None => {
@@ -392,34 +414,17 @@ pub extern "C" fn iceberg_writer_write_gathered_columns(
             return -1;
         }
     };
-
     let arrow_schema = writer_ref.arrow_schema.clone();
     let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
-
-    if col_descs.len() != arrow_schema.fields().len() {
-        store_writer_error(
+    if let Err(e) = unsafe {
+        write_gathered_inner(
             writer_ref,
-            anyhow::anyhow!(
-                "Column count mismatch: got {} but schema has {}",
-                col_descs.len(),
-                arrow_schema.fields().len()
-            ),
-        );
-        return -1;
-    }
-
-    // Gather: read from Julia memory into Rust-owned Arrow arrays (blocking, in calling thread).
-    // After this point all Julia pointers have been consumed — safe to release.
-    let batch = match unsafe { build_record_batch(arrow_schema, col_descs.iter().copied()) } {
-        Ok(b) => b,
-        Err(e) => {
-            store_gather_error(&e);
-            store_writer_error(writer_ref, e);
-            return -1;
-        }
-    };
-
-    if let Err(e) = submit_batch(writer_ref, pool, batch) {
+            pool,
+            arrow_schema,
+            num_columns,
+            col_descs.iter().copied(),
+        )
+    } {
         store_gather_error(&e);
         store_writer_error(writer_ref, e);
         return -1;
@@ -442,9 +447,7 @@ pub extern "C" fn iceberg_writer_write_columns(
     if writer.is_null() || columns.is_null() || num_columns == 0 {
         return -1;
     }
-
     let writer_ref = unsafe { &*writer };
-
     let pool = match GLOBAL_ENCODE_POOL.get() {
         Some(p) => p,
         None => {
@@ -452,24 +455,12 @@ pub extern "C" fn iceberg_writer_write_columns(
             return -1;
         }
     };
-
     let arrow_schema = writer_ref.arrow_schema.clone();
     let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
-
-    if col_descs.len() != arrow_schema.fields().len() {
-        store_writer_error(
-            writer_ref,
-            anyhow::anyhow!(
-                "Column count mismatch: got {} but schema has {}",
-                col_descs.len(),
-                arrow_schema.fields().len()
-            ),
-        );
-        return -1;
-    }
-
     // Wrap each ColumnDescriptor as a single-slice GatheredColumnDescriptor.
     // Sequential access (sel_ptr = null) so data[0..num_rows] is read in order.
+    // `slices` must outlive `gathered` since GatheredColumnDescriptor.slices is a raw
+    // pointer into this Vec's allocation.
     let slices: Vec<SliceRef> = col_descs
         .iter()
         .map(|d| SliceRef {
@@ -480,7 +471,6 @@ pub extern "C" fn iceberg_writer_write_columns(
             len: d.num_rows,
         })
         .collect();
-
     let gathered = col_descs
         .iter()
         .zip(slices.iter())
@@ -491,16 +481,9 @@ pub extern "C" fn iceberg_writer_write_columns(
             column_type: d.column_type,
             is_nullable: d.is_nullable,
         });
-
-    let batch = match unsafe { build_record_batch(arrow_schema, gathered) } {
-        Ok(b) => b,
-        Err(e) => {
-            store_writer_error(writer_ref, e);
-            return -1;
-        }
-    };
-
-    if let Err(e) = submit_batch(writer_ref, pool, batch) {
+    if let Err(e) =
+        unsafe { write_gathered_inner(writer_ref, pool, arrow_schema, num_columns, gathered) }
+    {
         store_writer_error(writer_ref, e);
         return -1;
     }
