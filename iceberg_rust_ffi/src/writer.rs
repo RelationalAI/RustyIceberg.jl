@@ -300,6 +300,70 @@ pub type IcebergDataFileWriterResponse = IcebergBoxedResponse<IcebergDataFileWri
 /// Type alias for data files response (returns IcebergDataFiles handle)
 pub type IcebergWriterCloseResponse = IcebergBoxedResponse<IcebergDataFiles>;
 
+/// Store an error in the writer state (first error wins).
+fn store_writer_error(writer_ref: &IcebergDataFileWriter, e: anyhow::Error) {
+    let mut slot = writer_ref
+        .writer_state
+        .error
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(e);
+    }
+}
+
+/// Build a `RecordBatch` from a slice of `GatheredColumnDescriptor`s.
+///
+/// # Safety
+/// All pointers inside each `GatheredColumnDescriptor` must be valid for the duration of
+/// this call (callers hold `GC.@preserve` or equivalent).
+unsafe fn build_record_batch<I>(
+    arrow_schema: ArrowSchemaRef,
+    col_descs: I,
+) -> Result<RecordBatch, anyhow::Error>
+where
+    I: IntoIterator<Item = GatheredColumnDescriptor>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let iter = col_descs.into_iter();
+    let mut arrays = Vec::with_capacity(iter.len());
+    for (i, desc) in iter.enumerate() {
+        arrays.push(unsafe { build_arrow_array_gathered(&desc, arrow_schema.field(i))? });
+    }
+    RecordBatch::try_new(arrow_schema, arrays).map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))
+}
+
+/// Submit a `RecordBatch` to the global encode pool.
+///
+/// Increments the writer's pending count before sending and rolls it back on channel failure.
+fn submit_batch(
+    writer_ref: &IcebergDataFileWriter,
+    pool: &GlobalWorkerPool,
+    batch: RecordBatch,
+) -> Result<(), anyhow::Error> {
+    writer_ref
+        .writer_state
+        .pending
+        .fetch_add(1, Ordering::AcqRel);
+    let task = EncodeTask {
+        batch,
+        state: writer_ref.writer_state.clone(),
+    };
+    match pool.task_tx.blocking_send(task) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let prev = writer_ref
+                .writer_state
+                .pending
+                .fetch_sub(1, Ordering::AcqRel);
+            if prev == 1 {
+                writer_ref.writer_state.done_notify.notify_one();
+            }
+            Err(anyhow::anyhow!("encode pool channel closed unexpectedly"))
+        }
+    }
+}
+
 /// Gather column data from Julia memory into Arrow arrays in the calling thread, then
 /// submit the RecordBatch to the global encode pool asynchronously.
 ///
@@ -324,7 +388,7 @@ pub extern "C" fn iceberg_writer_write_gathered_columns(
     let pool = match GLOBAL_ENCODE_POOL.get() {
         Some(p) => p,
         None => {
-            eprintln!("[iceberg:sync] encode pool not initialized; call iceberg_writer_new first");
+            eprintln!("[iceberg] encode pool not initialized; call iceberg_writer_new first");
             return -1;
         }
     };
@@ -333,72 +397,34 @@ pub extern "C" fn iceberg_writer_write_gathered_columns(
     let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
 
     if col_descs.len() != arrow_schema.fields().len() {
-        let mut slot = writer_ref
-            .writer_state
-            .error
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if slot.is_none() {
-            *slot = Some(anyhow::anyhow!(
+        store_writer_error(
+            writer_ref,
+            anyhow::anyhow!(
                 "Column count mismatch: got {} but schema has {}",
                 col_descs.len(),
                 arrow_schema.fields().len()
-            ));
-        }
+            ),
+        );
         return -1;
     }
 
     // Gather: read from Julia memory into Rust-owned Arrow arrays (blocking, in calling thread).
-    // After this block, all Julia pointers have been consumed — safe to release.
-    let batch = match (|| -> Result<RecordBatch, anyhow::Error> {
-        let mut arrays = Vec::with_capacity(num_columns);
-        for (i, desc) in col_descs.iter().enumerate() {
-            arrays.push(unsafe { build_arrow_array_gathered(desc, arrow_schema.field(i))? });
-        }
-        RecordBatch::try_new(arrow_schema, arrays)
-            .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))
-    })() {
+    // After this point all Julia pointers have been consumed — safe to release.
+    let batch = match unsafe { build_record_batch(arrow_schema, col_descs.iter().copied()) } {
         Ok(b) => b,
         Err(e) => {
             store_gather_error(&e);
-            let mut slot = writer_ref
-                .writer_state
-                .error
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() {
-                *slot = Some(e);
-            }
+            store_writer_error(writer_ref, e);
             return -1;
         }
     };
 
-    // Increment pending before submit so iceberg_writer_close always accounts for this batch.
-    writer_ref
-        .writer_state
-        .pending
-        .fetch_add(1, Ordering::AcqRel);
-    let task = EncodeTask {
-        batch,
-        state: writer_ref.writer_state.clone(),
-    };
-
-    match pool.task_tx.blocking_send(task) {
-        Ok(()) => 0,
-        Err(_) => {
-            // Pool channel closed — undo the pending increment.
-            let prev = writer_ref
-                .writer_state
-                .pending
-                .fetch_sub(1, Ordering::AcqRel);
-            if prev == 1 {
-                writer_ref.writer_state.done_notify.notify_one();
-            }
-            let e = anyhow::anyhow!("encode pool channel closed unexpectedly");
-            store_gather_error(&e);
-            -1
-        }
+    if let Err(e) = submit_batch(writer_ref, pool, batch) {
+        store_gather_error(&e);
+        store_writer_error(writer_ref, e);
+        return -1;
     }
+    0
 }
 
 /// Synchronous write of flat column data: copies each column from Julia memory into
@@ -422,7 +448,7 @@ pub extern "C" fn iceberg_writer_write_columns_sync(
     let pool = match GLOBAL_ENCODE_POOL.get() {
         Some(p) => p,
         None => {
-            eprintln!("[iceberg:sync] encode pool not initialized; call iceberg_writer_new first");
+            eprintln!("[iceberg] encode pool not initialized; call iceberg_writer_new first");
             return -1;
         }
     };
@@ -431,18 +457,14 @@ pub extern "C" fn iceberg_writer_write_columns_sync(
     let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
 
     if col_descs.len() != arrow_schema.fields().len() {
-        let mut slot = writer_ref
-            .writer_state
-            .error
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if slot.is_none() {
-            *slot = Some(anyhow::anyhow!(
+        store_writer_error(
+            writer_ref,
+            anyhow::anyhow!(
                 "Column count mismatch: got {} but schema has {}",
                 col_descs.len(),
                 arrow_schema.fields().len()
-            ));
-        }
+            ),
+        );
         return -1;
     }
 
@@ -459,7 +481,7 @@ pub extern "C" fn iceberg_writer_write_columns_sync(
         })
         .collect();
 
-    let gathered: Vec<GatheredColumnDescriptor> = col_descs
+    let gathered = col_descs
         .iter()
         .zip(slices.iter())
         .map(|(d, s)| GatheredColumnDescriptor {
@@ -468,54 +490,21 @@ pub extern "C" fn iceberg_writer_write_columns_sync(
             total_rows: d.num_rows,
             column_type: d.column_type,
             is_nullable: d.is_nullable,
-        })
-        .collect();
+        });
 
-    let batch = match (|| -> Result<RecordBatch, anyhow::Error> {
-        let mut arrays = Vec::with_capacity(num_columns);
-        for (i, desc) in gathered.iter().enumerate() {
-            arrays.push(unsafe { build_arrow_array_gathered(desc, arrow_schema.field(i))? });
-        }
-        RecordBatch::try_new(arrow_schema, arrays)
-            .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))
-    })() {
+    let batch = match unsafe { build_record_batch(arrow_schema, gathered) } {
         Ok(b) => b,
         Err(e) => {
-            let mut slot = writer_ref
-                .writer_state
-                .error
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() {
-                *slot = Some(e);
-            }
+            store_writer_error(writer_ref, e);
             return -1;
         }
     };
 
-    writer_ref
-        .writer_state
-        .pending
-        .fetch_add(1, Ordering::AcqRel);
-    let task = EncodeTask {
-        batch,
-        state: writer_ref.writer_state.clone(),
-    };
-
-    match pool.task_tx.blocking_send(task) {
-        Ok(()) => 0,
-        Err(_) => {
-            let prev = writer_ref
-                .writer_state
-                .pending
-                .fetch_sub(1, Ordering::AcqRel);
-            if prev == 1 {
-                writer_ref.writer_state.done_notify.notify_one();
-            }
-            eprintln!("[iceberg:sync] pool channel closed");
-            -1
-        }
+    if let Err(e) = submit_batch(writer_ref, pool, batch) {
+        store_writer_error(writer_ref, e);
+        return -1;
     }
+    0
 }
 
 /// Free a writer. Poisons the writer state so any in-flight pool tasks fail gracefully.
@@ -653,14 +642,7 @@ pub extern "C" fn iceberg_writer_write_sync(
     let reader = match StreamReader::try_new(cursor, None) {
         Ok(r) => r,
         Err(e) => {
-            let mut slot = writer_ref
-                .writer_state
-                .error
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() {
-                *slot = Some(anyhow::anyhow!("IPC reader: {}", e));
-            }
+            store_writer_error(writer_ref, anyhow::anyhow!("IPC reader: {}", e));
             return -1;
         }
     };
@@ -669,41 +651,12 @@ pub extern "C" fn iceberg_writer_write_sync(
         let batch = match batch_result {
             Ok(b) => b,
             Err(e) => {
-                let mut slot = writer_ref
-                    .writer_state
-                    .error
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if slot.is_none() {
-                    *slot = Some(anyhow::anyhow!("IPC batch: {}", e));
-                }
+                store_writer_error(writer_ref, anyhow::anyhow!("IPC batch: {}", e));
                 return -1;
             }
         };
-        writer_ref
-            .writer_state
-            .pending
-            .fetch_add(1, Ordering::AcqRel);
-        let task = EncodeTask {
-            batch,
-            state: writer_ref.writer_state.clone(),
-        };
-        if pool.task_tx.blocking_send(task).is_err() {
-            let prev = writer_ref
-                .writer_state
-                .pending
-                .fetch_sub(1, Ordering::AcqRel);
-            if prev == 1 {
-                writer_ref.writer_state.done_notify.notify_one();
-            }
-            let mut slot = writer_ref
-                .writer_state
-                .error
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() {
-                *slot = Some(anyhow::anyhow!("Encode pool closed"));
-            }
+        if let Err(e) = submit_batch(writer_ref, pool, batch) {
+            store_writer_error(writer_ref, e);
             return -1;
         }
     }
