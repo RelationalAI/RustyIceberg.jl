@@ -434,7 +434,7 @@ pub extern "C" fn iceberg_writer_write_gathered_columns(
 /// Each `ColumnDescriptor` is treated as a single sequential slice (no scatter/gather).
 /// Returns 0 on success, -1 on error (error stored in writer state, propagated on close).
 #[no_mangle]
-pub extern "C" fn iceberg_writer_write_columns_sync(
+pub extern "C" fn iceberg_writer_write_columns(
     writer: *mut IcebergDataFileWriter,
     columns: *const ColumnDescriptor,
     num_columns: usize,
@@ -617,7 +617,7 @@ export_runtime_op!(
 ///
 /// Returns 0 on success, -1 on error (error stored in writer state, propagated on close).
 #[no_mangle]
-pub extern "C" fn iceberg_writer_write_sync(
+pub extern "C" fn iceberg_writer_write(
     writer: *mut IcebergDataFileWriter,
     arrow_ipc_data: *const u8,
     arrow_ipc_len: usize,

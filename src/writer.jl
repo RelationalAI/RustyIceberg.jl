@@ -419,7 +419,7 @@ end
 # Internal helper to write raw IPC bytes to the Rust writer
 function _write_ipc_bytes(writer::DataFileWriter, ipc_bytes::Vector{UInt8})
     ret = GC.@preserve ipc_bytes begin
-        @ccall rust_lib.iceberg_writer_write_sync(
+        @ccall rust_lib.iceberg_writer_write(
             writer.ptr::Ptr{Cvoid},
             pointer(ipc_bytes)::Ptr{UInt8},
             length(ipc_bytes)::Csize_t,
@@ -842,7 +842,7 @@ function write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}
     isempty(columns) && throw(IcebergException("No columns provided"))
 
     ret = GC.@preserve columns arrays_to_preserve begin
-        @ccall rust_lib.iceberg_writer_write_columns_sync(
+        @ccall rust_lib.iceberg_writer_write_columns(
             writer.ptr::Ptr{Cvoid},
             pointer(columns)::Ptr{ColumnDescriptor},
             length(columns)::Csize_t,
