@@ -1148,3 +1148,267 @@ end
 
     println("\n✅ write_columns decimal nullable tests completed!")
 end
+
+@testset "Writer write_columns (GatheredBatch) API" begin
+    println("Testing write_columns with GatheredBatch (gathered-column) API...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+
+        test_namespace = ["test_gathered_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+
+        # Schema: id (non-nullable long), score (nullable double), tag (nullable string)
+        schema = Schema([
+            Field(Int32(1), "id",    IcebergLong();   required=true),
+            Field(Int32(2), "score", IcebergDouble(); required=false),
+            Field(Int32(3), "tag",   IcebergString(); required=false),
+        ])
+
+        table_name = "gathered_test_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(catalog, test_namespace, table_name, schema)
+        @test table != C_NULL
+        println("✅ Table created")
+
+        # --- Data layout (4 rows) ---
+        # id:    [1, 2, 3, 4]  — non-nullable, single sequential slice
+        # score: [1.1, null, 3.3, null]  — nullable; two sequential slices, each with validity
+        # tag:   ["alpha", null, "gamma", null]  — nullable string via add_string_slice!
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            batch = RustyIceberg.GatheredBatch()
+
+            # id: single sequential slice, no nulls
+            id_data = Int64[1, 2, 3, 4]
+            id_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_INT64)
+            RustyIceberg.add_slice!(id_col, id_data)
+            push!(batch, id_col)
+            println("✅ id column built (sequential, non-nullable)")
+
+            # score: two sequential slices, each with validity masks
+            # Slice 1 — src = [1.1, 9.9], validity = [true, false] → rows 0 (1.1) and 1 (null)
+            # Slice 2 — src = [3.3, 8.8] via selection [1] + identity [8.8] (just sequential here)
+            # Use scattered access for slice 2: src=[99.9, 3.3, 88.8], sel=[2] → picks 3.3
+            score_src1 = Float64[1.1, 9.9]
+            score_valid1 = BitVector([true, false])
+
+            score_src2 = Float64[99.9, 3.3, 88.8]
+            score_sel2 = Int64[2]       # picks index 2 → 3.3 (1-based)
+            score_valid2 = BitVector([true])
+
+            score_src3 = Float64[7.7, 8.8]
+            score_valid3 = BitVector([false])  # null for row 3
+
+            score_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_FLOAT64; nullable=true)
+            RustyIceberg.add_slice!(score_col, score_src1; validity=score_valid1)
+            RustyIceberg.add_slice!(score_col, score_src2; sel=score_sel2, validity=score_valid2)
+            RustyIceberg.add_slice!(score_col, score_src3; sel=Int64[1], validity=score_valid3)
+            push!(batch, score_col)
+            println("✅ score column built (scattered + nullable)")
+
+            # tag: string column via the high-level add_string_slice! overload
+            # Row 0: "alpha", row 1: null, row 2: "gamma", row 3: null
+            tag_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_STRING; nullable=true)
+            RustyIceberg.add_string_slice!(
+                tag_col,
+                ["alpha", "", "gamma", ""];
+                validity=BitVector([true, false, true, false])
+            )
+            push!(batch, tag_col)
+            println("✅ tag column built (string via add_string_slice!)")
+
+            RustyIceberg.write_columns(writer, batch)
+            println("✅ Batch written via write_columns (GatheredBatch)")
+        end
+        @test data_files !== nothing && data_files.ptr != C_NULL
+        println("✅ Writer closed")
+
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+        println("✅ Transaction committed")
+
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
+        @test length(tbl.id) == 4
+        println("✅ Read $(length(tbl.id)) rows")
+
+        perm = sortperm(tbl.id)
+        sorted_ids   = tbl.id[perm]
+        sorted_scores = tbl.score[perm]
+        sorted_tags  = tbl.tag[perm]
+
+        # Verify id column (non-nullable, sequential)
+        @test sorted_ids == Int64[1, 2, 3, 4]
+        println("✅ id values correct")
+
+        # Verify score column (nullable, scattered slices)
+        @test !ismissing(sorted_scores[1]) && sorted_scores[1] ≈ 1.1
+        @test ismissing(sorted_scores[2])
+        @test !ismissing(sorted_scores[3]) && sorted_scores[3] ≈ 3.3
+        @test ismissing(sorted_scores[4])
+        println("✅ score values correct (including nulls)")
+
+        # Verify tag column (nullable string)
+        @test !ismissing(sorted_tags[1]) && sorted_tags[1] == "alpha"
+        @test ismissing(sorted_tags[2])
+        @test !ismissing(sorted_tags[3]) && sorted_tags[3] == "gamma"
+        @test ismissing(sorted_tags[4])
+        println("✅ tag values correct (including nulls)")
+
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+        end
+    end
+
+    println("\n✅ write_columns (GatheredBatch) API tests completed!")
+end
+
+@testset "Writer WriterConfig parquet properties" begin
+    println("Testing WriterConfig parquet writer properties...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    try
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+        println("✅ Catalog created successfully")
+
+        call_count = Ref(0)
+
+        # Write n_rows with the given config, commit, read back, return the NamedTuple.
+        # Creates and cleans up its own namespace/table.
+        function write_read_config(config::RustyIceberg.WriterConfig, n_rows::Int=5)
+            call_count[] += 1
+            uid = "$(round(Int, time() * 1000))_$(call_count[])"
+            ns = ["test_wrcfg_$uid"]
+            tn = "wrcfg_$uid"
+            schema = Schema([
+                Field(Int32(1), "id",    IcebergLong();   required=true),
+                Field(Int32(2), "value", IcebergDouble(); required=false),
+            ])
+            table = C_NULL
+            updated_table = C_NULL
+            data_files = nothing
+            try
+                RustyIceberg.create_namespace(catalog, ns)
+                table = RustyIceberg.create_table(catalog, ns, tn, schema)
+                data_files = RustyIceberg.with_data_file_writer(table, config) do writer
+                    write(writer, (
+                        id    = Int64.(1:n_rows),
+                        value = Float64.(1:n_rows) .* 1.1,
+                    ))
+                end
+                updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+                    RustyIceberg.with_fast_append(tx) do action
+                        RustyIceberg.add_data_files(action, data_files)
+                    end
+                end
+                return read_table_data(updated_table)
+            finally
+                if updated_table != C_NULL
+                    RustyIceberg.free_table(updated_table)
+                end
+                if data_files !== nothing && data_files.ptr != C_NULL
+                    RustyIceberg.free_data_files!(data_files)
+                end
+                if table != C_NULL
+                    RustyIceberg.free_table(table)
+                    RustyIceberg.drop_table(catalog, ns, tn)
+                    RustyIceberg.drop_namespace(catalog, ns)
+                end
+            end
+        end
+
+        # --- Compression codecs ---
+        for codec in [RustyIceberg.SNAPPY, RustyIceberg.GZIP, RustyIceberg.LZ4, RustyIceberg.ZSTD]
+            tbl = write_read_config(RustyIceberg.WriterConfig(compression=codec))
+            @test !isnothing(tbl)
+            @test length(tbl.id) == 5
+            perm = sortperm(tbl.id)
+            @test tbl.id[perm] == Int64[1, 2, 3, 4, 5]
+            @test tbl.value[perm] ≈ Float64[1, 2, 3, 4, 5] .* 1.1
+            println("✅ Compression $codec: data correct")
+        end
+
+        # --- plain_encoding=true (bypasses DELTA_BINARY_PACKED for INT64/INT32) ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(plain_encoding=true))
+        @test !isnothing(tbl) && length(tbl.id) == 5
+        @test tbl.id[sortperm(tbl.id)] == Int64[1, 2, 3, 4, 5]
+        println("✅ plain_encoding=true: data correct")
+
+        # --- dictionary_enabled=false ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(dictionary_enabled=false))
+        @test !isnothing(tbl) && length(tbl.id) == 5
+        @test tbl.id[sortperm(tbl.id)] == Int64[1, 2, 3, 4, 5]
+        println("✅ dictionary_enabled=false: data correct")
+
+        # --- statistics_enabled=false ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(statistics_enabled=false))
+        @test !isnothing(tbl) && length(tbl.id) == 5
+        @test tbl.id[sortperm(tbl.id)] == Int64[1, 2, 3, 4, 5]
+        println("✅ statistics_enabled=false: data correct")
+
+        # --- max_row_group_size=3 with 10 rows → forces ≥4 row groups ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(max_row_group_size=3), 10)
+        @test !isnothing(tbl) && length(tbl.id) == 10
+        @test tbl.id[sortperm(tbl.id)] == Int64.(1:10)
+        println("✅ max_row_group_size=3 (10 rows, multiple row groups): all rows intact")
+
+        # --- write_batch_size=2 (rows encoded per column chunk within a row group) ---
+        tbl = write_read_config(RustyIceberg.WriterConfig(write_batch_size=2))
+        @test !isnothing(tbl) && length(tbl.id) == 5
+        @test tbl.id[sortperm(tbl.id)] == Int64[1, 2, 3, 4, 5]
+        println("✅ write_batch_size=2: data correct")
+
+        # --- Combined: ZSTD + plain_encoding + no dict + large write_batch_size ---
+        config = RustyIceberg.WriterConfig(
+            compression        = RustyIceberg.ZSTD,
+            plain_encoding     = true,
+            dictionary_enabled = false,
+            write_batch_size   = 65536,
+        )
+        tbl = write_read_config(config, 8)
+        @test !isnothing(tbl) && length(tbl.id) == 8
+        @test tbl.id[sortperm(tbl.id)] == Int64.(1:8)
+        println("✅ Combined (ZSTD + plain + no dict + large batch_size): data correct")
+
+    finally
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+            println("✅ Catalog cleaned up")
+        end
+    end
+
+    println("\n✅ WriterConfig parquet properties tests completed!")
+end
