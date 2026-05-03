@@ -1580,6 +1580,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "async-trait",
+ "bytes",
  "futures",
  "home",
  "iceberg",
