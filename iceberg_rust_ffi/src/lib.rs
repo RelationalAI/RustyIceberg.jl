@@ -41,6 +41,9 @@ mod pipeline_stats;
 // Ordered file-parallel pipeline
 mod ordered_file_pipeline;
 
+// Per-file nested pipeline for incremental scans
+mod incremental_pipeline;
+
 // Response types module
 mod response;
 

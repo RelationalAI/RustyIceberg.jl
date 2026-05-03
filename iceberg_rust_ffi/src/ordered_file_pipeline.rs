@@ -42,7 +42,7 @@ use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
 /// Hard cap on file-level concurrency to keep total memory bounded.
-const MAX_FILE_CONCURRENCY: usize = 16;
+pub(crate) const MAX_FILE_CONCURRENCY: usize = 16;
 
 /// Time an async expression and record its duration into a STATS field.
 ///
@@ -66,10 +66,10 @@ macro_rules! timed {
 /// A serialized Arrow IPC batch bundled with its byte size and a reference
 /// to the originating file task's semaphore. The consumer releases permits
 /// after forwarding the batch to Julia, unblocking the producer.
-struct BufferedBatch {
-    batch: ArrowBatch,
-    byte_len: usize,
-    semaphore: Arc<Semaphore>,
+pub(crate) struct BufferedBatch {
+    pub(crate) batch: ArrowBatch,
+    pub(crate) byte_len: usize,
+    pub(crate) semaphore: Arc<Semaphore>,
 }
 
 /// Internal per-file scan result: filename, record count, and a prefetched
@@ -80,19 +80,24 @@ pub struct FileScan {
     pub stream: IcebergArrowStream,
 }
 
-/// Convert a per-file mpsc receiver into an IcebergArrowStream.
-/// Semaphore permits are released and STATS updated as each batch is yielded.
-fn make_file_stream(
+/// Convert a per-file mpsc receiver into an `IcebergArrowStream`.
+/// Releases semaphore permits as each batch is yielded and calls `on_release`
+/// with the byte count (use it to update stats or pass `|_| {}` to skip).
+pub(crate) fn make_file_stream<F>(
     file_rx: mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
-) -> IcebergArrowStream {
-    let stream = futures::stream::unfold(file_rx, |mut rx| async move {
+    on_release: F,
+) -> IcebergArrowStream
+where
+    F: Fn(usize) + Send + 'static,
+{
+    let stream = futures::stream::unfold((file_rx, on_release), |(mut rx, cb)| async move {
         rx.recv().await.map(|item| {
             let result = item.map(|buf| {
                 buf.semaphore.add_permits(buf.byte_len);
-                STATS.track_buffer_release(buf.byte_len as u64);
+                cb(buf.byte_len);
                 buf.batch
             });
-            (result, rx)
+            (result, (rx, cb))
         })
     })
     .boxed();
@@ -189,50 +194,81 @@ async fn run_flat(
     STATS.store_elapsed(&STATS.pipeline_wall_ns, pipeline_start);
 }
 
-/// Main nested consumer loop. Keeps `concurrency` file tasks in flight concurrently using
-/// FuturesUnordered and wraps each completed task's receiver as an
-/// IcebergArrowStream before sending a FileScan to the outer channel.
-async fn run_nested(
-    tasks: Vec<FileScanTask>,
-    file_io: FileIO,
-    batch_size: Option<usize>,
+/// Generic `FuturesUnordered` orchestrator shared by the full scan and
+/// incremental append pipelines.
+///
+/// Keeps `concurrency` file tasks in flight from `task_stream`, wraps each
+/// completed receiver as an `IcebergArrowStream` via `make_file_stream`, and
+/// forwards `FileScan` items to `tx` in source order.
+///
+/// `spawn_task` converts a task into a future that resolves immediately to
+/// `(filename, record_count, Receiver)` — the actual I/O runs in the
+/// background tokio task spawned inside `spawn_task`.
+///
+/// `on_release` is forwarded to `make_file_stream`; pass
+/// `|n| STATS.track_buffer_release(n as u64)` for the full scan or
+/// `|_| {}` when no stats tracking is needed.
+pub(crate) async fn run_nested_pipeline<T, S, SpawnFut, F>(
+    mut task_stream: S,
     concurrency: usize,
     tx: mpsc::Sender<Result<FileScan, iceberg::Error>>,
-) {
-    use futures::stream::FuturesUnordered;
+    spawn_task: impl Fn(T) -> SpawnFut,
+    on_release: F,
+) where
+    S: futures::Stream<Item = iceberg::Result<T>> + Unpin,
+    SpawnFut: std::future::Future<
+            Output = iceberg::Result<(
+                String,
+                i64,
+                mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
+            )>,
+        > + Send
+        + 'static,
+    F: Fn(usize) + Send + Clone + 'static,
+{
+    use futures::{future::BoxFuture, stream::FuturesUnordered};
 
-    // For the nested path this records "time until last FileScan was handed to
-    // the consumer". For the flat path run_flat overwrites it with the full
-    // end-to-end time once all batches are drained, so the flat metric is
-    // unaffected.
-    let pipeline_start = Instant::now();
+    type SpawnResult<E> =
+        Result<(String, i64, mpsc::Receiver<Result<BufferedBatch, E>>), E>;
+    let mut in_flight: FuturesUnordered<BoxFuture<'static, SpawnResult<iceberg::Error>>> =
+        FuturesUnordered::new();
+    let mut stream_done = false;
 
-    let mut in_flight = FuturesUnordered::new();
-    let mut task_iter = tasks.into_iter();
-
-    // Seed the first N file tasks.
     for _ in 0..concurrency {
-        if let Some(task) = task_iter.next() {
-            in_flight.push(spawn_file_task_with_meta(task, file_io.clone(), batch_size));
+        match task_stream.next().await {
+            Some(Ok(task)) => in_flight.push(Box::pin(spawn_task(task))),
+            Some(Err(e)) => {
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+            None => {
+                stream_done = true;
+                break;
+            }
         }
     }
 
     while let Some(file_result) = in_flight.next().await {
-        // Eagerly start the next file to keep N tasks in flight.
-        if let Some(task) = task_iter.next() {
-            in_flight.push(spawn_file_task_with_meta(task, file_io.clone(), batch_size));
+        if !stream_done {
+            match task_stream.next().await {
+                Some(Ok(task)) => in_flight.push(Box::pin(spawn_task(task))),
+                Some(Err(e)) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+                None => stream_done = true,
+            }
         }
 
         match file_result {
             Ok((filename, record_count, file_rx)) => {
-                let stream = make_file_stream(file_rx);
                 let file_scan = FileScan {
                     filename,
                     record_count,
-                    stream,
+                    stream: make_file_stream(file_rx, on_release.clone()),
                 };
                 if timed!(file_dispatch_wait_ns, tx.send(Ok(file_scan))).is_err() {
-                    return; // outer consumer dropped the stream
+                    return;
                 }
             }
             Err(e) => {
@@ -241,6 +277,34 @@ async fn run_nested(
             }
         }
     }
+}
+
+/// Full-scan nested consumer. Wraps `run_nested_pipeline` and records
+/// wall-clock time around it for `STATS.pipeline_wall_ns`.
+async fn run_nested(
+    tasks: Vec<FileScanTask>,
+    file_io: FileIO,
+    batch_size: Option<usize>,
+    concurrency: usize,
+    tx: mpsc::Sender<Result<FileScan, iceberg::Error>>,
+) {
+    // For the nested path this records "time until last FileScan was handed to
+    // the consumer". For the flat path run_flat overwrites it with the full
+    // end-to-end time once all batches are drained, so the flat metric is
+    // unaffected.
+    let pipeline_start = Instant::now();
+
+    let task_stream =
+        futures::stream::iter(tasks.into_iter().map(Ok::<FileScanTask, iceberg::Error>));
+
+    run_nested_pipeline(
+        task_stream,
+        concurrency,
+        tx,
+        move |task| spawn_file_task_with_meta(task, file_io.clone(), batch_size),
+        |n| STATS.track_buffer_release(n as u64),
+    )
+    .await;
 
     STATS.store_elapsed(&STATS.pipeline_wall_ns, pipeline_start);
 }

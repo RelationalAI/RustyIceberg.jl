@@ -9,7 +9,8 @@ use object_store_ffi::{
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::scan_common::*;
-use crate::{IcebergArrowStream, IcebergTable};
+use crate::table::{IcebergArrowStream, IcebergFileScanStream};
+use crate::IcebergTable;
 
 /// Sentinel value for optional snapshot IDs in the C API.
 /// When -1 is passed as from_snapshot_id or to_snapshot_id, it means None (use default).
@@ -107,7 +108,7 @@ pub extern "C" fn iceberg_new_incremental_scan(
         builder: Some(scan_builder),
         scan: None,
         serialization_concurrency: 0,
-        file_io: None,
+        file_io: Some(table_ref.table.file_io().clone()),
         batch_size: None,
         file_concurrency: 0,
         file_prefetch_depth: 0,
@@ -212,6 +213,120 @@ export_runtime_op!(
         };
 
         Ok::<(IcebergArrowStream, IcebergArrowStream), anyhow::Error>((inserts, deletes))
+    },
+    scan: *mut IcebergIncrementalScan
+);
+
+/// Response for iceberg_incremental_file_scan_stream — one FileScanStream for
+/// appends (per-file, ordered) and one flat ArrowStream for deletes.
+#[repr(C)]
+pub struct IcebergIncrementalFileScanStreamResponse {
+    result: CResult,
+    append_stream: *mut IcebergFileScanStream,
+    delete_stream: *mut IcebergArrowStream,
+    error_message: *mut c_char,
+    context: *const Context,
+}
+
+unsafe impl Send for IcebergIncrementalFileScanStreamResponse {}
+
+impl RawResponse for IcebergIncrementalFileScanStreamResponse {
+    type Payload = (IcebergFileScanStream, IcebergArrowStream);
+
+    fn result_mut(&mut self) -> &mut CResult {
+        &mut self.result
+    }
+    fn context_mut(&mut self) -> &mut *const Context {
+        &mut self.context
+    }
+    fn error_message_mut(&mut self) -> &mut *mut c_char {
+        &mut self.error_message
+    }
+    fn set_payload(&mut self, payload: Option<Self::Payload>) {
+        match payload {
+            Some((appends, deletes)) => {
+                self.append_stream = Box::into_raw(Box::new(appends));
+                self.delete_stream = Box::into_raw(Box::new(deletes));
+            }
+            None => {
+                self.append_stream = ptr::null_mut();
+                self.delete_stream = ptr::null_mut();
+            }
+        }
+    }
+}
+
+// Nested incremental scan: per-file append stream + flat delete stream.
+export_runtime_op!(
+    iceberg_incremental_file_scan_stream,
+    IcebergIncrementalFileScanStreamResponse,
+    || {
+        if scan.is_null() {
+            return Err(anyhow::anyhow!("Null scan pointer provided"));
+        }
+        let scan_ptr = unsafe { &*scan };
+        let scan_ref = &scan_ptr.scan;
+        if scan_ref.is_none() {
+            return Err(anyhow::anyhow!("Incremental scan not initialized"));
+        }
+        let file_io = scan_ptr
+            .file_io
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("FileIO not available; create scan from table"))?;
+
+        let concurrency = if scan_ptr.file_concurrency == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            scan_ptr.file_concurrency
+        };
+        let prefetch_depth = if scan_ptr.file_prefetch_depth == 0 {
+            concurrency
+        } else {
+            scan_ptr.file_prefetch_depth
+        };
+        let serialization_concurrency = if scan_ptr.serialization_concurrency == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            scan_ptr.serialization_concurrency
+        };
+        let batch_size = scan_ptr.batch_size;
+
+        Ok((
+            scan_ref.as_ref().unwrap(),
+            concurrency,
+            prefetch_depth,
+            serialization_concurrency,
+            batch_size,
+            file_io,
+        ))
+    },
+    result_tuple,
+    async {
+        let (scan_ref, concurrency, prefetch_depth, serialization_concurrency, batch_size, file_io) =
+            result_tuple;
+
+        let (append_tasks, delete_tasks) = scan_ref.plan_files().await?;
+
+        let (append_stream, delete_stream) =
+            crate::incremental_pipeline::create_incremental_nested_pipeline(
+                append_tasks,
+                delete_tasks,
+                file_io,
+                batch_size,
+                concurrency,
+                prefetch_depth,
+                serialization_concurrency,
+            )
+            .await?;
+
+        Ok::<(IcebergFileScanStream, IcebergArrowStream), anyhow::Error>((
+            append_stream,
+            delete_stream,
+        ))
     },
     scan: *mut IcebergIncrementalScan
 );

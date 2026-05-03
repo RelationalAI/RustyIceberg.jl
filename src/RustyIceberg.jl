@@ -12,6 +12,7 @@ export Table, Scan, IncrementalScan, ArrowBatch, StaticConfig, ArrowStream
 export init_runtime
 export IcebergException
 export new_incremental_scan, free_incremental_scan!
+export scan_incremental_nested!, nested_incremental_arrow_stream
 export table_open, free_table, new_scan, free_scan!
 export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_schema
 export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
