@@ -330,7 +330,7 @@ where
     for (i, desc) in iter.enumerate() {
         arrays.push(unsafe { build_arrow_array_gathered(&desc, arrow_schema.field(i))? });
     }
-    RecordBatch::try_new(arrow_schema, arrays).map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))
+    RecordBatch::try_new(arrow_schema, arrays).map_err(|_| anyhow::anyhow!("failed to construct RecordBatch"))
 }
 
 /// Submit a `RecordBatch` to the global encode pool.
@@ -427,7 +427,7 @@ unsafe fn write_columns_inner(
         arrays.push(unsafe { build_arrow_array_gathered(&desc, arrow_schema.field(i))? });
     }
     let batch = RecordBatch::try_new(arrow_schema, arrays)
-        .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))?;
+        .map_err(|_| anyhow::anyhow!("failed to construct RecordBatch"))?;
     submit_batch(writer_ref, pool, batch)
 }
 
