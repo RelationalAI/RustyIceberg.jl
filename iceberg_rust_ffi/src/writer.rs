@@ -330,7 +330,8 @@ where
     for (i, desc) in iter.enumerate() {
         arrays.push(unsafe { build_arrow_array_gathered(&desc, arrow_schema.field(i))? });
     }
-    RecordBatch::try_new(arrow_schema, arrays).map_err(|_| anyhow::anyhow!("failed to construct RecordBatch"))
+    RecordBatch::try_new(arrow_schema, arrays)
+        .map_err(|_| anyhow::anyhow!("failed to construct RecordBatch"))
 }
 
 /// Submit a `RecordBatch` to the global encode pool.
