@@ -207,6 +207,23 @@ function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
 end
 
 """
+    with_file_prefetch_depth!(scan::Scan, n::UInt)
+
+Set how many FileScan tasks are queued ahead in the outer FileScanStream.
+Higher values keep the Julia consumer busy but use more memory.
+"""
+function with_file_prefetch_depth!(scan::Scan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_file_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+    if result != 0
+        throw(IcebergException("Failed to set file prefetch depth", result))
+    end
+    return nothing
+end
+
+"""
     with_snapshot_id!(scan::Scan, snapshot_id::Int64)
 
 Set the snapshot ID for the scan.
@@ -296,4 +313,149 @@ function free_scan!(scan::Scan)
     GC.@preserve scan @ccall rust_lib.iceberg_scan_free(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cvoid
+end
+
+# ── Nested file-scan pipeline ──────────────────────────────────────────────
+#
+# Returns a FileScanStream (outer stream). Each item yielded by next_file_scan
+# is an opaque FileScan pointer carrying the filename, record count, and an
+# inner IcebergArrowStream of prefetched batches.
+#
+# Ownership rules:
+#   - Call free_file_scan! after processing each FileScan.
+#   - Do NOT call free_stream on the pointer returned by file_scan_arrow_stream;
+#     iceberg_file_scan_free handles that.
+#   - Call free_file_scan_stream! after the outer loop completes.
+
+"""Opaque pointer type for an outer file-scan stream (IcebergFileScanStream)."""
+const FileScanStream = Ptr{Cvoid}
+
+const FileScanStreamResponse = Response{FileScanStream}
+
+"""
+    nested_arrow_stream(scan::Scan)::FileScanStream
+
+Initialize a nested Arrow stream for the scan asynchronously.
+Returns an outer FileScanStream whose items are per-file scans.
+"""
+function nested_arrow_stream(scan::Scan)
+    response = FileScanStreamResponse()
+
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_file_scan_stream(
+            scan.ptr::Ptr{Cvoid},
+            response::Ref{FileScanStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "iceberg_file_scan_stream", IcebergException)
+
+    return response.value
+end
+
+"""
+    scan_nested!(scan::Scan)::FileScanStream
+
+Build the scan and return a nested FileScanStream (one item per file).
+"""
+function scan_nested!(scan::Scan)
+    build!(scan)
+    return nested_arrow_stream(scan)
+end
+
+# Response type for next_file_scan
+const FileScanResponse = Response{Ptr{Cvoid}}
+
+"""
+    next_file_scan(stream::FileScanStream)::Ptr{Cvoid}
+
+Wait for the next per-file scan from the outer stream asynchronously.
+Returns C_NULL when the stream is exhausted.
+"""
+function next_file_scan(stream::FileScanStream)
+    response = FileScanResponse()
+
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_next_file_scan(
+            stream::FileScanStream,
+            response::Ref{FileScanResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "iceberg_next_file_scan", IcebergException)
+
+    return response.value
+end
+
+"""
+    file_scan_record_count(fs::Ptr{Cvoid})::Int64
+
+Return the record count of the file scan. Returns -1 on null input.
+"""
+function file_scan_record_count(fs::Ptr{Cvoid})::Int64
+    return @ccall rust_lib.iceberg_file_scan_record_count(fs::Ptr{Cvoid})::Int64
+end
+
+"""
+    file_scan_filename(fs::Ptr{Cvoid})::String
+
+Return the file path of the file scan as a Julia String.
+"""
+function file_scan_filename(fs::Ptr{Cvoid})::String
+    ptr = @ccall rust_lib.iceberg_file_scan_filename(fs::Ptr{Cvoid})::Ptr{Cchar}
+    ptr == C_NULL && return ""
+    return unsafe_string(ptr)
+end
+
+"""
+    file_scan_arrow_stream(fs::Ptr{Cvoid})::ArrowStream
+
+Return the inner batch stream of the file scan (borrowed pointer).
+Do NOT call free_stream on the returned pointer; use free_file_scan! instead.
+"""
+function file_scan_arrow_stream(fs::Ptr{Cvoid})::ArrowStream
+    # IcebergFileScan layout (repr(C)):
+    #   filename:     *mut c_char   (offset 0, 8 bytes)
+    #   record_count: i64           (offset 8, 8 bytes)
+    #   stream:       *mut IcebergArrowStream (offset 16, 8 bytes)
+    offset = sizeof(Ptr{Cvoid}) + sizeof(Int64)
+    return unsafe_load(convert(Ptr{Ptr{Cvoid}}, fs + offset))
+end
+
+"""
+    free_file_scan!(fs::Ptr{Cvoid})
+
+Free the memory associated with a file scan (filename and inner stream).
+"""
+function free_file_scan!(fs::Ptr{Cvoid})
+    @ccall rust_lib.iceberg_file_scan_free(fs::Ptr{Cvoid})::Cvoid
+end
+
+"""
+    free_file_scan_stream!(stream::FileScanStream)
+
+Free the memory associated with a file scan stream.
+"""
+function free_file_scan_stream!(stream::FileScanStream)
+    @ccall rust_lib.iceberg_file_scan_stream_free(stream::FileScanStream)::Cvoid
+end
+
+"""
+    print_pipeline_stats()
+
+Print a summary of file-parallel pipeline timing and throughput counters to stdout.
+"""
+function print_pipeline_stats()
+    @ccall rust_lib.iceberg_print_pipeline_stats()::Cvoid
+end
+
+"""
+    reset_pipeline_stats()
+
+Reset all file-parallel pipeline statistics counters to zero.
+"""
+function reset_pipeline_stats()
+    @ccall rust_lib.iceberg_reset_pipeline_stats()::Cvoid
 end

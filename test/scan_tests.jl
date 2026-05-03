@@ -1172,6 +1172,33 @@ end
         end
     end
 
+    @testset "with_file_prefetch_depth!" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan  = RustyIceberg.new_scan(table)
+
+        @test_nowarn RustyIceberg.with_file_prefetch_depth!(scan, UInt(4))
+        stream = RustyIceberg.scan!(scan)
+
+        total_rows = 0
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                total_rows += nrow(DataFrame(arrow_table))
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream)
+            end
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+
+        @test total_rows > 0
+        println("✅ with_file_prefetch_depth! test passed ($total_rows rows)")
+    end
+
     @testset "Combined with_snapshot_id! and other builder methods" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
@@ -1221,5 +1248,265 @@ end
             RustyIceberg.free_scan!(scan)
             RustyIceberg.free_table(table)
         end
+    end
+end
+
+@testset "Nested File-Scan API" begin
+    nations_path  = "s3://warehouse/tpch.sf01/nation/metadata/00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
+    customer_path = "s3://warehouse/tpch.sf01/customer/metadata/00001-76f6e7e4-b34f-492f-b6a1-cc9f8c8f4975.metadata.json"
+
+    @testset "nested_arrow_stream called directly after build!" begin
+        # scan_nested! = build! + nested_arrow_stream; exercise the two-step path.
+        table = RustyIceberg.table_open(nations_path)
+        scan  = RustyIceberg.new_scan(table)
+        RustyIceberg.build!(scan)
+        outer = RustyIceberg.nested_arrow_stream(scan)
+        @test outer != C_NULL
+
+        row_count = 0
+        try
+            fs_ptr = RustyIceberg.next_file_scan(outer)
+            while fs_ptr != C_NULL
+                inner = RustyIceberg.file_scan_arrow_stream(fs_ptr)
+                batch_ptr = RustyIceberg.next_batch(inner)
+                while batch_ptr != C_NULL
+                    batch = unsafe_load(batch_ptr)
+                    arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                    row_count += nrow(DataFrame(arrow_table))
+                    RustyIceberg.free_batch(batch_ptr)
+                    batch_ptr = RustyIceberg.next_batch(inner)
+                end
+                RustyIceberg.free_file_scan!(fs_ptr)
+                fs_ptr = RustyIceberg.next_file_scan(outer)
+            end
+        finally
+            RustyIceberg.free_file_scan_stream!(outer)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+
+        @test row_count == 25
+        println("✅ nested_arrow_stream called directly after build! returns correct data")
+    end
+
+    @testset "Basic iteration — filenames and record counts" begin
+        table = RustyIceberg.table_open(nations_path)
+        scan  = RustyIceberg.new_scan(table)
+        outer = RustyIceberg.scan_nested!(scan)
+        @test outer != C_NULL
+
+        file_count    = 0
+        total_records = 0
+        try
+            fs_ptr = RustyIceberg.next_file_scan(outer)
+            while fs_ptr != C_NULL
+                file_count += 1
+                fname  = RustyIceberg.file_scan_filename(fs_ptr)
+                nrec   = RustyIceberg.file_scan_record_count(fs_ptr)
+
+                @test !isempty(fname)
+                @test endswith(fname, ".parquet")
+                @test startswith(fname, "s3://")
+                @test nrec > 0
+                total_records += nrec
+
+                # Drain the inner stream.
+                inner = RustyIceberg.file_scan_arrow_stream(fs_ptr)
+                batch_ptr = RustyIceberg.next_batch(inner)
+                while batch_ptr != C_NULL
+                    RustyIceberg.free_batch(batch_ptr)
+                    batch_ptr = RustyIceberg.next_batch(inner)
+                end
+
+                RustyIceberg.free_file_scan!(fs_ptr)
+                fs_ptr = RustyIceberg.next_file_scan(outer)
+            end
+        finally
+            RustyIceberg.free_file_scan_stream!(outer)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+
+        @test file_count > 0
+        @test total_records == 25  # nations table has exactly 25 rows
+        println("✅ Basic iteration: $file_count file(s), $total_records total records")
+    end
+
+    @testset "Row counts match flat scan" begin
+        # Collect total rows via nested pipeline.
+        table_n = RustyIceberg.table_open(customer_path)
+        scan_n  = RustyIceberg.new_scan(table_n)
+        outer   = RustyIceberg.scan_nested!(scan_n)
+
+        nested_rows = 0
+        try
+            fs_ptr = RustyIceberg.next_file_scan(outer)
+            while fs_ptr != C_NULL
+                inner = RustyIceberg.file_scan_arrow_stream(fs_ptr)
+                batch_ptr = RustyIceberg.next_batch(inner)
+                while batch_ptr != C_NULL
+                    batch = unsafe_load(batch_ptr)
+                    arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                    nested_rows += nrow(DataFrame(arrow_table))
+                    RustyIceberg.free_batch(batch_ptr)
+                    batch_ptr = RustyIceberg.next_batch(inner)
+                end
+                RustyIceberg.free_file_scan!(fs_ptr)
+                fs_ptr = RustyIceberg.next_file_scan(outer)
+            end
+        finally
+            RustyIceberg.free_file_scan_stream!(outer)
+            RustyIceberg.free_scan!(scan_n)
+            RustyIceberg.free_table(table_n)
+        end
+
+        # Collect total rows via flat pipeline.
+        table_f  = RustyIceberg.table_open(customer_path)
+        scan_f   = RustyIceberg.new_scan(table_f)
+        stream_f = RustyIceberg.scan!(scan_f)
+
+        flat_rows = 0
+        try
+            batch_ptr = RustyIceberg.next_batch(stream_f)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                flat_rows += nrow(DataFrame(arrow_table))
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream_f)
+            end
+        finally
+            RustyIceberg.free_stream(stream_f)
+            RustyIceberg.free_scan!(scan_f)
+            RustyIceberg.free_table(table_f)
+        end
+
+        @test nested_rows == flat_rows
+        @test nested_rows > 0
+        println("✅ Row count consistency: nested=$nested_rows, flat=$flat_rows")
+    end
+
+    @testset "Correct data — nations table" begin
+        table = RustyIceberg.table_open(nations_path)
+        scan  = RustyIceberg.new_scan(table)
+        outer = RustyIceberg.scan_nested!(scan)
+
+        rows = Tuple[]
+        try
+            fs_ptr = RustyIceberg.next_file_scan(outer)
+            while fs_ptr != C_NULL
+                inner = RustyIceberg.file_scan_arrow_stream(fs_ptr)
+                batch_ptr = RustyIceberg.next_batch(inner)
+                while batch_ptr != C_NULL
+                    batch = unsafe_load(batch_ptr)
+                    arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                    df = DataFrame(arrow_table)
+                    @test names(df) == ["n_nationkey", "n_name", "n_regionkey", "n_comment"]
+                    for row in eachrow(df)
+                        push!(rows, Tuple(row))
+                    end
+                    RustyIceberg.free_batch(batch_ptr)
+                    batch_ptr = RustyIceberg.next_batch(inner)
+                end
+                RustyIceberg.free_file_scan!(fs_ptr)
+                fs_ptr = RustyIceberg.next_file_scan(outer)
+            end
+        finally
+            RustyIceberg.free_file_scan_stream!(outer)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+
+        sort!(rows, by = x -> x[1])
+        @test length(rows) == 25
+        @test rows[1]  == (0, "ALGERIA",       0, "furiously regular requests. platelets affix furious")
+        @test rows[25] == (24, "UNITED STATES", 1, "ly ironic requests along the slyly bold ideas hang after the blithely special notornis; blithely even accounts")
+        println("✅ Correct data verified for nations table via nested API")
+    end
+
+    @testset "Builder methods — select_columns! and with_batch_size!" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan  = RustyIceberg.new_scan(table)
+        RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
+        RustyIceberg.with_batch_size!(scan, UInt(10))
+        outer = RustyIceberg.scan_nested!(scan)
+
+        try
+            fs_ptr = RustyIceberg.next_file_scan(outer)
+            while fs_ptr != C_NULL
+                inner = RustyIceberg.file_scan_arrow_stream(fs_ptr)
+                batch_ptr = RustyIceberg.next_batch(inner)
+                while batch_ptr != C_NULL
+                    batch = unsafe_load(batch_ptr)
+                    arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                    df = DataFrame(arrow_table)
+                    @test names(df) == ["c_custkey", "c_name"]
+                    @test nrow(df) <= 10
+                    RustyIceberg.free_batch(batch_ptr)
+                    batch_ptr = RustyIceberg.next_batch(inner)
+                end
+                RustyIceberg.free_file_scan!(fs_ptr)
+                fs_ptr = RustyIceberg.next_file_scan(outer)
+            end
+        finally
+            RustyIceberg.free_file_scan_stream!(outer)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+        println("✅ select_columns! and with_batch_size! work with nested API")
+    end
+
+    @testset "Safe early drop of FileScan" begin
+        # Drop a FileScan after reading only the first batch — must not crash or hang.
+        table = RustyIceberg.table_open(customer_path)
+        scan  = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1))
+        outer = RustyIceberg.scan_nested!(scan)
+
+        try
+            fs_ptr = RustyIceberg.next_file_scan(outer)
+            @test fs_ptr != C_NULL
+
+            # Read exactly one batch then abandon the rest.
+            inner     = RustyIceberg.file_scan_arrow_stream(fs_ptr)
+            batch_ptr = RustyIceberg.next_batch(inner)
+            if batch_ptr != C_NULL
+                RustyIceberg.free_batch(batch_ptr)
+            end
+            # Drop the file scan without draining inner stream.
+            RustyIceberg.free_file_scan!(fs_ptr)
+            # Drop the outer stream without consuming remaining files.
+        finally
+            RustyIceberg.free_file_scan_stream!(outer)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+        println("✅ Safe early drop of FileScan does not crash")
+    end
+
+    @testset "print_pipeline_stats and reset_pipeline_stats" begin
+        # Run a full scan so the pipeline stats are populated.
+        table  = RustyIceberg.table_open(nations_path)
+        scan   = RustyIceberg.new_scan(table)
+        stream = RustyIceberg.scan!(scan)
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            while batch_ptr != C_NULL
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream)
+            end
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+
+        # print_pipeline_stats writes to stdout — must not throw.
+        @test_nowarn RustyIceberg.print_pipeline_stats()
+        println("✅ print_pipeline_stats() completed without error")
+
+        # reset_pipeline_stats must not throw.
+        @test_nowarn RustyIceberg.reset_pipeline_stats()
+        println("✅ reset_pipeline_stats() completed without error")
     end
 end

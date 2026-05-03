@@ -1,6 +1,10 @@
 use futures::StreamExt;
 use std::ffi::{c_char, c_void};
 
+pub(crate) fn unexpected(msg: impl std::fmt::Display) -> iceberg::Error {
+    iceberg::Error::new(iceberg::ErrorKind::Unexpected, msg.to_string())
+}
+
 use anyhow::Result;
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
@@ -31,6 +35,12 @@ mod writer;
 // Column-based writer module (zero-copy from Julia)
 mod writer_columns;
 
+// Profiling stats for the file-parallel pipeline
+mod pipeline_stats;
+
+// Ordered file-parallel pipeline
+mod ordered_file_pipeline;
+
 // Response types module
 mod response;
 
@@ -46,8 +56,9 @@ pub use response::{
     IcebergStringListResponse,
 };
 pub use table::{
-    ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse, IcebergTable,
-    IcebergTableResponse,
+    ArrowBatch, IcebergArrowStream, IcebergArrowStreamResponse, IcebergBatchResponse,
+    IcebergFileScan, IcebergFileScanResponse, IcebergFileScanStream, IcebergFileScanStreamResponse,
+    IcebergTable, IcebergTableResponse,
 };
 pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
 pub use writer::{
@@ -158,23 +169,14 @@ pub(crate) fn transform_stream_with_parallel_serialization(
                         .await
                     {
                         Ok(Ok(arrow_batch)) => Ok(arrow_batch),
-                        Ok(Err(e)) => Err(iceberg::Error::new(
-                            iceberg::ErrorKind::Unexpected,
-                            e.to_string(),
-                        )),
-                        Err(e) => Err(iceberg::Error::new(
-                            iceberg::ErrorKind::Unexpected,
-                            format!("Serialization task panicked: {}", e),
-                        )),
+                        Ok(Err(e)) => Err(unexpected(e)),
+                        Err(e) => Err(unexpected(format!("Serialization task panicked: {e}"))),
                     }
                 }
-                Err(e) => Err(iceberg::Error::new(
-                    iceberg::ErrorKind::Unexpected,
-                    format!("Stream error: {}", e),
-                )),
+                Err(e) => Err(unexpected(format!("Stream error: {e}"))),
             }
         })
-        .buffer_unordered(concurrency)
+        .buffered(concurrency)
         .boxed()
 }
 

@@ -32,6 +32,7 @@ async-trait = "0.1"
 # (0.5.11+ requires rustc 1.88+)
 home = "=0.5.9"
 serde_json = "1.0.142"
+rayon = "1"
 
 [dev-dependencies]
 tempfile = "3.0"
