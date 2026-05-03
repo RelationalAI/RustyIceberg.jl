@@ -1,8 +1,75 @@
-"""
-Catalog support for RustyIceberg.jl
-
-This module provides Julia wrappers for the REST catalog FFI functions.
-"""
+# Catalog support for RustyIceberg.jl
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Catalog modes and where files live
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Apache Iceberg separates two concerns:
+#
+#   • The *catalog registry* — the in-memory or server-side index that maps
+#     (namespace, table-name) → table metadata location.
+#
+#   • *Table files* — the actual data that makes up an Iceberg table:
+#       - Metadata files  (.metadata.json, snapshot manifests, manifest lists)
+#       - Data files      (Parquet files written by the writer)
+#
+# RustyIceberg.jl exposes three catalog constructors, each with different
+# durability characteristics:
+#
+# ┌──────────────────────────────┬─────────────────┬─────────────────────────┐
+# │ Constructor                  │ Registry lives  │ Table files live        │
+# ├──────────────────────────────┼─────────────────┼─────────────────────────┤
+# │ catalog_create_rest(uri)     │ REST server     │ object store (S3, ADLS, │
+# │                              │ (durable,       │ GCS, …) — durable,      │
+# │                              │ shareable)      │ shareable               │
+# ├──────────────────────────────┼─────────────────┼─────────────────────────┤
+# │ catalog_create_memory(path)  │ RAM (this       │ local filesystem —      │
+# │   where path is a local      │ process only,   │ durable within the host,│
+# │   filesystem path            │ lost on exit)   │ single-machine only     │
+# ├──────────────────────────────┼─────────────────┼─────────────────────────┤
+# │ catalog_create_memory("s3://…│ RAM (this       │ S3 (or compatible)  —   │
+# │   …bucket/prefix")           │ process only,   │ durable, shareable;     │
+# │                              │ lost on exit)   │ no catalog server needed│
+# ├──────────────────────────────┼─────────────────┼─────────────────────────┤
+# │ catalog_create_memory(       │ RAM             │ RAM — everything lost   │
+# │   "memory")                  │                 │ on process exit; good   │
+# │                              │                 │ for unit tests only     │
+# └──────────────────────────────┴─────────────────┴─────────────────────────┘
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Choosing a mode
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# REST catalog (catalog_create_rest)
+#   The production choice. The registry is held by a server (e.g. Polaris,
+#   Nessie, Unity) so multiple processes can share it and it survives restarts.
+#   Table files go to whatever object store the server is configured for.
+#   Requires a running catalog server.
+#
+# Memory catalog + local filesystem (catalog_create_memory("/some/path"))
+#   Useful for local development and integration tests that need real file I/O
+#   but don't want a server. The registry is lost when the catalog is freed, but
+#   the Parquet files and metadata JSON are persisted on disk. A table can be
+#   re-opened later via table_open(metadata_json_path) even after the catalog
+#   is gone.
+#
+# Memory catalog + S3 (catalog_create_memory("s3://bucket/prefix"))
+#   Fills the gap for jobs that need to write Iceberg tables to S3 without
+#   running a catalog server. The registry lives in RAM for the duration of
+#   the process, but all metadata and Parquet files are written to S3 and
+#   remain there after the process exits. Downstream consumers can read tables
+#   via table_open("s3://bucket/prefix/.../metadata.json"). S3 credentials are
+#   passed via the `properties` keyword argument using the same keys accepted
+#   by catalog_create_rest ("s3.access-key-id", "s3.region", etc.).
+#   Note: uses a pre-configured S3 storage factory (not the routing factory),
+#   because MemoryCatalog builds its FileIO once at construction time — before
+#   any table location is known — so the routing factory cannot be used here.
+#
+# Memory catalog + in-process memory (catalog_create_memory("memory"))
+#   Everything, including Parquet bytes, lives in a HashMap in RAM. Nothing
+#   survives process exit. Use this for fast, hermetic unit tests that do not
+#   need durable storage.
+#
 
 # Token callback function that can be exported as C-callable with token caching support
 # This is a static function (no closure) that takes auth_fn and extracts the authenticator
@@ -304,6 +371,78 @@ function catalog_create_rest(
     # Create a Catalog struct that holds the catalog pointer and keeps authenticator alive
     catalog = Catalog(response.value, authenticator_ref)
     return catalog
+end
+
+"""
+    catalog_create_memory(
+        warehouse_path::String;
+        properties::Dict{String,String}=Dict{String,String}()
+    )::Catalog
+
+Create an in-memory Iceberg catalog.
+
+The catalog registry (which namespaces and tables exist) always lives in RAM
+and is lost when the catalog is freed. The storage backend for actual table
+files (metadata JSON, Parquet) is inferred from `warehouse_path`:
+
+- Local filesystem path (e.g. `"/tmp/warehouse"`): files are written to disk
+  and persist after the catalog is freed.
+- S3 URI (e.g. `"s3://bucket/prefix"`): files are written to S3 and persist
+  after the catalog is freed. Pass S3 credentials via `properties` using the
+  standard keys (`"s3.access-key-id"`, `"s3.secret-access-key"`, `"s3.region"`,
+  `"s3.endpoint"`, etc.). If omitted, credentials are read from the environment.
+- `"memory"`: files are stored in RAM alongside the registry. Everything is
+  lost when the catalog is freed. Useful for unit tests.
+
+# Example
+```julia
+# Persist table files to local disk
+catalog = catalog_create_memory("/tmp/my_warehouse")
+
+# Write table files to S3 (credentials from environment)
+catalog = catalog_create_memory("s3://my-bucket/warehouse")
+
+# Write table files to S3 with explicit credentials
+catalog = catalog_create_memory(
+    "s3://my-bucket/warehouse";
+    properties=Dict(
+        "s3.access-key-id"     => "...",
+        "s3.secret-access-key" => "...",
+        "s3.region"            => "us-east-1",
+    )
+)
+
+# Fully ephemeral — good for unit tests
+catalog = catalog_create_memory("memory")
+```
+"""
+function catalog_create_memory(
+    warehouse_path::String;
+    properties::Dict{String,String}=Dict{String,String}(),
+)::Catalog
+    catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
+    if catalog_ptr == C_NULL
+        throw(IcebergException("Failed to create empty catalog"))
+    end
+
+    property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
+    properties_len = length(property_entries)
+
+    response = CatalogResponse()
+
+    async_ccall(response, property_entries, properties) do handle
+        @ccall rust_lib.iceberg_memory_catalog_create(
+            catalog_ptr::Ptr{Cvoid},
+            warehouse_path::Cstring,
+            (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
+            properties_len::Csize_t,
+            response::Ref{CatalogResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "catalog_create_memory", IcebergException)
+    return Catalog(response.value, nothing)
 end
 
 """

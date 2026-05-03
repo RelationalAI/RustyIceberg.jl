@@ -2,6 +2,7 @@ using Test
 using RustyIceberg
 using DataFrames
 using Arrow
+using Tables
 using FunctionWrappers: FunctionWrapper
 using HTTP
 using JSON
