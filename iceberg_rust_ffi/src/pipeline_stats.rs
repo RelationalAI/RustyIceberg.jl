@@ -126,8 +126,7 @@ impl PipelineStats {
         let ser_ms = self.serialize_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let sem_ms = self.semaphore_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let dispatch_ms = self.file_dispatch_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
-        let peak_buf =
-            self.peak_buffered_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
+        let peak_buf = self.peak_buffered_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
 
         let bytes_mb = bytes as f64 / (1024.0 * 1024.0);
         let throughput = if wall_ms > 0.0 {
@@ -365,7 +364,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         s.add_elapsed(&s.reader_setup_ns, start2);
         let after_second = s.reader_setup_ns.load(Ordering::Relaxed);
-        assert!(after_second > after_first, "second add_elapsed should accumulate");
+        assert!(
+            after_second > after_first,
+            "second add_elapsed should accumulate"
+        );
     }
 
     #[test]
@@ -396,7 +398,10 @@ mod tests {
 
         // Stored value is the elapsed time, which is much less than 999_999_999 ns (1 s).
         assert!(stored > 0);
-        assert!(stored < 999_999_999, "store_elapsed should overwrite, not accumulate");
+        assert!(
+            stored < 999_999_999,
+            "store_elapsed should overwrite, not accumulate"
+        );
     }
 
     #[test]

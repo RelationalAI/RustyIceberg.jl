@@ -125,9 +125,7 @@ pub async fn create_nested_pipeline(
     prefetch_depth: usize,
 ) -> anyhow::Result<IcebergFileScanStream> {
     if concurrency > MAX_FILE_CONCURRENCY {
-        anyhow::bail!(
-            "file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}"
-        );
+        anyhow::bail!("file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}");
     }
 
     STATS.reset();
@@ -160,7 +158,8 @@ pub async fn create_pipeline(
     // Outer channel: flatten task → Julia (via IcebergArrowStream).
     let (tx, rx) = mpsc::channel(concurrency * 2);
 
-    let nested = create_nested_pipeline(tasks, file_io, batch_size, concurrency, prefetch_depth).await?;
+    let nested =
+        create_nested_pipeline(tasks, file_io, batch_size, concurrency, prefetch_depth).await?;
 
     tokio::spawn(run_flat(nested, tx));
 
@@ -270,7 +269,11 @@ fn spawn_file_task_with_meta(
     batch_size: Option<usize>,
 ) -> impl std::future::Future<
     Output = Result<
-        (String, i64, mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>),
+        (
+            String,
+            i64,
+            mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
+        ),
         iceberg::Error,
     >,
 > {
@@ -330,9 +333,7 @@ async fn process_file_inner(
     }
     let reader = builder.build();
     let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
-    let batch_stream = reader
-        .read(task_stream)
-        .map_err(|e| unexpected(e))?;
+    let batch_stream = reader.read(task_stream).map_err(|e| unexpected(e))?;
     STATS.add_elapsed(&STATS.reader_setup_ns, setup_start);
 
     tokio::pin!(batch_stream);
