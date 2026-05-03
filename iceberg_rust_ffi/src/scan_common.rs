@@ -38,6 +38,10 @@ macro_rules! impl_select_columns {
                 builder: scan_ref.builder.map(|b| b.select(columns)),
                 scan: scan_ref.scan,
                 serialization_concurrency: scan_ref.serialization_concurrency,
+                file_io: scan_ref.file_io,
+                batch_size: scan_ref.batch_size,
+                file_concurrency: scan_ref.file_concurrency,
+                file_prefetch_depth: scan_ref.file_prefetch_depth,
             }));
 
             CResult::Ok
@@ -84,6 +88,10 @@ macro_rules! impl_scan_builder_method {
                 builder: scan_ref.builder.map(|b| b.$builder_method($($param),*)),
                 scan: scan_ref.scan,
                 serialization_concurrency: scan_ref.serialization_concurrency,
+                file_io: scan_ref.file_io,
+                batch_size: scan_ref.batch_size,
+                file_concurrency: scan_ref.file_concurrency,
+                file_prefetch_depth: scan_ref.file_prefetch_depth,
             }));
 
             CResult::Ok
@@ -111,6 +119,10 @@ macro_rules! impl_with_batch_size {
                 builder: scan_ref.builder.map(|b| b.with_batch_size(Some(n))),
                 scan: None,
                 serialization_concurrency: scan_ref.serialization_concurrency,
+                file_io: scan_ref.file_io,
+                batch_size: Some(n),
+                file_concurrency: scan_ref.file_concurrency,
+                file_prefetch_depth: scan_ref.file_prefetch_depth,
             }));
 
             CResult::Ok
@@ -138,6 +150,10 @@ macro_rules! impl_scan_build {
                         builder: None,
                         scan: Some(built_scan),
                         serialization_concurrency: scan_ref.serialization_concurrency,
+                        file_io: scan_ref.file_io,
+                        batch_size: scan_ref.batch_size,
+                        file_concurrency: scan_ref.file_concurrency,
+                        file_prefetch_depth: scan_ref.file_prefetch_depth,
                     }));
                     CResult::Ok
                 }
@@ -178,10 +194,27 @@ macro_rules! impl_with_serialization_concurrency_limit {
     };
 }
 
+/// Macro to generate with_file_prefetch_depth function for any scan type
+macro_rules! impl_with_file_prefetch_depth {
+    ($fn_name:ident, $scan_type:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type, n: usize) -> CResult {
+            if scan.is_null() || (*scan).is_null() {
+                return CResult::Error;
+            }
+            let mut scan_ref = unsafe { Box::from_raw(*scan) };
+            scan_ref.file_prefetch_depth = n;
+            *scan = Box::into_raw(scan_ref);
+            CResult::Ok
+        }
+    };
+}
+
 // Re-export macros for use in other modules
 pub(crate) use impl_scan_build;
 pub(crate) use impl_scan_builder_method;
 pub(crate) use impl_scan_free;
 pub(crate) use impl_select_columns;
 pub(crate) use impl_with_batch_size;
+pub(crate) use impl_with_file_prefetch_depth;
 pub(crate) use impl_with_serialization_concurrency_limit;
