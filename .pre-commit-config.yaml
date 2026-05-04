@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-lock-check
+        name: Cargo.lock up to date
+        language: system
+        entry: bash -c 'cd iceberg_rust_ffi && cargo metadata --locked --format-version 1 > /dev/null'
+        files: 'iceberg_rust_ffi/Cargo\.toml'
+        pass_filenames: false

@@ -24,6 +24,18 @@ jobs:
       os: ubuntu-latest
       arch: x64
 
+  rust-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./iceberg_rust_ffi
+      - name: Run Rust tests
+        run: cargo test
+        working-directory: iceberg_rust_ffi
+
   rust-format-check:
     runs-on: ubuntu-latest
     steps:
@@ -33,4 +45,13 @@ jobs:
           components: rustfmt
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
+        working-directory: iceberg_rust_ffi
+
+  cargo-lock-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
         working-directory: iceberg_rust_ffi
