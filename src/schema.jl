@@ -165,7 +165,7 @@ According to the Iceberg specification:
 - `IcebergDate()` → `Date` (from Dates module)
 - `IcebergTime()` → `Int64` - microseconds since midnight
 - `IcebergTimestamp()` → `Arrow.Timestamp{..., nothing}` - microseconds since epoch (no timezone)
-- `IcebergTimestamptz()` → `Arrow.Timestamp{..., :UTC}` - microseconds since epoch UTC
+- `IcebergTimestamptz()` → `Arrow.Timestamp{..., Symbol("+00:00")}` - microseconds since epoch UTC
 - `IcebergString()` → `String`
 - `IcebergUuid()` → `NTuple{16, UInt8}` - 16-byte UUID representation
 - `IcebergBinary()` → `Vector{UInt8}` - variable-length byte array
@@ -194,10 +194,33 @@ iceberg_type_to_arrow_type(::IcebergFloat) = Float32
 iceberg_type_to_arrow_type(::IcebergDouble) = Float64
 iceberg_type_to_arrow_type(::IcebergDate) = Dates.Date
 iceberg_type_to_arrow_type(::IcebergTime) = Int64
+# The Iceberg spec does not define a canonical Arrow format mapping (Arrow is
+# an in-memory format, not a storage format).  Each implementation chooses its
+# own timezone string for timestamptz.  iceberg-rs (our Rust layer) defines:
+# https://github.com/RelationalAI/iceberg-rust/blob/418213731e91544f5eb31a3efa459e88f599030e/crates/iceberg/src/arrow/schema.rs#L45
+#
+#     const UTC_TIME_ZONE: &str = "+00:00";
+#
+# and emits that string into every Arrow IPC schema it writes for Timestamptz
+# fields.  When reading it accepts both "+00:00" and "UTC" for compatibility,
+# but it always *writes* "+00:00".
+#
+# The likely reason for this choice: Parquet encodes UTC-adjusted timestamps
+# via an isAdjustedToUTC=true flag rather than a named timezone, so
+# implementations tend to use the offset form "+00:00" rather than an IANA
+# name like "UTC" when bridging to Arrow.
+#
+# Arrow.jl converts the timezone string from the IPC wire format to a Symbol,
+# so a field written by iceberg-rs arrives as
+#
+#     Arrow.Timestamp{MICROSECOND, Symbol("+00:00")}
+#
+# Using :UTC here would cause a type-mismatch against data returned by the
+# Rust layer, even though the two strings represent the same instant in time.
 iceberg_type_to_arrow_type(::IcebergTimestamp) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
-iceberg_type_to_arrow_type(::IcebergTimestamptz) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, :UTC}
+iceberg_type_to_arrow_type(::IcebergTimestamptz) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, Symbol("+00:00")}
 iceberg_type_to_arrow_type(::IcebergTimestampNs) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, nothing}
-iceberg_type_to_arrow_type(::IcebergTimestamptzNs) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, :UTC}
+iceberg_type_to_arrow_type(::IcebergTimestamptzNs) = Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, Symbol("+00:00")}
 iceberg_type_to_arrow_type(::IcebergString) = String
 iceberg_type_to_arrow_type(::IcebergUuid) = NTuple{16, UInt8}
 iceberg_type_to_arrow_type(::IcebergBinary) = Vector{UInt8}

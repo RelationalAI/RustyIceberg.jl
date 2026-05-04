@@ -278,9 +278,9 @@ end
         @test iceberg_type_to_arrow_type(IcebergDate()) == Dates.Date
         @test iceberg_type_to_arrow_type(IcebergTime()) == Int64
         @test iceberg_type_to_arrow_type(IcebergTimestamp()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, nothing}
-        @test iceberg_type_to_arrow_type(IcebergTimestamptz()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, :UTC}
+        @test iceberg_type_to_arrow_type(IcebergTimestamptz()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.MICROSECOND, Symbol("+00:00")}
         @test iceberg_type_to_arrow_type(IcebergTimestampNs()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, nothing}
-        @test iceberg_type_to_arrow_type(IcebergTimestamptzNs()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, :UTC}
+        @test iceberg_type_to_arrow_type(IcebergTimestamptzNs()) == Arrow.Timestamp{Arrow.Flatbuf.TimeUnit.NANOSECOND, Symbol("+00:00")}
 
         # Complex types
         @test iceberg_type_to_arrow_type(IcebergUuid()) == NTuple{16, UInt8}
