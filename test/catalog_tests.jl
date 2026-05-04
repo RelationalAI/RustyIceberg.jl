@@ -7,6 +7,237 @@ using JSON
 using Base64
 using RustyIceberg: Field, Schema, PartitionSpec, SortOrder, PartitionField
 
+# ---------------------------------------------------------------------------
+# Memory catalog tests — run without Docker or S3
+# ---------------------------------------------------------------------------
+
+function _simple_schema()
+    Schema([
+        Field(Int32(1), "id",   IcebergLong();   required=true),
+        Field(Int32(2), "name", IcebergString(); required=false),
+    ])
+end
+
+@testset "Memory Catalog" begin
+    @testset "local-fs storage" begin
+        mktempdir() do warehouse
+            cat = catalog_create_memory(warehouse)
+            try
+                @test cat isa Catalog
+                @test cat.ptr != C_NULL
+
+                # Namespace operations
+                create_namespace(cat, ["ns1"])
+                ns = list_namespaces(cat)
+                @test [["ns1"]] == ns
+
+                # Table operations
+                schema = _simple_schema()
+                tbl = create_table(cat, ["ns1"], "events", schema)
+                @test tbl != C_NULL
+
+                @test list_tables(cat, ["ns1"]) == ["events"]
+                @test table_exists(cat, ["ns1"], "events") == true
+                @test table_exists(cat, ["ns1"], "nope")   == false
+
+                # Schema round-trip via schema_from_table
+                s = schema_from_table(tbl)
+                @test length(s.fields) == 2
+                @test s.fields[1].name == "id"
+                @test s.fields[1].type isa IcebergLong
+                @test s.fields[1].required == true
+                @test s.fields[2].name == "name"
+                @test s.fields[2].type isa IcebergString
+
+                # Load table from catalog
+                tbl2 = load_table(cat, ["ns1"], "events")
+                @test tbl2 != C_NULL
+
+                # Metadata files actually on disk
+                @test isdir(warehouse)
+                @test !isempty(readdir(warehouse))
+
+                # Drop table
+                drop_table(cat, ["ns1"], "events")
+                @test table_exists(cat, ["ns1"], "events") == false
+                @test list_tables(cat, ["ns1"]) == String[]
+
+                # Drop namespace
+                drop_namespace(cat, ["ns1"])
+                @test list_namespaces(cat) == Vector{String}[]
+            finally
+                free_catalog!(cat)
+            end
+        end
+    end
+
+    @testset "memory storage" begin
+        cat = catalog_create_memory("memory")
+        try
+            @test cat isa Catalog
+
+            create_namespace(cat, ["ns"])
+            create_table(cat, ["ns"], "t", _simple_schema())
+            @test table_exists(cat, ["ns"], "t") == true
+        finally
+            free_catalog!(cat)
+        end
+    end
+
+    @testset "multiple namespaces and tables" begin
+        mktempdir() do warehouse
+            cat = catalog_create_memory(warehouse)
+            try
+                create_namespace(cat, ["a"])
+                create_namespace(cat, ["b"])
+                @test sort(list_namespaces(cat)) == [["a"], ["b"]]
+
+                create_table(cat, ["a"], "t1", _simple_schema())
+                create_table(cat, ["a"], "t2", _simple_schema())
+                create_table(cat, ["b"], "t3", _simple_schema())
+
+                @test sort(list_tables(cat, ["a"])) == ["t1", "t2"]
+                @test list_tables(cat, ["b"])       == ["t3"]
+            finally
+                free_catalog!(cat)
+            end
+        end
+    end
+
+    @testset "write and read roundtrip" begin
+        mktempdir() do warehouse
+            cat = catalog_create_memory(warehouse)
+            table = C_NULL
+            updated_table = C_NULL
+            data_files = nothing
+            try
+                create_namespace(cat, ["ns"])
+                schema = Schema([
+                    Field(Int32(1), "id",    IcebergLong();   required=true),
+                    Field(Int32(2), "name",  IcebergString(); required=false),
+                    Field(Int32(3), "value", IcebergDouble(); required=false),
+                ])
+                table = create_table(cat, ["ns"], "roundtrip", schema)
+                @test table != C_NULL
+
+                # Write data
+                data_files = RustyIceberg.with_data_file_writer(table) do writer
+                    write(writer, (
+                        id    = Int64[1, 2, 3],
+                        name  = ["alice", "bob", "carol"],
+                        value = [1.1, 2.2, 3.3],
+                    ))
+                end
+                @test data_files !== nothing
+
+                updated_table = RustyIceberg.with_transaction(table, cat) do tx
+                    RustyIceberg.with_fast_append(tx) do action
+                        RustyIceberg.add_data_files(action, data_files)
+                    end
+                end
+
+                # Read back and verify
+                tbl = read_table_data(updated_table)
+                @test tbl !== nothing
+                sorted = sort(collect(zip(tbl.id, tbl.name, tbl.value)))
+                @test length(sorted) == 3
+                @test sorted[1] == (1, "alice", 1.1)
+                @test sorted[2] == (2, "bob",   2.2)
+                @test sorted[3] == (3, "carol",  3.3)
+            finally
+                if updated_table != C_NULL
+                    free_table(updated_table)
+                end
+                if table != C_NULL
+                    free_table(table)
+                end
+                free_catalog!(cat)
+            end
+        end
+    end
+
+    @testset "S3 storage write and read roundtrip" begin
+        without_aws_env() do
+            s3 = get_s3_config()
+            # Use a unique prefix per test run to avoid cross-test interference
+            warehouse = "s3://warehouse/memory-catalog-test-$(round(Int, time() * 1000))"
+            props = Dict(
+                "s3.endpoint"          => s3["endpoint"],
+                "s3.access-key-id"     => s3["access_key_id"],
+                "s3.secret-access-key" => s3["secret_access_key"],
+                "s3.region"            => s3["region"],
+                "s3.path-style-access" => "true",
+            )
+            cat = catalog_create_memory(warehouse; properties=props)
+            table = C_NULL
+            updated_table = C_NULL
+            data_files = nothing
+            try
+                @test cat isa Catalog
+
+                create_namespace(cat, ["ns"])
+                schema = Schema([
+                    Field(Int32(1), "id",    IcebergLong();   required=true),
+                    Field(Int32(2), "name",  IcebergString(); required=false),
+                    Field(Int32(3), "value", IcebergDouble(); required=false),
+                ])
+                table = create_table(cat, ["ns"], "s3_roundtrip", schema)
+                @test table != C_NULL
+
+                # Write data
+                data_files = RustyIceberg.with_data_file_writer(table) do writer
+                    write(writer, (
+                        id    = Int64[10, 20, 30],
+                        name  = ["x", "y", "z"],
+                        value = [1.5, 2.5, 3.5],
+                    ))
+                end
+                @test data_files !== nothing
+
+                updated_table = RustyIceberg.with_transaction(table, cat) do tx
+                    RustyIceberg.with_fast_append(tx) do action
+                        RustyIceberg.add_data_files(action, data_files)
+                    end
+                end
+
+                # Read back and verify
+                tbl = read_table_data(updated_table)
+                @test tbl !== nothing
+                sorted = sort(collect(zip(tbl.id, tbl.name, tbl.value)))
+                @test length(sorted) == 3
+                @test sorted[1] == (10, "x", 1.5)
+                @test sorted[2] == (20, "y", 2.5)
+                @test sorted[3] == (30, "z", 3.5)
+            finally
+                if updated_table != C_NULL
+                    free_table(updated_table)
+                end
+                if table != C_NULL
+                    free_table(table)
+                end
+                free_catalog!(cat)
+            end
+        end
+    end
+
+    @testset "REST-only operations throw on memory catalog" begin
+        cat = catalog_create_memory("memory")
+        try
+            create_namespace(cat, ["ns"])
+            create_table(cat, ["ns"], "t", _simple_schema())
+
+            @test_throws RustyIceberg.IcebergException load_table(
+                cat, ["ns"], "t"; load_credentials=true
+            )
+            @test_throws RustyIceberg.IcebergException create_table(
+                cat, ["ns"], "t2", _simple_schema(); load_credentials=true
+            )
+        finally
+            free_catalog!(cat)
+        end
+    end
+end
+
 @testset "Catalog API" begin
     println("Testing catalog API...")
 
@@ -831,6 +1062,11 @@ end
         last_updated = RustyIceberg.table_last_updated_ms(table_1)
         @test last_updated > 0
         println("✅ Table last updated (ms): $last_updated")
+
+        # A freshly created table has no snapshots yet
+        snapshot_id = RustyIceberg.table_current_snapshot_id(table_1)
+        @test isnothing(snapshot_id)
+        println("✅ Table current snapshot ID is nothing (no snapshots yet)")
 
         # Verify table schema
         schema_json = RustyIceberg.table_schema(table_1)

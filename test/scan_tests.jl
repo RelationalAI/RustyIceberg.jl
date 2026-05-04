@@ -1172,6 +1172,33 @@ end
         end
     end
 
+    @testset "with_file_prefetch_depth!" begin
+        table = RustyIceberg.table_open(customer_path)
+        scan  = RustyIceberg.new_scan(table)
+
+        @test_nowarn RustyIceberg.with_file_prefetch_depth!(scan, UInt(4))
+        stream = RustyIceberg.scan!(scan)
+
+        total_rows = 0
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            while batch_ptr != C_NULL
+                batch = unsafe_load(batch_ptr)
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                total_rows += nrow(DataFrame(arrow_table))
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream)
+            end
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+
+        @test total_rows > 0
+        println("✅ with_file_prefetch_depth! test passed ($total_rows rows)")
+    end
+
     @testset "Combined with_snapshot_id! and other builder methods" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
@@ -1455,5 +1482,31 @@ end
             RustyIceberg.free_table(table)
         end
         println("✅ Safe early drop of FileScan does not crash")
+    end
+
+    @testset "print_pipeline_stats and reset_pipeline_stats" begin
+        # Run a full scan so the pipeline stats are populated.
+        table  = RustyIceberg.table_open(nations_path)
+        scan   = RustyIceberg.new_scan(table)
+        stream = RustyIceberg.scan!(scan)
+        try
+            batch_ptr = RustyIceberg.next_batch(stream)
+            while batch_ptr != C_NULL
+                RustyIceberg.free_batch(batch_ptr)
+                batch_ptr = RustyIceberg.next_batch(stream)
+            end
+        finally
+            RustyIceberg.free_stream(stream)
+            RustyIceberg.free_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+
+        # print_pipeline_stats writes to stdout — must not throw.
+        @test_nowarn RustyIceberg.print_pipeline_stats()
+        println("✅ print_pipeline_stats() completed without error")
+
+        # reset_pipeline_stats must not throw.
+        @test_nowarn RustyIceberg.reset_pipeline_stats()
+        println("✅ reset_pipeline_stats() completed without error")
     end
 end

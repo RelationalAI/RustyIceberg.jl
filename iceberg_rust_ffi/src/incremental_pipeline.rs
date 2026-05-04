@@ -20,7 +20,7 @@ use iceberg::scan::incremental::{AppendedFileScanTask, DeleteScanTask};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
 use crate::ordered_file_pipeline::{
-    run_nested_pipeline, BufferedBatch, FileScan, MAX_FILE_CONCURRENCY,
+    run_nested_pipeline, BufferedBatch, FileScan
 };
 use crate::pipeline_stats::MAX_BUFFERED_BYTES_PER_TASK;
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
@@ -170,10 +170,6 @@ pub async fn create_incremental_nested_pipeline(
     prefetch_depth: usize,
     serialization_concurrency: usize,
 ) -> anyhow::Result<(IcebergFileScanStream, IcebergArrowStream)> {
-    if concurrency > MAX_FILE_CONCURRENCY {
-        anyhow::bail!("file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}");
-    }
-
     let reader = build_reader(file_io.clone(), batch_size);
 
     let (tx, rx) = mpsc::channel::<Result<FileScan, iceberg::Error>>(prefetch_depth);
@@ -321,27 +317,6 @@ mod tests {
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn concurrency_above_cap_returns_error() {
-        // create_incremental_nested_pipeline rejects concurrency > MAX_FILE_CONCURRENCY
-        // before doing any I/O.  This guards against accidental over-parallelism that
-        // would exhaust memory.
-        let result = create_incremental_nested_pipeline(
-            futures::stream::empty::<iceberg::Result<AppendedFileScanTask>>().boxed(),
-            futures::stream::empty::<iceberg::Result<DeleteScanTask>>().boxed(),
-            FileIO::new_with_memory(),
-            None,
-            MAX_FILE_CONCURRENCY + 1,
-            1,
-            1,
-        )
-        .await;
-
-        assert!(result.is_err());
-        let msg = result.err().unwrap().to_string();
-        assert!(msg.contains("exceeds hard cap"), "unexpected error: {msg}");
-    }
 
     #[tokio::test]
     async fn empty_streams_succeed() {

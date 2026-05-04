@@ -12,7 +12,7 @@
 //! Each file task is a background tokio task that:
 //!   1. Builds a per-file ArrowReader (same iceberg-rs code path as to_arrow)
 //!   2. Reads row groups sequentially → RecordBatch stream
-//!   3. Serializes each batch to Arrow IPC (via spawn_blocking)
+//!   3. Serializes each batch to Arrow IPC (via a shared rayon thread pool)
 //!   4. Sends serialized batches into a per-file mpsc channel
 //!
 //! A consumer (`run_nested`) uses FuturesUnordered to maintain N tasks in
@@ -28,7 +28,7 @@
 //! ~100MB independently.
 
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use futures::StreamExt;
@@ -41,13 +41,19 @@ use crate::pipeline_stats::{MAX_BUFFERED_BYTES_PER_TASK, STATS};
 use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
-/// Hard cap on file-level concurrency to keep total memory bounded.
-pub(crate) const MAX_FILE_CONCURRENCY: usize = 16;
+/// Process-global rayon pool for Arrow IPC serialization.
+static SERIALIZE_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
+    let n = std::thread::available_parallelism().unwrap().get();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build()
+        .expect("failed to build serialization thread pool")
+});
 
 /// Time an async expression and record its duration into a STATS field.
 ///
 /// ```ignore
-/// let result = timed!(serialize_ns, { tokio::task::spawn_blocking(...) })
+/// let result = timed!(serialize_ns, { rayon_dispatch(&pool, batch) })
 ///     .map_err(...)?;
 /// ```
 macro_rules! timed {
@@ -116,10 +122,6 @@ pub async fn create_nested_pipeline(
     concurrency: usize,
     prefetch_depth: usize,
 ) -> anyhow::Result<IcebergFileScanStream> {
-    if concurrency > MAX_FILE_CONCURRENCY {
-        anyhow::bail!("file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}");
-    }
-
     STATS.reset();
 
     let (tx, rx) = mpsc::channel::<Result<FileScan, iceberg::Error>>(prefetch_depth);
@@ -402,12 +404,15 @@ async fn process_file_inner(
         };
 
         // ── Phase 3: Serialize to Arrow IPC ─────────────────────────────
-        // CPU-bound work, offloaded to the blocking thread pool to avoid
-        // starving the tokio executor.
-        let serialized = timed!(
-            serialize_ns,
-            tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch))
-        )
+        // Dispatched to the shared rayon pool so N idle workers handle all
+        // file tasks; the oneshot channel bridges rayon back to async.
+        let serialized = timed!(serialize_ns, {
+            let (stx, srx) = tokio::sync::oneshot::channel();
+            SERIALIZE_POOL.spawn(move || {
+                let _ = stx.send(crate::serialize_record_batch(batch));
+            });
+            srx
+        })
         .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
         .map_err(|e| unexpected(e))?;
 

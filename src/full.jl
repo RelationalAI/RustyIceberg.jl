@@ -441,3 +441,21 @@ Free the memory associated with a file scan stream.
 function free_file_scan_stream!(stream::FileScanStream)
     @ccall rust_lib.iceberg_file_scan_stream_free(stream::FileScanStream)::Cvoid
 end
+
+"""
+    print_pipeline_stats()
+
+Print a summary of file-parallel pipeline timing and throughput counters to stdout.
+"""
+function print_pipeline_stats()
+    @ccall rust_lib.iceberg_print_pipeline_stats()::Cvoid
+end
+
+"""
+    reset_pipeline_stats()
+
+Reset all file-parallel pipeline statistics counters to zero.
+"""
+function reset_pipeline_stats()
+    @ccall rust_lib.iceberg_reset_pipeline_stats()::Cvoid
+end
