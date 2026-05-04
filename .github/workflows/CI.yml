@@ -46,3 +46,12 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
         working-directory: iceberg_rust_ffi
+
+  cargo-lock-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
+        working-directory: iceberg_rust_ffi
