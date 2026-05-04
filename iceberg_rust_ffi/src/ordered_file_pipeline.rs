@@ -41,16 +41,13 @@ use crate::pipeline_stats::{MAX_BUFFERED_BYTES_PER_TASK, STATS};
 use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
-/// Hard cap on file-level concurrency to keep total memory bounded.
-const MAX_FILE_CONCURRENCY: usize = 16;
-
 /// Process-global rayon pool for Arrow IPC serialization. Sized to
 /// MAX_FILE_CONCURRENCY so it can saturate the maximum file parallelism
 /// without spinning up per-pipeline threads.
 static SERIALIZE_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(MAX_FILE_CONCURRENCY);
+        .unwrap_or(1);
     rayon::ThreadPoolBuilder::new()
         .num_threads(n)
         .build()
@@ -124,10 +121,6 @@ pub async fn create_nested_pipeline(
     concurrency: usize,
     prefetch_depth: usize,
 ) -> anyhow::Result<IcebergFileScanStream> {
-    if concurrency > MAX_FILE_CONCURRENCY {
-        anyhow::bail!("file concurrency {concurrency} exceeds hard cap {MAX_FILE_CONCURRENCY}");
-    }
-
     STATS.reset();
 
     let (tx, rx) = mpsc::channel::<Result<FileScan, iceberg::Error>>(prefetch_depth);
