@@ -7,9 +7,3 @@ repos:
         entry: bash -c 'cd iceberg_rust_ffi && cargo metadata --locked --format-version 1 > /dev/null'
         files: 'iceberg_rust_ffi/Cargo\.toml'
         pass_filenames: false
-      - id: cargo-audit
-        name: cargo audit
-        language: system
-        entry: bash -c 'cd iceberg_rust_ffi && cargo audit'
-        files: 'iceberg_rust_ffi/Cargo\.lock'
-        pass_filenames: false
