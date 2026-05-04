@@ -1,15 +1,15 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
-use iceberg::io::FileIO;
-use iceberg::scan::{TableScan, TableScanBuilder};
-use object_store_ffi::{
-    export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
-};
 use crate::scan_common::*;
 use crate::{
     IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanStream,
     IcebergFileScanStreamResponse, IcebergTable,
+};
+use iceberg::io::FileIO;
+use iceberg::scan::{TableScan, TableScanBuilder};
+use object_store_ffi::{
+    export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
 
 /// Holds state for a full table scan across its lifecycle:
@@ -158,7 +158,12 @@ fn resolve_pipeline_params(scan: &IcebergScan) -> (usize, usize, FileIO, Option<
     } else {
         scan.file_prefetch_depth
     };
-    (concurrency, prefetch_depth, scan.file_io.clone(), scan.batch_size)
+    (
+        concurrency,
+        prefetch_depth,
+        scan.file_io.clone(),
+        scan.batch_size,
+    )
 }
 
 export_runtime_op!(

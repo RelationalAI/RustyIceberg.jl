@@ -2,7 +2,6 @@ use crate::ordered_file_pipeline::FileScan;
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
-use crate::ordered_file_pipeline::FileScan;
 use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
@@ -81,9 +80,7 @@ impl RawResponse for IcebergBatchResponse {
 
 /// Outer stream of per-file scans from the nested pipeline.
 pub struct IcebergFileScanStream {
-    pub stream: AsyncMutex<
-        futures::stream::BoxStream<'static, Result<FileScan, iceberg::Error>>,
-    >,
+    pub stream: AsyncMutex<futures::stream::BoxStream<'static, Result<FileScan, iceberg::Error>>>,
 }
 
 unsafe impl Send for IcebergFileScanStream {}
