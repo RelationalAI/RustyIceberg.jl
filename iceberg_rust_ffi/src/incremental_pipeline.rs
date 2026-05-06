@@ -82,10 +82,16 @@ async fn process_incremental_file_inner(
             None => break,
         };
 
-        let serialized = tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch))
-            .await
-            .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
-            .map_err(unexpected)?;
+        let serialized = {
+            let (stx, srx) = tokio::sync::oneshot::channel();
+            crate::ordered_file_pipeline::SERIALIZE_POOL.spawn(move || {
+                let _ = stx.send(crate::serialize_record_batch(batch));
+            });
+            srx
+        }
+        .await
+        .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
+        .map_err(unexpected)?;
 
         let byte_len = serialized.length;
 

@@ -180,14 +180,10 @@ export_runtime_op!(
             return Err(anyhow::anyhow!("Incremental scan not initialized"));
         }
 
-        // Determine concurrency (0 = auto-detect)
-        let serialization_concurrency = scan_ptr.serialization_concurrency;
-        let serialization_concurrency = if serialization_concurrency == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
+        let serialization_concurrency = if scan_ptr.serialization_concurrency == 0 {
+            crate::cpu_count()
         } else {
-            serialization_concurrency
+            scan_ptr.serialization_concurrency
         };
 
         Ok((scan_ref.as_ref().unwrap(), serialization_concurrency))
@@ -219,8 +215,23 @@ export_runtime_op!(
     scan: *mut IcebergIncrementalScan
 );
 
-/// Response for iceberg_incremental_file_scan_stream — one FileScanStream for
-/// appends (per-file, ordered) and one flat ArrowStream for deletes.
+/// Resolve the three pipeline tuning knobs from an IncrementalScan, applying
+/// the same "0 = auto" convention as resolve_pipeline_params in full.rs.
+fn resolve_incremental_pipeline_params(scan: &IcebergIncrementalScan) -> (usize, usize, usize) {
+    let n = crate::cpu_count();
+    let concurrency = if scan.file_concurrency == 0 { n } else { scan.file_concurrency };
+    let prefetch_depth = if scan.file_prefetch_depth == 0 { concurrency } else { scan.file_prefetch_depth };
+    let serialization_concurrency = if scan.serialization_concurrency == 0 { n } else { scan.serialization_concurrency };
+    (concurrency, prefetch_depth, serialization_concurrency)
+}
+
+/// Response for iceberg_incremental_file_scan_stream.
+///
+/// Appends use a FileScanStream (per-file, ordered) so that the caller can
+/// process one file at a time and attribute rows to specific data files.
+/// Deletes stay as a flat ArrowStream because position-delete records are
+/// already keyed by (file_path, pos) and do not need file-level grouping —
+/// restructuring them into a nested stream would add complexity with no benefit.
 #[repr(C)]
 pub struct IcebergIncrementalFileScanStreamResponse {
     result: CResult,
@@ -275,26 +286,8 @@ export_runtime_op!(
             .file_io
             .clone()
             .ok_or_else(|| anyhow::anyhow!("FileIO not available; create scan from table"))?;
-
-        let concurrency = if scan_ptr.file_concurrency == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        } else {
-            scan_ptr.file_concurrency
-        };
-        let prefetch_depth = if scan_ptr.file_prefetch_depth == 0 {
-            concurrency
-        } else {
-            scan_ptr.file_prefetch_depth
-        };
-        let serialization_concurrency = if scan_ptr.serialization_concurrency == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        } else {
-            scan_ptr.serialization_concurrency
-        };
+        let (concurrency, prefetch_depth, serialization_concurrency) =
+            resolve_incremental_pipeline_params(scan_ptr);
         let batch_size = scan_ptr.batch_size;
 
         Ok((

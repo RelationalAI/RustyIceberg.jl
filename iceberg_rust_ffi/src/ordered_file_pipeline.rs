@@ -42,10 +42,9 @@ use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
 /// Process-global rayon pool for Arrow IPC serialization.
-static SERIALIZE_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
-    let n = std::thread::available_parallelism().unwrap().get();
+pub(crate) static SERIALIZE_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     rayon::ThreadPoolBuilder::new()
-        .num_threads(n)
+        .num_threads(crate::cpu_count())
         .build()
         .expect("failed to build serialization thread pool")
 });
