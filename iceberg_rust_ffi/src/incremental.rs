@@ -183,6 +183,7 @@ export_runtime_op!(
             return Err(anyhow::anyhow!("Incremental scan not initialized"));
         }
 
+        // Determine concurrency (0 = auto-detect)
         let serialization_concurrency = if scan_ptr.serialization_concurrency == 0 {
             crate::cpu_count()
         } else {

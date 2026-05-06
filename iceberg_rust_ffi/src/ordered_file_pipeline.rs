@@ -250,6 +250,7 @@ pub(crate) async fn run_nested_pipeline<T, S, SpawnFut, F>(
 
     while let Some(file_result) = in_flight.next().await {
         if !stream_done {
+            // Eagerly start the next file to keep N tasks in flight.
             match task_stream.next().await {
                 Some(Ok(task)) => in_flight.push(Box::pin(spawn_task(task))),
                 Some(Err(e)) => {
@@ -359,8 +360,13 @@ async fn process_file(
     STATS.track_task_end();
 }
 
-/// Process a single parquet file. Phase 1 (reader setup) is timed here;
-/// phases 2-4 are handled by `drain_batch_stream`.
+/// Process a single parquet file through four timed phases:
+///   1. Reader setup — build ArrowReader, open file, resolve schema
+///   2. Fetch + decode — I/O, ZSTD decompression, column assembly
+///   3. Serialize — RecordBatch → Arrow IPC for transfer to Julia
+///   4. Backpressure — wait on semaphore if buffered too far ahead
+///
+/// Each phase's cumulative time is recorded in STATS for the summary.
 async fn process_file_inner(
     task: FileScanTask,
     file_io: FileIO,
@@ -401,6 +407,9 @@ pub(crate) async fn drain_batch_stream(
 ) -> Result<(), iceberg::Error> {
     loop {
         // ── Phase 2: Fetch + decode ─────────────────────────────────────
+        // Each .next() call fetches compressed parquet pages from storage,
+        // decompresses (ZSTD), decodes column encodings, and assembles a
+        // RecordBatch. These are inseparable without forking parquet-rs.
         let batch_opt = timed!(fetch_decode_ns, batch_stream.next());
         let batch = match batch_opt {
             Some(Ok(b)) => b,
@@ -409,6 +418,8 @@ pub(crate) async fn drain_batch_stream(
         };
 
         // ── Phase 3: Serialize to Arrow IPC ─────────────────────────────
+        // Dispatched to the shared rayon pool so N idle workers handle all
+        // file tasks; the oneshot channel bridges rayon back to async.
         let serialized = timed!(serialize_ns, {
             let (stx, srx) = tokio::sync::oneshot::channel();
             SERIALIZE_POOL.spawn(move || {
@@ -426,12 +437,17 @@ pub(crate) async fn drain_batch_stream(
             .fetch_add(byte_len as u64, Ordering::Relaxed);
 
         // ── Phase 4: Backpressure ───────────────────────────────────────
+        // Acquire permits equal to the serialized size. If this file task
+        // has produced > MAX_BUFFERED_BYTES_PER_TASK ahead of the consumer,
+        // this yields (async, not thread-blocking) until permits are freed.
         let _permit = timed!(semaphore_wait_ns, semaphore.acquire_many(byte_len as u32))
             .map_err(|e| unexpected(format!("semaphore: {e}")))?;
+        // Detach the permit — the consumer releases it via add_permits().
         std::mem::forget(_permit);
 
         STATS.track_buffer_add(byte_len as u64);
 
+        // Send the batch to this file's channel.
         if tx
             .send(Ok(BufferedBatch {
                 batch: serialized,
