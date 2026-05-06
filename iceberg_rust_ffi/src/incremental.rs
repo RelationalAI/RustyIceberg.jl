@@ -118,7 +118,10 @@ pub extern "C" fn iceberg_new_incremental_scan(
 // Use macros from scan_common for shared functionality
 impl_select_columns!(iceberg_incremental_select_columns, IcebergIncrementalScan);
 
-impl_with_file_prefetch_depth!(iceberg_incremental_scan_with_file_prefetch_depth, IcebergIncrementalScan);
+impl_with_file_prefetch_depth!(
+    iceberg_incremental_scan_with_file_prefetch_depth,
+    IcebergIncrementalScan
+);
 
 impl_scan_builder_method!(
     iceberg_incremental_scan_with_manifest_file_concurrency_limit,
@@ -219,9 +222,21 @@ export_runtime_op!(
 /// the same "0 = auto" convention as resolve_pipeline_params in full.rs.
 fn resolve_incremental_pipeline_params(scan: &IcebergIncrementalScan) -> (usize, usize, usize) {
     let n = crate::cpu_count();
-    let concurrency = if scan.file_concurrency == 0 { n } else { scan.file_concurrency };
-    let prefetch_depth = if scan.file_prefetch_depth == 0 { concurrency } else { scan.file_prefetch_depth };
-    let serialization_concurrency = if scan.serialization_concurrency == 0 { n } else { scan.serialization_concurrency };
+    let concurrency = if scan.file_concurrency == 0 {
+        n
+    } else {
+        scan.file_concurrency
+    };
+    let prefetch_depth = if scan.file_prefetch_depth == 0 {
+        concurrency
+    } else {
+        scan.file_prefetch_depth
+    };
+    let serialization_concurrency = if scan.serialization_concurrency == 0 {
+        n
+    } else {
+        scan.serialization_concurrency
+    };
     (concurrency, prefetch_depth, serialization_concurrency)
 }
 

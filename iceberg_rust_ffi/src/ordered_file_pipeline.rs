@@ -421,7 +421,9 @@ pub(crate) async fn drain_batch_stream(
 
         let byte_len = serialized.length;
         STATS.batches_produced.fetch_add(1, Ordering::Relaxed);
-        STATS.bytes_produced.fetch_add(byte_len as u64, Ordering::Relaxed);
+        STATS
+            .bytes_produced
+            .fetch_add(byte_len as u64, Ordering::Relaxed);
 
         // ── Phase 4: Backpressure ───────────────────────────────────────
         let _permit = timed!(semaphore_wait_ns, semaphore.acquire_many(byte_len as u32))

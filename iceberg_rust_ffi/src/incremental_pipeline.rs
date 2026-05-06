@@ -19,7 +19,9 @@ use iceberg::io::FileIO;
 use iceberg::scan::incremental::{AppendedFileScanTask, DeleteScanTask};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
-use crate::ordered_file_pipeline::{drain_batch_stream, run_nested_pipeline, BufferedBatch, FileScan};
+use crate::ordered_file_pipeline::{
+    drain_batch_stream, run_nested_pipeline, BufferedBatch, FileScan,
+};
 use crate::pipeline_stats::MAX_BUFFERED_BYTES_PER_TASK;
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
