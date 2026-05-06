@@ -31,7 +31,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use futures::StreamExt;
+use arrow_array::RecordBatch;
+use futures::{Stream, StreamExt};
 use iceberg::arrow::ArrowReaderBuilder;
 use iceberg::io::FileIO;
 use iceberg::scan::FileScanTask;
@@ -358,13 +359,8 @@ async fn process_file(
     STATS.track_task_end();
 }
 
-/// Process a single parquet file through four timed phases:
-///   1. Reader setup — build ArrowReader, open file, resolve schema
-///   2. Fetch + decode — I/O, ZSTD decompression, column assembly
-///   3. Serialize — RecordBatch → Arrow IPC for transfer to Julia
-///   4. Backpressure — wait on semaphore if buffered too far ahead
-///
-/// Each phase's cumulative time is recorded in STATS for the summary.
+/// Process a single parquet file. Phase 1 (reader setup) is timed here;
+/// phases 2-4 are handled by `drain_batch_stream`.
 async fn process_file_inner(
     task: FileScanTask,
     file_io: FileIO,
@@ -387,15 +383,25 @@ async fn process_file_inner(
     let batch_stream = reader.read(task_stream).map_err(|e| unexpected(e))?;
     STATS.add_elapsed(&STATS.reader_setup_ns, setup_start);
 
-    tokio::pin!(batch_stream);
+    drain_batch_stream(batch_stream, &semaphore, tx).await
+}
 
+/// Drain a batch stream through phases 2-4 of the file pipeline, recording
+/// timing and throughput into STATS. Shared by both the full-scan and
+/// incremental-scan pipelines — the only difference between the two is how
+/// the stream is obtained before calling this function.
+///
+///   2. Fetch + decode — timed; each `.next()` does I/O + decompression
+///   3. Serialize      — timed; dispatched to SERIALIZE_POOL via oneshot
+///   4. Backpressure   — timed; semaphore blocks if producer is too far ahead
+pub(crate) async fn drain_batch_stream(
+    mut batch_stream: impl Stream<Item = iceberg::Result<RecordBatch>> + Unpin,
+    semaphore: &Arc<Semaphore>,
+    tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
+) -> Result<(), iceberg::Error> {
     loop {
         // ── Phase 2: Fetch + decode ─────────────────────────────────────
-        // Each .next() call fetches compressed parquet pages from storage,
-        // decompresses (ZSTD), decodes column encodings, and assembles a
-        // RecordBatch. These are inseparable without forking parquet-rs.
         let batch_opt = timed!(fetch_decode_ns, batch_stream.next());
-
         let batch = match batch_opt {
             Some(Ok(b)) => b,
             Some(Err(e)) => return Err(e),
@@ -403,8 +409,6 @@ async fn process_file_inner(
         };
 
         // ── Phase 3: Serialize to Arrow IPC ─────────────────────────────
-        // Dispatched to the shared rayon pool so N idle workers handle all
-        // file tasks; the oneshot channel bridges rayon back to async.
         let serialized = timed!(serialize_ns, {
             let (stx, srx) = tokio::sync::oneshot::channel();
             SERIALIZE_POOL.spawn(move || {
@@ -417,22 +421,15 @@ async fn process_file_inner(
 
         let byte_len = serialized.length;
         STATS.batches_produced.fetch_add(1, Ordering::Relaxed);
-        STATS
-            .bytes_produced
-            .fetch_add(byte_len as u64, Ordering::Relaxed);
+        STATS.bytes_produced.fetch_add(byte_len as u64, Ordering::Relaxed);
 
         // ── Phase 4: Backpressure ───────────────────────────────────────
-        // Acquire permits equal to the serialized size. If this file task
-        // has produced > MAX_BUFFERED_BYTES_PER_TASK ahead of the consumer,
-        // this yields (async, not thread-blocking) until permits are freed.
         let _permit = timed!(semaphore_wait_ns, semaphore.acquire_many(byte_len as u32))
             .map_err(|e| unexpected(format!("semaphore: {e}")))?;
-        // Detach the permit — the consumer releases it via add_permits().
         std::mem::forget(_permit);
 
         STATS.track_buffer_add(byte_len as u64);
 
-        // Send the batch to this file's channel.
         if tx
             .send(Ok(BufferedBatch {
                 batch: serialized,

@@ -19,7 +19,7 @@ use iceberg::io::FileIO;
 use iceberg::scan::incremental::{AppendedFileScanTask, DeleteScanTask};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
-use crate::ordered_file_pipeline::{run_nested_pipeline, BufferedBatch, FileScan};
+use crate::ordered_file_pipeline::{drain_batch_stream, run_nested_pipeline, BufferedBatch, FileScan};
 use crate::pipeline_stats::MAX_BUFFERED_BYTES_PER_TASK;
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
@@ -73,47 +73,7 @@ async fn process_incremental_file_inner(
 ) -> Result<(), iceberg::Error> {
     let batch_stream =
         read_one_append_file(reader, task).map_err(|e| unexpected(format!("reader setup: {e}")))?;
-    tokio::pin!(batch_stream);
-
-    loop {
-        let batch = match batch_stream.next().await {
-            Some(Ok(b)) => b,
-            Some(Err(e)) => return Err(e),
-            None => break,
-        };
-
-        let serialized = {
-            let (stx, srx) = tokio::sync::oneshot::channel();
-            crate::ordered_file_pipeline::SERIALIZE_POOL.spawn(move || {
-                let _ = stx.send(crate::serialize_record_batch(batch));
-            });
-            srx
-        }
-        .await
-        .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
-        .map_err(unexpected)?;
-
-        let byte_len = serialized.length;
-
-        let _permit = semaphore
-            .acquire_many(byte_len as u32)
-            .await
-            .map_err(|e| unexpected(format!("semaphore: {e}")))?;
-        std::mem::forget(_permit);
-
-        if tx
-            .send(Ok(BufferedBatch {
-                batch: serialized,
-                byte_len,
-                semaphore: semaphore.clone(),
-            }))
-            .await
-            .is_err()
-        {
-            return Ok(());
-        }
-    }
-    Ok(())
+    drain_batch_stream(batch_stream, semaphore, tx).await
 }
 
 /// Spawn one file task. Returns a future that resolves immediately to
