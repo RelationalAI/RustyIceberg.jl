@@ -147,9 +147,7 @@ impl_scan_builder_method!(
 /// parallelism; prefetch_depth defaults to concurrency.
 fn resolve_pipeline_params(scan: &IcebergScan) -> (usize, usize, FileIO, Option<usize>) {
     let concurrency = if scan.file_concurrency == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        crate::cpu_count()
     } else {
         scan.file_concurrency
     };

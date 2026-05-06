@@ -235,6 +235,23 @@ function with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
 end
 
 """
+    with_file_prefetch_depth!(scan::IncrementalScan, n::UInt)
+
+Set how many FileScan tasks are queued ahead in the outer FileScanStream.
+Higher values keep the Julia consumer busy but use more memory.
+"""
+function with_file_prefetch_depth!(scan::IncrementalScan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_file_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+    if result != 0
+        throw(IcebergException("Failed to set file prefetch depth", result))
+    end
+    return nothing
+end
+
+"""
     with_pos_column!(scan::IncrementalScan)
 
 Add the _pos metadata column to the incremental scan.
@@ -318,4 +335,63 @@ function free_incremental_scan!(scan::IncrementalScan)
     GC.@preserve scan @ccall rust_lib.iceberg_free_incremental_scan(
         convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
     )::Cvoid
+end
+
+# ── Nested incremental scan ────────────────────────────────────────────────
+#
+# Returns (append_stream::FileScanStream, delete_stream::ArrowStream).
+# The append stream yields one FileScan per appended parquet file (use the
+# same next_file_scan / file_scan_* / free_file_scan! helpers as the full
+# nested scan).  The delete stream is a flat ArrowStream; drain with next_batch
+# and free with free_stream.
+
+"""
+    IncrementalFileScanStreamResponse
+
+Response structure for `iceberg_incremental_file_scan_stream`.
+"""
+mutable struct IncrementalFileScanStreamResponse
+    result::Cint
+    append_stream::FileScanStream
+    delete_stream::ArrowStream
+    error_message::Ptr{Cchar}
+    context::Ptr{Cvoid}
+
+    IncrementalFileScanStreamResponse() = new(-1, C_NULL, C_NULL, C_NULL, C_NULL)
+end
+
+"""
+    nested_incremental_arrow_stream(scan::IncrementalScan) -> (FileScanStream, ArrowStream)
+
+Initialize a nested incremental scan asynchronously.
+Returns `(append_stream, delete_stream)`:
+- `append_stream` — iterate with `next_file_scan`; each item carries filename,
+  record count, and a prefetched inner batch stream.
+- `delete_stream` — flat stream of delete records; drain with `next_batch`.
+"""
+function nested_incremental_arrow_stream(scan::IncrementalScan)
+    response = IncrementalFileScanStreamResponse()
+
+    async_ccall(response) do handle
+        @ccall rust_lib.iceberg_incremental_file_scan_stream(
+            scan.ptr::Ptr{Cvoid},
+            response::Ref{IncrementalFileScanStreamResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+
+    @throw_on_error(response, "iceberg_incremental_file_scan_stream", IcebergException)
+
+    return (response.append_stream, response.delete_stream)
+end
+
+"""
+    scan_incremental_nested!(scan::IncrementalScan) -> (FileScanStream, ArrowStream)
+
+Build the incremental scan and return a nested stream pair.
+Convenience wrapper around `build!` + `nested_incremental_arrow_stream`.
+"""
+function scan_incremental_nested!(scan::IncrementalScan)
+    build!(scan)
+    return nested_incremental_arrow_stream(scan)
 end

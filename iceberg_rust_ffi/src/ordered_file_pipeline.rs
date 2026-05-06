@@ -31,7 +31,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use futures::StreamExt;
+use arrow_array::RecordBatch;
+use futures::{Stream, StreamExt};
 use iceberg::arrow::ArrowReaderBuilder;
 use iceberg::io::FileIO;
 use iceberg::scan::FileScanTask;
@@ -42,10 +43,9 @@ use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
 /// Process-global rayon pool for Arrow IPC serialization.
-static SERIALIZE_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
-    let n = std::thread::available_parallelism().unwrap().get();
+pub(crate) static SERIALIZE_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     rayon::ThreadPoolBuilder::new()
-        .num_threads(n)
+        .num_threads(crate::cpu_count())
         .build()
         .expect("failed to build serialization thread pool")
 });
@@ -72,10 +72,10 @@ macro_rules! timed {
 /// A serialized Arrow IPC batch bundled with its byte size and a reference
 /// to the originating file task's semaphore. The consumer releases permits
 /// after forwarding the batch to Julia, unblocking the producer.
-struct BufferedBatch {
-    batch: ArrowBatch,
-    byte_len: usize,
-    semaphore: Arc<Semaphore>,
+pub(crate) struct BufferedBatch {
+    pub(crate) batch: ArrowBatch,
+    pub(crate) byte_len: usize,
+    pub(crate) semaphore: Arc<Semaphore>,
 }
 
 /// Internal per-file scan result: filename, record count, and a prefetched
@@ -86,19 +86,24 @@ pub struct FileScan {
     pub stream: IcebergArrowStream,
 }
 
-/// Convert a per-file mpsc receiver into an IcebergArrowStream.
-/// Semaphore permits are released and STATS updated as each batch is yielded.
-fn make_file_stream(
+/// Convert a per-file mpsc receiver into an `IcebergArrowStream`.
+/// Releases semaphore permits as each batch is yielded and calls `on_release`
+/// with the byte count (use it to update stats or pass `|_| {}` to skip).
+pub(crate) fn make_file_stream<F>(
     file_rx: mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
-) -> IcebergArrowStream {
-    let stream = futures::stream::unfold(file_rx, |mut rx| async move {
+    on_release: F,
+) -> IcebergArrowStream
+where
+    F: Fn(usize) + Send + 'static,
+{
+    let stream = futures::stream::unfold((file_rx, on_release), |(mut rx, cb)| async move {
         rx.recv().await.map(|item| {
             let result = item.map(|buf| {
                 buf.semaphore.add_permits(buf.byte_len);
-                STATS.track_buffer_release(buf.byte_len as u64);
+                cb(buf.byte_len);
                 buf.batch
             });
-            (result, rx)
+            (result, (rx, cb))
         })
     })
     .boxed();
@@ -190,50 +195,81 @@ async fn run_flat(
     STATS.store_elapsed(&STATS.pipeline_wall_ns, pipeline_start);
 }
 
-/// Main nested consumer loop. Keeps `concurrency` file tasks in flight concurrently using
-/// FuturesUnordered and wraps each completed task's receiver as an
-/// IcebergArrowStream before sending a FileScan to the outer channel.
-async fn run_nested(
-    tasks: Vec<FileScanTask>,
-    file_io: FileIO,
-    batch_size: Option<usize>,
+/// Generic `FuturesUnordered` orchestrator shared by the full scan and
+/// incremental append pipelines.
+///
+/// Keeps `concurrency` file tasks in flight from `task_stream`, wraps each
+/// completed receiver as an `IcebergArrowStream` via `make_file_stream`, and
+/// forwards `FileScan` items to `tx` in source order.
+///
+/// `spawn_task` converts a task into a future that resolves immediately to
+/// `(filename, record_count, Receiver)` — the actual I/O runs in the
+/// background tokio task spawned inside `spawn_task`.
+///
+/// `on_release` is forwarded to `make_file_stream`; pass
+/// `|n| STATS.track_buffer_release(n as u64)` for the full scan or
+/// `|_| {}` when no stats tracking is needed.
+pub(crate) async fn run_nested_pipeline<T, S, SpawnFut, F>(
+    mut task_stream: S,
     concurrency: usize,
     tx: mpsc::Sender<Result<FileScan, iceberg::Error>>,
-) {
-    use futures::stream::FuturesUnordered;
+    spawn_task: impl Fn(T) -> SpawnFut,
+    on_release: F,
+) where
+    S: futures::Stream<Item = iceberg::Result<T>> + Unpin,
+    SpawnFut: std::future::Future<
+            Output = iceberg::Result<(
+                String,
+                i64,
+                mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
+            )>,
+        > + Send
+        + 'static,
+    F: Fn(usize) + Send + Clone + 'static,
+{
+    use futures::{future::BoxFuture, stream::FuturesUnordered};
 
-    // For the nested path this records "time until last FileScan was handed to
-    // the consumer". For the flat path run_flat overwrites it with the full
-    // end-to-end time once all batches are drained, so the flat metric is
-    // unaffected.
-    let pipeline_start = Instant::now();
+    type SpawnResult<E> = Result<(String, i64, mpsc::Receiver<Result<BufferedBatch, E>>), E>;
+    let mut in_flight: FuturesUnordered<BoxFuture<'static, SpawnResult<iceberg::Error>>> =
+        FuturesUnordered::new();
+    let mut stream_done = false;
 
-    let mut in_flight = FuturesUnordered::new();
-    let mut task_iter = tasks.into_iter();
-
-    // Seed the first N file tasks.
     for _ in 0..concurrency {
-        if let Some(task) = task_iter.next() {
-            in_flight.push(spawn_file_task_with_meta(task, file_io.clone(), batch_size));
+        match task_stream.next().await {
+            Some(Ok(task)) => in_flight.push(Box::pin(spawn_task(task))),
+            Some(Err(e)) => {
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+            None => {
+                stream_done = true;
+                break;
+            }
         }
     }
 
     while let Some(file_result) = in_flight.next().await {
-        // Eagerly start the next file to keep N tasks in flight.
-        if let Some(task) = task_iter.next() {
-            in_flight.push(spawn_file_task_with_meta(task, file_io.clone(), batch_size));
+        if !stream_done {
+            // Eagerly start the next file to keep N tasks in flight.
+            match task_stream.next().await {
+                Some(Ok(task)) => in_flight.push(Box::pin(spawn_task(task))),
+                Some(Err(e)) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+                None => stream_done = true,
+            }
         }
 
         match file_result {
             Ok((filename, record_count, file_rx)) => {
-                let stream = make_file_stream(file_rx);
                 let file_scan = FileScan {
                     filename,
                     record_count,
-                    stream,
+                    stream: make_file_stream(file_rx, on_release.clone()),
                 };
                 if timed!(file_dispatch_wait_ns, tx.send(Ok(file_scan))).is_err() {
-                    return; // outer consumer dropped the stream
+                    return;
                 }
             }
             Err(e) => {
@@ -242,6 +278,34 @@ async fn run_nested(
             }
         }
     }
+}
+
+/// Full-scan nested consumer. Wraps `run_nested_pipeline` and records
+/// wall-clock time around it for `STATS.pipeline_wall_ns`.
+async fn run_nested(
+    tasks: Vec<FileScanTask>,
+    file_io: FileIO,
+    batch_size: Option<usize>,
+    concurrency: usize,
+    tx: mpsc::Sender<Result<FileScan, iceberg::Error>>,
+) {
+    // For the nested path this records "time until last FileScan was handed to
+    // the consumer". For the flat path run_flat overwrites it with the full
+    // end-to-end time once all batches are drained, so the flat metric is
+    // unaffected.
+    let pipeline_start = Instant::now();
+
+    let task_stream =
+        futures::stream::iter(tasks.into_iter().map(Ok::<FileScanTask, iceberg::Error>));
+
+    run_nested_pipeline(
+        task_stream,
+        concurrency,
+        tx,
+        move |task| spawn_file_task_with_meta(task, file_io.clone(), batch_size),
+        |n| STATS.track_buffer_release(n as u64),
+    )
+    .await;
 
     STATS.store_elapsed(&STATS.pipeline_wall_ns, pipeline_start);
 }
@@ -325,15 +389,28 @@ async fn process_file_inner(
     let batch_stream = reader.read(task_stream).map_err(|e| unexpected(e))?;
     STATS.add_elapsed(&STATS.reader_setup_ns, setup_start);
 
-    tokio::pin!(batch_stream);
+    drain_batch_stream(batch_stream, &semaphore, tx).await
+}
 
+/// Drain a batch stream through phases 2-4 of the file pipeline, recording
+/// timing and throughput into STATS. Shared by both the full-scan and
+/// incremental-scan pipelines — the only difference between the two is how
+/// the stream is obtained before calling this function.
+///
+///   2. Fetch + decode — timed; each `.next()` does I/O + decompression
+///   3. Serialize      — timed; dispatched to SERIALIZE_POOL via oneshot
+///   4. Backpressure   — timed; semaphore blocks if producer is too far ahead
+pub(crate) async fn drain_batch_stream(
+    mut batch_stream: impl Stream<Item = iceberg::Result<RecordBatch>> + Unpin,
+    semaphore: &Arc<Semaphore>,
+    tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
+) -> Result<(), iceberg::Error> {
     loop {
         // ── Phase 2: Fetch + decode ─────────────────────────────────────
         // Each .next() call fetches compressed parquet pages from storage,
         // decompresses (ZSTD), decodes column encodings, and assembles a
         // RecordBatch. These are inseparable without forking parquet-rs.
         let batch_opt = timed!(fetch_decode_ns, batch_stream.next());
-
         let batch = match batch_opt {
             Some(Ok(b)) => b,
             Some(Err(e)) => return Err(e),
@@ -386,4 +463,296 @@ async fn process_file_inner(
 
     STATS.files_completed.fetch_add(1, Ordering::Relaxed);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+
+    use super::*;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    type SpawnOutput = iceberg::Result<(
+        String,
+        i64,
+        mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
+    )>;
+
+    /// Spawn function that resolves immediately with an empty inner channel
+    /// (simulates a file with no batches). No background task is spawned.
+    fn spawn_empty(
+        (name, rc): (String, i64),
+    ) -> impl Future<Output = SpawnOutput> + Send + 'static {
+        let (_, rx) = mpsc::channel(1); // tx dropped → channel immediately closed
+        async move { Ok((name, rc, rx)) }
+    }
+
+    /// Spawn function that always returns an error.
+    fn spawn_failing(
+        (_name, _rc): (String, i64),
+    ) -> impl Future<Output = SpawnOutput> + Send + 'static {
+        async move {
+            Err(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
+                "spawn failed",
+            ))
+        }
+    }
+
+    /// Run `run_nested_pipeline` to completion and collect all output items.
+    async fn collect<F, Fut>(
+        tasks: Vec<(String, i64)>,
+        concurrency: usize,
+        spawn: F,
+    ) -> Vec<iceberg::Result<(String, i64)>>
+    where
+        F: Fn((String, i64)) -> Fut,
+        Fut: Future<Output = SpawnOutput> + Send + 'static,
+    {
+        let stream = futures::stream::iter(tasks.into_iter().map(Ok::<_, iceberg::Error>));
+        let (tx, mut rx) = mpsc::channel(128);
+        run_nested_pipeline(stream, concurrency, tx, spawn, |_| {}).await;
+        let mut out = vec![];
+        while let Some(item) = rx.recv().await {
+            out.push(item.map(|fs| (fs.filename, fs.record_count)));
+        }
+        out
+    }
+
+    // ── Orchestration tests (spawn_empty — no actual I/O) ────────────────────
+    //
+    // These tests use spawn_empty, which drops the inner sender immediately so
+    // no batches flow and no file I/O happens.  They only exercise the
+    // FuturesUnordered seeding/draining logic inside run_nested_pipeline.
+
+    #[tokio::test]
+    async fn empty_stream_yields_nothing() {
+        // Baseline: a pipeline with zero input tasks produces zero output.
+        assert!(collect(vec![], 4, spawn_empty).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn single_file_forwarded() {
+        // A single task produces exactly one FileScan with matching metadata.
+        let got = collect(vec![("a.parquet".into(), 42)], 1, spawn_empty).await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].as_ref().unwrap(), &("a.parquet".to_string(), 42));
+    }
+
+    #[tokio::test]
+    async fn files_yielded_in_source_order() {
+        // With concurrency=1 only one future is in-flight at a time, so
+        // FuturesUnordered resolves them strictly in push order.
+        let tasks = vec![
+            ("a.parquet".into(), 10),
+            ("b.parquet".into(), 20),
+            ("c.parquet".into(), 30),
+        ];
+        let pairs: Vec<(String, i64)> = collect(tasks, 1, spawn_empty)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("a.parquet".to_string(), 10),
+                ("b.parquet".to_string(), 20),
+                ("c.parquet".to_string(), 30),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn all_files_present_with_high_concurrency() {
+        // When concurrency > task count all tasks are seeded before any complete.
+        // Order is non-deterministic, so we only check all five are present.
+        let tasks: Vec<(String, i64)> = (0..5)
+            .map(|i| (format!("f{i}.parquet"), i as i64))
+            .collect();
+        let got = collect(tasks, 8, spawn_empty).await;
+        assert_eq!(got.len(), 5);
+        assert!(got.iter().all(|r| r.is_ok()));
+        let names: std::collections::HashSet<String> =
+            got.into_iter().map(|r| r.unwrap().0).collect();
+        for i in 0..5usize {
+            assert!(names.contains(&format!("f{i}.parquet")));
+        }
+    }
+
+    #[tokio::test]
+    async fn source_stream_error_at_seeding_propagates() {
+        // An error as the very first item is caught during the seeding loop and
+        // forwarded to the output channel; no FileScan is produced.
+        let stream = futures::stream::iter(vec![Err::<(String, i64), _>(iceberg::Error::new(
+            iceberg::ErrorKind::Unexpected,
+            "seed error",
+        ))]);
+        let (tx, mut rx) = mpsc::channel(128);
+        run_nested_pipeline(stream, 1, tx, spawn_empty, |_| {}).await;
+
+        let item = rx.recv().await.unwrap();
+        assert!(item.is_err());
+        assert!(item.err().unwrap().to_string().contains("seed error"));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn source_stream_error_during_drain_propagates() {
+        // An error on the second pull hits during the "eagerly fetch next" step
+        // inside the main drain loop.  The pipeline sends the error immediately
+        // and stops; the in-flight FileScan for the first task is dropped.
+        let stream = futures::stream::iter(vec![
+            Ok::<(String, i64), iceberg::Error>(("a.parquet".into(), 1)),
+            Err(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
+                "drain error",
+            )),
+        ]);
+        let (tx, mut rx) = mpsc::channel(128);
+        run_nested_pipeline(stream, 1, tx, spawn_empty, |_| {}).await;
+
+        let item = rx.recv().await.unwrap();
+        assert!(item.is_err());
+        assert!(item.err().unwrap().to_string().contains("drain error"));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_error_propagates() {
+        // If the spawn_task future itself resolves to Err, the error is forwarded
+        // to the outer channel and the pipeline stops.
+        let got = collect(vec![("bad.parquet".into(), 0)], 1, spawn_failing).await;
+        assert_eq!(got.len(), 1);
+        assert!(got[0].is_err());
+    }
+
+    #[tokio::test]
+    async fn consumer_dropping_rx_does_not_panic() {
+        // If the consumer drops its receiver before the pipeline finishes, the
+        // pipeline must exit cleanly (the channel send returns Err, which is
+        // treated as a stop signal, not a panic).
+        let tasks: Vec<(String, i64)> = (0..20)
+            .map(|i| (format!("f{i}.parquet"), i as i64))
+            .collect();
+        let stream = futures::stream::iter(tasks.into_iter().map(Ok::<_, iceberg::Error>));
+        let (tx, rx) = mpsc::channel(1); // tiny buffer so the pipeline blocks quickly
+        drop(rx); // consumer disappears immediately
+        run_nested_pipeline(stream, 4, tx, spawn_empty, |_| {}).await;
+    }
+
+    // ── End-to-end test: exercises the full per-file processing path ──────
+    //
+    // Unlike the orchestration tests above, this test runs real parquet I/O
+    // through the pipeline: reader setup, fetch/decode, Arrow IPC serialization,
+    // semaphore backpressure, and make_file_stream permit release.
+
+    #[tokio::test]
+    async fn full_pipeline_reads_parquet_file() {
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_ipc::reader::StreamReader;
+        use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
+        use bytes::Bytes;
+        use iceberg::io::FileIO;
+        use iceberg::scan::FileScanTask;
+        use iceberg::spec::{
+            DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type,
+        };
+        use parquet::arrow::ArrowWriter;
+        use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+        use std::collections::HashMap;
+
+        // ── 1. Arrow schema with embedded field ID ─────────────────────────
+        let arrow_field = ArrowField::new("id", DataType::Int32, false).with_metadata(
+            HashMap::from([(PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string())]),
+        );
+        let arrow_schema = std::sync::Arc::new(ArrowSchema::new(vec![arrow_field]));
+
+        // ── 2. Write a 3-row RecordBatch to parquet bytes ──────────────────
+        let batch = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![std::sync::Arc::new(Int32Array::from(vec![10, 20, 30]))],
+        )
+        .unwrap();
+        let mut buf = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buf, arrow_schema.clone(), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let parquet_bytes = Bytes::from(buf);
+        let file_size = parquet_bytes.len() as u64;
+
+        // ── 3. Store in in-memory FileIO ───────────────────────────────────
+        let file_io = FileIO::new_with_memory();
+        let path = "memory:///pipeline_test/data.parquet";
+        file_io
+            .new_output(path)
+            .unwrap()
+            .write(parquet_bytes)
+            .await
+            .unwrap();
+
+        // ── 4. Matching iceberg schema + FileScanTask ──────────────────────
+        let iceberg_schema = std::sync::Arc::new(
+            IcebergSchema::builder()
+                .with_fields(vec![std::sync::Arc::new(NestedField::required(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Int),
+                ))])
+                .build()
+                .unwrap(),
+        );
+        let task = FileScanTask {
+            data_file_path: path.to_string(),
+            file_size_in_bytes: file_size,
+            start: 0,
+            length: file_size,
+            record_count: Some(3),
+            data_file_format: DataFileFormat::Parquet,
+            schema: iceberg_schema,
+            project_field_ids: vec![1],
+            predicate: None,
+            deletes: vec![],
+            partition: None,
+            partition_spec: None,
+            name_mapping: None,
+            case_sensitive: false,
+        };
+
+        // ── 5. Run the full pipeline ───────────────────────────────────────
+        // Exercises: run_nested → run_nested_pipeline → spawn_file_task_with_meta
+        //   → process_file_inner (reader setup, fetch/decode, serialize IPC,
+        //     semaphore acquire) → make_file_stream (semaphore release)
+        let nested = create_nested_pipeline(vec![task], file_io, None, 1, 1)
+            .await
+            .unwrap();
+
+        // ── 6. Drain outer FileScanStream ──────────────────────────────────
+        let mut outer = nested.stream.lock().await;
+        let file_scan = outer.next().await.unwrap().unwrap();
+        assert_eq!(file_scan.filename, path);
+        assert_eq!(file_scan.record_count, 3);
+        assert!(outer.next().await.is_none(), "expected exactly one file");
+
+        // ── 7. Drain inner IcebergArrowStream → decode Arrow IPC ──────────
+        let mut inner = file_scan.stream.stream.lock().await;
+        let arrow_batch = inner.next().await.unwrap().unwrap();
+
+        let data = unsafe { std::slice::from_raw_parts(arrow_batch.data, arrow_batch.length) };
+        let mut reader = StreamReader::try_new(std::io::Cursor::new(data), None).unwrap();
+        let decoded = reader.next().unwrap().unwrap();
+        assert_eq!(decoded.num_rows(), 3);
+        let id_col = decoded
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(id_col.values(), &[10, 20, 30]);
+
+        // Release the Vec<u8> allocated by serialize_record_batch.
+        unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut Vec<u8>)) };
+
+        assert!(inner.next().await.is_none(), "expected exactly one batch");
+    }
 }

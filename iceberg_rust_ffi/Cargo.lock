@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "iceberg_rust_ffi"
-version = "0.7.19"
+version = "0.7.21"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -1656,6 +1656,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "async-trait",
+ "bytes",
  "futures",
  "home",
  "iceberg",
