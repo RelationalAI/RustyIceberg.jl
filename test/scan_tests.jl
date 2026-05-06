@@ -1199,6 +1199,40 @@ end
         println("✅ with_file_prefetch_depth! test passed ($total_rows rows)")
     end
 
+    @testset "with_file_prefetch_depth! - Incremental Scan" begin
+        table = RustyIceberg.table_open(incremental_path)
+        scan  = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+
+        @test_nowarn RustyIceberg.with_file_prefetch_depth!(scan, UInt(4))
+        append_stream, delete_stream = RustyIceberg.scan_incremental_nested!(scan)
+
+        total_rows = 0
+        try
+            file_scan_ptr = RustyIceberg.next_file_scan(append_stream)
+            while file_scan_ptr != C_NULL
+                inner = RustyIceberg.file_scan_arrow_stream(file_scan_ptr)
+                batch_ptr = RustyIceberg.next_batch(inner)
+                while batch_ptr != C_NULL
+                    batch = unsafe_load(batch_ptr)
+                    arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                    total_rows += nrow(DataFrame(arrow_table))
+                    RustyIceberg.free_batch(batch_ptr)
+                    batch_ptr = RustyIceberg.next_batch(inner)
+                end
+                RustyIceberg.free_file_scan!(file_scan_ptr)
+                file_scan_ptr = RustyIceberg.next_file_scan(append_stream)
+            end
+        finally
+            RustyIceberg.free_file_scan_stream!(append_stream)
+            RustyIceberg.free_stream(delete_stream)
+            RustyIceberg.free_incremental_scan!(scan)
+            RustyIceberg.free_table(table)
+        end
+
+        @test total_rows > 0
+        println("✅ with_file_prefetch_depth! test passed for incremental scan ($total_rows rows)")
+    end
+
     @testset "Combined with_snapshot_id! and other builder methods" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)

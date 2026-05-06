@@ -235,6 +235,23 @@ function with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
 end
 
 """
+    with_file_prefetch_depth!(scan::IncrementalScan, n::UInt)
+
+Set how many FileScan tasks are queued ahead in the outer FileScanStream.
+Higher values keep the Julia consumer busy but use more memory.
+"""
+function with_file_prefetch_depth!(scan::IncrementalScan, n::UInt)
+    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_file_prefetch_depth(
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        n::Csize_t
+    )::Cint
+    if result != 0
+        throw(IcebergException("Failed to set file prefetch depth", result))
+    end
+    return nothing
+end
+
+"""
     with_pos_column!(scan::IncrementalScan)
 
 Add the _pos metadata column to the incremental scan.

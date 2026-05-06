@@ -118,6 +118,8 @@ pub extern "C" fn iceberg_new_incremental_scan(
 // Use macros from scan_common for shared functionality
 impl_select_columns!(iceberg_incremental_select_columns, IcebergIncrementalScan);
 
+impl_with_file_prefetch_depth!(iceberg_incremental_scan_with_file_prefetch_depth, IcebergIncrementalScan);
+
 impl_scan_builder_method!(
     iceberg_incremental_scan_with_manifest_file_concurrency_limit,
     IcebergIncrementalScan,
