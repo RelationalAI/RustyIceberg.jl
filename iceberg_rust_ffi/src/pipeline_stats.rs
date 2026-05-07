@@ -279,7 +279,7 @@ impl PipelineStats {
                 files, peak
             )),
             Line::Row(format!(
-                "batches:         {:>9}       serialized: {:.1} MB",
+                "batches:         {:>9}       shipped Arrow bytes: {:.1} MB",
                 batches, bytes_mb
             )),
             Line::Row(format!(
