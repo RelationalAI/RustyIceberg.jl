@@ -89,6 +89,14 @@ pub struct FileScan {
 /// Convert a per-file mpsc receiver into an `IcebergArrowStream`.
 /// Releases semaphore permits as each batch is yielded and calls `on_release`
 /// with the byte count (use it to update stats or pass `|_| {}` to skip).
+///
+/// Also records two consumer-side metrics (separate from `on_release`):
+/// - `consumer_wait_ns`: time the consumer spent inside `rx.recv().await`.
+///   This is the symmetric counterpart of `producer_stall_ns` (producer side).
+///   High value ⇒ producer-bound; low value ⇒ Julia/consumer-bound.
+/// - `pipeline_end_ns`: stamped via `record_file_drained()` when `recv()`
+///   returns `None`, i.e. when this file's `process_file` task dropped its
+///   `tx`. Used to compute the true pipeline wall clock in `print_summary`.
 pub(crate) fn make_file_stream<F>(
     file_rx: mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
     on_release: F,
@@ -97,14 +105,24 @@ where
     F: Fn(usize) + Send + 'static,
 {
     let stream = futures::stream::unfold((file_rx, on_release), |(mut rx, cb)| async move {
-        rx.recv().await.map(|item| {
-            let result = item.map(|buf| {
-                buf.semaphore.add_permits(buf.byte_len);
-                cb(buf.byte_len);
-                buf.batch
-            });
-            (result, (rx, cb))
-        })
+        let recv_start = Instant::now();
+        let recvd = rx.recv().await;
+        STATS.add_elapsed(&STATS.consumer_wait_ns, recv_start);
+        match recvd {
+            None => {
+                // Producer dropped tx → this file is done draining.
+                STATS.record_file_drained();
+                None
+            }
+            Some(item) => {
+                let result = item.map(|buf| {
+                    buf.semaphore.add_permits(buf.byte_len);
+                    cb(buf.byte_len);
+                    buf.batch
+                });
+                Some((result, (rx, cb)))
+            }
+        }
     })
     .boxed();
     IcebergArrowStream {
@@ -168,12 +186,13 @@ pub async fn create_pipeline(
 }
 
 /// Flatten the nested pipeline into a single batch channel (backwards-compat).
+///
+/// The pipeline wall clock is stamped by `make_file_stream`'s
+/// `record_file_drained()` calls — no explicit timestamp here.
 async fn run_flat(
     nested: IcebergFileScanStream,
     tx: mpsc::Sender<Result<ArrowBatch, iceberg::Error>>,
 ) {
-    let pipeline_start = Instant::now();
-
     let mut outer = nested.stream.lock().await;
     while let Some(item) = outer.next().await {
         match item {
@@ -191,8 +210,6 @@ async fn run_flat(
             }
         }
     }
-
-    STATS.store_elapsed(&STATS.pipeline_wall_ns, pipeline_start);
 }
 
 /// Generic `FuturesUnordered` orchestrator shared by the full scan and
@@ -280,8 +297,9 @@ pub(crate) async fn run_nested_pipeline<T, S, SpawnFut, F>(
     }
 }
 
-/// Full-scan nested consumer. Wraps `run_nested_pipeline` and records
-/// wall-clock time around it for `STATS.pipeline_wall_ns`.
+/// Full-scan nested consumer. Wraps `run_nested_pipeline`. The pipeline
+/// wall clock is stamped by `make_file_stream`'s `record_file_drained()`
+/// each time a per-file stream ends.
 async fn run_nested(
     tasks: Vec<FileScanTask>,
     file_io: FileIO,
@@ -289,12 +307,6 @@ async fn run_nested(
     concurrency: usize,
     tx: mpsc::Sender<Result<FileScan, iceberg::Error>>,
 ) {
-    // For the nested path this records "time until last FileScan was handed to
-    // the consumer". For the flat path run_flat overwrites it with the full
-    // end-to-end time once all batches are drained, so the flat metric is
-    // unaffected.
-    let pipeline_start = Instant::now();
-
     let task_stream =
         futures::stream::iter(tasks.into_iter().map(Ok::<FileScanTask, iceberg::Error>));
 
@@ -306,8 +318,6 @@ async fn run_nested(
         |n| STATS.track_buffer_release(n as u64),
     )
     .await;
-
-    STATS.store_elapsed(&STATS.pipeline_wall_ns, pipeline_start);
 }
 
 /// Spawn a single file task. Returns a future that resolves immediately to
@@ -437,10 +447,17 @@ pub(crate) async fn drain_batch_stream(
             .fetch_add(byte_len as u64, Ordering::Relaxed);
 
         // ── Phase 4: Backpressure ───────────────────────────────────────
-        // Acquire permits equal to the serialized size. If this file task
-        // has produced > MAX_BUFFERED_BYTES_PER_TASK ahead of the consumer,
-        // this yields (async, not thread-blocking) until permits are freed.
-        let _permit = timed!(semaphore_wait_ns, semaphore.acquire_many(byte_len as u32))
+        // Producer is throttled by two distinct per-file bounds:
+        //   (a) byte budget — `semaphore.acquire_many(byte_len)` blocks if
+        //       this file's outstanding buffered bytes exceed
+        //       MAX_BUFFERED_BYTES_PER_TASK (100 MB).
+        //   (b) batch-count budget — `tx.send(...)` blocks if the per-file
+        //       mpsc(8) is already full of unconsumed batches.
+        // Either bound stalls the producer for the same root cause: the
+        // consumer hasn't drained enough yet. We accumulate both into
+        // `producer_stall_ns` so the metric is "time blocked because Julia
+        // is slow", regardless of which limit was binding.
+        let _permit = timed!(producer_stall_ns, semaphore.acquire_many(byte_len as u32))
             .map_err(|e| unexpected(format!("semaphore: {e}")))?;
         // Detach the permit — the consumer releases it via add_permits().
         std::mem::forget(_permit);
@@ -448,15 +465,15 @@ pub(crate) async fn drain_batch_stream(
         STATS.track_buffer_add(byte_len as u64);
 
         // Send the batch to this file's channel.
-        if tx
-            .send(Ok(BufferedBatch {
+        let send_result = timed!(
+            producer_stall_ns,
+            tx.send(Ok(BufferedBatch {
                 batch: serialized,
                 byte_len,
                 semaphore: semaphore.clone(),
             }))
-            .await
-            .is_err()
-        {
+        );
+        if send_result.is_err() {
             return Ok(()); // consumer dropped the receiver
         }
     }
