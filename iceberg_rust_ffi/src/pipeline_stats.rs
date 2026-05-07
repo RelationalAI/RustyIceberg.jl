@@ -223,7 +223,11 @@ impl PipelineStats {
         // metric. Including them would conflate "we did CPU work in
         // parallel" with "we sat idle in parallel".
         let cpu_work_ms = setup_ms + fd_ms + ser_ms;
-        let parallelism = if wall_ms > 0.0 { cpu_work_ms / wall_ms } else { 0.0 };
+        let parallelism = if wall_ms > 0.0 {
+            cpu_work_ms / wall_ms
+        } else {
+            0.0
+        };
         let limit_mb = MAX_BUFFERED_BYTES_PER_TASK / (1024 * 1024);
 
         // Per-batch averages help distinguish "more parallel producers" from
@@ -253,11 +257,7 @@ impl PipelineStats {
             if files == 0 {
                 format!("    ({})", note)
             } else {
-                format!(
-                    "    ({}, avg {:.2} ms/file)",
-                    note,
-                    sum_ms / files as f64
-                )
+                format!("    ({}, avg {:.2} ms/file)", note, sum_ms / files as f64)
             }
         };
 
@@ -291,7 +291,11 @@ impl PipelineStats {
                 "reader setup:    {:>9.1} ms    (open parquet, schema, deletes)",
                 setup_ms
             )),
-            Line::Row(format!("fetch+decode:    {:>9.1} ms{}", fd_ms, per_batch_only(fd_ms))),
+            Line::Row(format!(
+                "fetch+decode:    {:>9.1} ms{}",
+                fd_ms,
+                per_batch_only(fd_ms)
+            )),
             Line::Row(format!(
                 "serialize IPC:   {:>9.1} ms{}",
                 ser_ms,
@@ -351,13 +355,7 @@ impl PipelineStats {
                 Line::Sep(s) => {
                     // Layout: "│  ── {label} {fill}  │"; fill = inner - 4 - label.len().
                     let fill = inner.saturating_sub(s.len() + 4);
-                    let _ = writeln!(
-                        out,
-                        "│  {} {} {}  │",
-                        dashes(2),
-                        s,
-                        dashes(fill)
-                    );
+                    let _ = writeln!(out, "│  {} {} {}  │", dashes(2), s, dashes(fill));
                     continue;
                 }
             };
@@ -462,7 +460,7 @@ mod tests {
         let later = nanos_since_process_start() + 1_000_000_000; // +1s
         s.pipeline_end_ns.store(later, Ordering::Relaxed);
         s.record_file_drained(); // "now" is well before `later`
-        // fetch_max preserves `later`.
+                                 // fetch_max preserves `later`.
         assert_eq!(s.pipeline_end_ns.load(Ordering::Relaxed), later);
     }
 
@@ -637,16 +635,14 @@ mod tests {
             .store((468.8 * 1024.0 * 1024.0) as u64, Ordering::Relaxed);
         s.peak_concurrency.store(10, Ordering::Relaxed);
         s.reader_setup_ns.store(100_000, Ordering::Relaxed); // 0.1 ms
-        s.fetch_decode_ns
-            .store(1_691_200_000, Ordering::Relaxed); // 1691.2 ms
+        s.fetch_decode_ns.store(1_691_200_000, Ordering::Relaxed); // 1691.2 ms
         s.serialize_ns.store(1_430_000_000, Ordering::Relaxed); // 1430.0 ms
         s.producer_stall_ns.store(100_000, Ordering::Relaxed); // 0.1 ms
         s.outer_queue_full_wait_ns
             .store(54_000_000, Ordering::Relaxed); // 54.0 ms
         s.consumer_batch_wait_ns
             .store(597_000_000, Ordering::Relaxed); // 597.0 ms (over 40 batches)
-        s.consumer_file_wait_ns
-            .store(7_500_000, Ordering::Relaxed); // 7.5 ms (over 10 files)
+        s.consumer_file_wait_ns.store(7_500_000, Ordering::Relaxed); // 7.5 ms (over 10 files)
         s.peak_buffered_bytes
             .store((345.9 * 1024.0 * 1024.0) as u64, Ordering::Relaxed);
         s.format_summary()

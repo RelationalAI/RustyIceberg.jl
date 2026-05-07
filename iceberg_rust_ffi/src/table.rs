@@ -122,6 +122,14 @@ impl RawResponse for IcebergFileScanResponse {
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload.flatten() {
             Some(fs) => {
+                // Promote: this file is now attached to a Julia consumer.
+                // Lift the prefetch budget from UNATTACHED_SLOTS (2) to
+                // ATTACHED_SLOTS (8) so the producer can fully fill the
+                // per-file mpsc. See `BufferedBatch::slot_sem` for the policy.
+                fs.slot_sem.add_permits(
+                    crate::ordered_file_pipeline::ATTACHED_SLOTS
+                        - crate::ordered_file_pipeline::UNATTACHED_SLOTS,
+                );
                 let filename = std::ffi::CString::new(fs.filename)
                     .unwrap_or_default()
                     .into_raw();

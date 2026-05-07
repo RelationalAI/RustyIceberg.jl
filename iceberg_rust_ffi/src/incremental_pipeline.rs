@@ -20,7 +20,8 @@ use iceberg::scan::incremental::{AppendedFileScanTask, DeleteScanTask};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
 use crate::ordered_file_pipeline::{
-    drain_batch_stream, run_nested_pipeline, BufferedBatch, FileScan,
+    drain_batch_stream, run_nested_pipeline, BufferedBatch, FileScan, ATTACHED_SLOTS,
+    UNATTACHED_SLOTS,
 };
 use crate::pipeline_stats::MAX_BUFFERED_BYTES_PER_TASK;
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
@@ -58,10 +59,11 @@ fn build_reader(file_io: FileIO, batch_size: Option<usize>) -> ArrowReader {
 async fn process_incremental_file(
     task: AppendedFileScanTask,
     reader: ArrowReader,
-    semaphore: Arc<Semaphore>,
+    byte_sem: Arc<Semaphore>,
+    slot_sem: Arc<Semaphore>,
     tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) {
-    let result = process_incremental_file_inner(task, reader, &semaphore, &tx).await;
+    let result = process_incremental_file_inner(task, reader, &byte_sem, &slot_sem, &tx).await;
     if let Err(e) = result {
         let _ = tx.send(Err(e)).await;
     }
@@ -70,17 +72,18 @@ async fn process_incremental_file(
 async fn process_incremental_file_inner(
     task: AppendedFileScanTask,
     reader: ArrowReader,
-    semaphore: &Arc<Semaphore>,
+    byte_sem: &Arc<Semaphore>,
+    slot_sem: &Arc<Semaphore>,
     tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) -> Result<(), iceberg::Error> {
     let batch_stream =
         read_one_append_file(reader, task).map_err(|e| unexpected(format!("reader setup: {e}")))?;
-    drain_batch_stream(batch_stream, semaphore, tx).await
+    drain_batch_stream(batch_stream, byte_sem, slot_sem, tx).await
 }
 
 /// Spawn one file task. Returns a future that resolves immediately to
-/// `(filename, record_count, file_rx)` so `FuturesUnordered` can poll it
-/// alongside other tasks while the actual I/O runs in the background.
+/// `(filename, record_count, file_rx, slot_sem)` so `FuturesUnordered` can
+/// poll it alongside other tasks while the actual I/O runs in the background.
 fn spawn_incremental_file_task(
     task: AppendedFileScanTask,
     reader: ArrowReader,
@@ -90,16 +93,24 @@ fn spawn_incremental_file_task(
             String,
             i64,
             mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
+            Arc<Semaphore>,
         ),
         iceberg::Error,
     >,
 > {
     let filename = task.base.data_file_path.clone();
     let record_count = task.base.record_count.unwrap_or(0) as i64;
-    let sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
-    let (file_tx, file_rx) = mpsc::channel(8);
-    tokio::spawn(process_incremental_file(task, reader, sem, file_tx));
-    async move { Ok((filename, record_count, file_rx)) }
+    let byte_sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
+    let slot_sem = Arc::new(Semaphore::new(UNATTACHED_SLOTS));
+    let (file_tx, file_rx) = mpsc::channel(ATTACHED_SLOTS);
+    tokio::spawn(process_incremental_file(
+        task,
+        reader,
+        byte_sem,
+        slot_sem.clone(),
+        file_tx,
+    ));
+    async move { Ok((filename, record_count, file_rx, slot_sem)) }
 }
 
 /// Keep `concurrency` append file tasks in flight, yielding each as a

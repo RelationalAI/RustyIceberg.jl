@@ -69,21 +69,37 @@ macro_rules! timed {
 // Pipeline implementation
 // ===========================================================================
 
-/// A serialized Arrow IPC batch bundled with its byte size and a reference
-/// to the originating file task's semaphore. The consumer releases permits
-/// after forwarding the batch to Julia, unblocking the producer.
+/// A serialized Arrow IPC batch bundled with its byte size and references
+/// to the originating file task's two semaphores. The consumer releases
+/// permits after forwarding the batch to Julia, unblocking the producer:
+/// `byte_sem` adds back `byte_len` bytes; `slot_sem` adds back 1 batch slot.
 pub(crate) struct BufferedBatch {
     pub(crate) batch: ArrowBatch,
     pub(crate) byte_len: usize,
-    pub(crate) semaphore: Arc<Semaphore>,
+    pub(crate) byte_sem: Arc<Semaphore>,
+    pub(crate) slot_sem: Arc<Semaphore>,
 }
 
-/// Internal per-file scan result: filename, record count, and a prefetched
-/// inner batch stream. Used as the item type of the nested pipeline channel.
+/// Initial batch-slot budget for an unattached file (i.e. not yet picked
+/// up by `iceberg_next_file_scan`). The producer can fill at most this
+/// many batches before parking on `slot_sem.acquire()`. Promoted to
+/// `ATTACHED_SLOTS` at the FFI handoff site (see `IcebergFileScanResponse::set_payload`).
+pub(crate) const UNATTACHED_SLOTS: usize = 1;
+/// Full batch-slot budget for an attached file. Matches the per-file mpsc
+/// capacity, so once attached the slot semaphore stops being the binding
+/// constraint and the existing 100 MB byte budget is what throttles.
+pub(crate) const ATTACHED_SLOTS: usize = 8;
+
+/// Internal per-file scan result: filename, record count, prefetched inner
+/// batch stream, and the per-file slot semaphore. The slot semaphore is
+/// carried through the outer channel so the FFI handoff site can promote
+/// it from `UNATTACHED_SLOTS` to `ATTACHED_SLOTS` with one `add_permits`
+/// call — no separate plumbing through the orchestrator.
 pub struct FileScan {
     pub filename: String,
     pub record_count: i64,
     pub stream: IcebergArrowStream,
+    pub(crate) slot_sem: Arc<Semaphore>,
 }
 
 /// Convert a per-file mpsc receiver into an `IcebergArrowStream`.
@@ -117,7 +133,8 @@ where
             }
             Some(item) => {
                 let result = item.map(|buf| {
-                    buf.semaphore.add_permits(buf.byte_len);
+                    buf.byte_sem.add_permits(buf.byte_len);
+                    buf.slot_sem.add_permits(1);
                     cb(buf.byte_len);
                     buf.batch
                 });
@@ -229,8 +246,10 @@ async fn run_flat(
 /// forwards `FileScan` items to `tx` in source order.
 ///
 /// `spawn_task` converts a task into a future that resolves immediately to
-/// `(filename, record_count, Receiver)` — the actual I/O runs in the
-/// background tokio task spawned inside `spawn_task`.
+/// `(filename, record_count, Receiver, slot_sem)` — the actual I/O runs in
+/// the background tokio task spawned inside `spawn_task`. `slot_sem` rides
+/// along on the resulting `FileScan` so the FFI handoff site can promote it
+/// from `UNATTACHED_SLOTS` to `ATTACHED_SLOTS` without any extra plumbing.
 ///
 /// `on_release` is forwarded to `make_file_stream`; pass
 /// `|n| STATS.track_buffer_release(n as u64)` for the full scan or
@@ -248,6 +267,7 @@ pub(crate) async fn run_nested_pipeline<T, S, SpawnFut, F>(
                 String,
                 i64,
                 mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
+                Arc<Semaphore>,
             )>,
         > + Send
         + 'static,
@@ -255,7 +275,15 @@ pub(crate) async fn run_nested_pipeline<T, S, SpawnFut, F>(
 {
     use futures::{future::BoxFuture, stream::FuturesUnordered};
 
-    type SpawnResult<E> = Result<(String, i64, mpsc::Receiver<Result<BufferedBatch, E>>), E>;
+    type SpawnResult<E> = Result<
+        (
+            String,
+            i64,
+            mpsc::Receiver<Result<BufferedBatch, E>>,
+            Arc<Semaphore>,
+        ),
+        E,
+    >;
     let mut in_flight: FuturesUnordered<BoxFuture<'static, SpawnResult<iceberg::Error>>> =
         FuturesUnordered::new();
     let mut stream_done = false;
@@ -288,11 +316,12 @@ pub(crate) async fn run_nested_pipeline<T, S, SpawnFut, F>(
         }
 
         match file_result {
-            Ok((filename, record_count, file_rx)) => {
+            Ok((filename, record_count, file_rx, slot_sem)) => {
                 let file_scan = FileScan {
                     filename,
                     record_count,
                     stream: make_file_stream(file_rx, on_release.clone()),
+                    slot_sem,
                 };
                 if timed!(outer_queue_full_wait_ns, tx.send(Ok(file_scan))).is_err() {
                     return;
@@ -345,6 +374,7 @@ fn spawn_file_task_with_meta(
             String,
             i64,
             mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
+            Arc<Semaphore>,
         ),
         iceberg::Error,
     >,
@@ -352,12 +382,22 @@ fn spawn_file_task_with_meta(
     let filename = task.data_file_path().to_string();
     let record_count = task.record_count.unwrap_or(0) as i64;
 
-    let sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
-    let (file_tx, file_rx) = mpsc::channel(8);
+    let byte_sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
+    // Start at the unattached prefetch floor; the FFI handoff site
+    // (`IcebergFileScanResponse::set_payload`) tops up to ATTACHED_SLOTS.
+    let slot_sem = Arc::new(Semaphore::new(UNATTACHED_SLOTS));
+    let (file_tx, file_rx) = mpsc::channel(ATTACHED_SLOTS);
 
-    tokio::spawn(process_file(task, file_io, batch_size, sem, file_tx));
+    tokio::spawn(process_file(
+        task,
+        file_io,
+        batch_size,
+        byte_sem,
+        slot_sem.clone(),
+        file_tx,
+    ));
 
-    async move { Ok((filename, record_count, file_rx)) }
+    async move { Ok((filename, record_count, file_rx, slot_sem)) }
 }
 
 /// Wrapper around process_file_inner that ensures errors are sent to the
@@ -368,11 +408,12 @@ async fn process_file(
     task: FileScanTask,
     file_io: FileIO,
     batch_size: Option<usize>,
-    semaphore: Arc<Semaphore>,
+    byte_sem: Arc<Semaphore>,
+    slot_sem: Arc<Semaphore>,
     tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) {
     STATS.track_task_start();
-    let result = process_file_inner(task, file_io, batch_size, semaphore, &tx).await;
+    let result = process_file_inner(task, file_io, batch_size, byte_sem, slot_sem, &tx).await;
     if let Err(e) = result {
         let _ = tx.send(Err(e)).await;
     }
@@ -390,7 +431,8 @@ async fn process_file_inner(
     task: FileScanTask,
     file_io: FileIO,
     batch_size: Option<usize>,
-    semaphore: Arc<Semaphore>,
+    byte_sem: Arc<Semaphore>,
+    slot_sem: Arc<Semaphore>,
     tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) -> Result<(), iceberg::Error> {
     // ── Phase 1: Reader setup ───────────────────────────────────────────
@@ -408,7 +450,7 @@ async fn process_file_inner(
     let batch_stream = reader.read(task_stream).map_err(|e| unexpected(e))?;
     STATS.add_elapsed(&STATS.reader_setup_ns, setup_start);
 
-    drain_batch_stream(batch_stream, &semaphore, tx).await
+    drain_batch_stream(batch_stream, &byte_sem, &slot_sem, tx).await
 }
 
 /// Drain a batch stream through phases 2-4 of the file pipeline, recording
@@ -421,7 +463,8 @@ async fn process_file_inner(
 ///   4. Backpressure   — timed; semaphore blocks if producer is too far ahead
 pub(crate) async fn drain_batch_stream(
     mut batch_stream: impl Stream<Item = iceberg::Result<RecordBatch>> + Unpin,
-    semaphore: &Arc<Semaphore>,
+    byte_sem: &Arc<Semaphore>,
+    slot_sem: &Arc<Semaphore>,
     tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) -> Result<(), iceberg::Error> {
     loop {
@@ -456,20 +499,27 @@ pub(crate) async fn drain_batch_stream(
             .fetch_add(byte_len as u64, Ordering::Relaxed);
 
         // ── Phase 4: Backpressure ───────────────────────────────────────
-        // Producer is throttled by two distinct per-file bounds:
-        //   (a) byte budget — `semaphore.acquire_many(byte_len)` blocks if
+        // Producer is throttled by three per-file bounds, all funneling
+        // into `producer_stall_ns` because they share one root cause
+        // ("consumer hasn't drained enough"):
+        //   (a) byte budget — `byte_sem.acquire_many(byte_len)` blocks if
         //       this file's outstanding buffered bytes exceed
         //       MAX_BUFFERED_BYTES_PER_TASK (100 MB).
-        //   (b) batch-count budget — `tx.send(...)` blocks if the per-file
-        //       mpsc(8) is already full of unconsumed batches.
-        // Either bound stalls the producer for the same root cause: the
-        // consumer hasn't drained enough yet. We accumulate both into
-        // `producer_stall_ns` so the metric is "time blocked because Julia
-        // is slow", regardless of which limit was binding.
-        let _permit = timed!(producer_stall_ns, semaphore.acquire_many(byte_len as u32))
-            .map_err(|e| unexpected(format!("semaphore: {e}")))?;
-        // Detach the permit — the consumer releases it via add_permits().
-        std::mem::forget(_permit);
+        //   (b) batch-slot budget — `slot_sem.acquire()` blocks if the
+        //       file has hit its current cap (UNATTACHED_SLOTS=2 before
+        //       Julia attaches; ATTACHED_SLOTS=8 after). This is the
+        //       attachment-aware throttle that keeps unattached producers
+        //       from outrunning attached ones.
+        //   (c) channel-capacity safety — `tx.send(...)` blocks if the
+        //       mpsc is full. With slot_sem ≤ ATTACHED_SLOTS = mpsc
+        //       capacity, this is a redundant safety net rather than a
+        //       normal path.
+        let _byte_permit = timed!(producer_stall_ns, byte_sem.acquire_many(byte_len as u32))
+            .map_err(|e| unexpected(format!("byte_sem: {e}")))?;
+        std::mem::forget(_byte_permit);
+        let _slot_permit = timed!(producer_stall_ns, slot_sem.acquire())
+            .map_err(|e| unexpected(format!("slot_sem: {e}")))?;
+        std::mem::forget(_slot_permit);
 
         STATS.track_buffer_add(byte_len as u64);
 
@@ -479,7 +529,8 @@ pub(crate) async fn drain_batch_stream(
             tx.send(Ok(BufferedBatch {
                 batch: serialized,
                 byte_len,
-                semaphore: semaphore.clone(),
+                byte_sem: byte_sem.clone(),
+                slot_sem: slot_sem.clone(),
             }))
         );
         if send_result.is_err() {
@@ -503,6 +554,7 @@ mod tests {
         String,
         i64,
         mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
+        Arc<Semaphore>,
     )>;
 
     /// Spawn function that resolves immediately with an empty inner channel
@@ -511,7 +563,8 @@ mod tests {
         (name, rc): (String, i64),
     ) -> impl Future<Output = SpawnOutput> + Send + 'static {
         let (_, rx) = mpsc::channel(1); // tx dropped → channel immediately closed
-        async move { Ok((name, rc, rx)) }
+        let slot_sem = Arc::new(Semaphore::new(UNATTACHED_SLOTS));
+        async move { Ok((name, rc, rx, slot_sem)) }
     }
 
     /// Spawn function that always returns an error.
