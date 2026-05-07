@@ -242,11 +242,6 @@ impl PipelineStats {
                 Some(sum_ms / batches as f64)
             }
         };
-        let per_batch_only = |sum_ms: f64| -> String {
-            avg_per_batch(sum_ms)
-                .map(|avg| format!("    (avg {:.2} ms/batch)", avg))
-                .unwrap_or_default()
-        };
         let per_batch_with_note = |sum_ms: f64, note: &str| -> String {
             match avg_per_batch(sum_ms) {
                 Some(avg) => format!("    ({}, avg {:.2} ms/batch)", note, avg),
@@ -294,12 +289,12 @@ impl PipelineStats {
             Line::Row(format!(
                 "fetch+decode:    {:>9.1} ms{}",
                 fd_ms,
-                per_batch_only(fd_ms)
+                per_batch_with_note(fd_ms, "I/O + ZSTD + decode")
             )),
             Line::Row(format!(
                 "serialize IPC:   {:>9.1} ms{}",
                 ser_ms,
-                per_batch_only(ser_ms)
+                per_batch_with_note(ser_ms, "RecordBatch -> Arrow IPC")
             )),
             Line::Row(format!(
                 "batch send wait: {:>9.1} ms    (per-file buffer full: 100 MB or 8 batches)",
