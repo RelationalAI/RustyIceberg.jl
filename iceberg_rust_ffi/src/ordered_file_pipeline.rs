@@ -91,9 +91,10 @@ pub struct FileScan {
 /// with the byte count (use it to update stats or pass `|_| {}` to skip).
 ///
 /// Also records two consumer-side metrics (separate from `on_release`):
-/// - `consumer_wait_ns`: time the consumer spent inside `rx.recv().await`.
-///   This is the symmetric counterpart of `producer_stall_ns` (producer side).
-///   High value ⇒ producer-bound; low value ⇒ Julia/consumer-bound.
+/// - `consumer_batch_wait_ns`: time the consumer spent inside `rx.recv().await`.
+///   This is the symmetric counterpart of `producer_stall_ns` (the producer
+///   waiting on the *same* per-file mpsc when it's full): high ⇒ producer-
+///   bound, low ⇒ Julia/consumer-bound at the per-batch level.
 /// - `pipeline_end_ns`: stamped via `record_file_drained()` when `recv()`
 ///   returns `None`, i.e. when this file's `process_file` task dropped its
 ///   `tx`. Used to compute the true pipeline wall clock in `print_summary`.
@@ -107,7 +108,7 @@ where
     let stream = futures::stream::unfold((file_rx, on_release), |(mut rx, cb)| async move {
         let recv_start = Instant::now();
         let recvd = rx.recv().await;
-        STATS.add_elapsed(&STATS.consumer_wait_ns, recv_start);
+        STATS.add_elapsed(&STATS.consumer_batch_wait_ns, recv_start);
         match recvd {
             None => {
                 // Producer dropped tx → this file is done draining.
@@ -146,8 +147,16 @@ pub async fn create_nested_pipeline(
 
     tokio::spawn(run_nested(tasks, file_io, batch_size, concurrency, tx));
 
+    // Wrap recv() so we can time how long Julia (the consumer) is blocked
+    // waiting for the next FileScan when the outer mpsc is empty — i.e. Rust
+    // hasn't pushed a FileScan yet. Symmetric counterpart of
+    // `outer_queue_full_wait_ns` (producer waiting to push when the same
+    // channel is full).
     let stream = futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
+        let recv_start = Instant::now();
+        let recvd = rx.recv().await;
+        STATS.add_elapsed(&STATS.consumer_file_wait_ns, recv_start);
+        recvd.map(|item| (item, rx))
     })
     .boxed();
 
@@ -285,7 +294,7 @@ pub(crate) async fn run_nested_pipeline<T, S, SpawnFut, F>(
                     record_count,
                     stream: make_file_stream(file_rx, on_release.clone()),
                 };
-                if timed!(file_dispatch_wait_ns, tx.send(Ok(file_scan))).is_err() {
+                if timed!(outer_queue_full_wait_ns, tx.send(Ok(file_scan))).is_err() {
                     return;
                 }
             }

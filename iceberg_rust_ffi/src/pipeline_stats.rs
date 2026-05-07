@@ -59,17 +59,27 @@ pub(crate) struct PipelineStats {
     /// ("consumer hasn't drained enough"), so they're combined.
     pub producer_stall_ns: AtomicU64,
 
-    // ── Consumer / dispatch ──
-    /// Time `run_nested` blocks on the outer channel waiting for the consumer
-    /// to call `next_file_scan` (backpressure from a slow consumer at the
-    /// file-handoff level — outer mpsc(prefetch_depth) is full).
-    pub file_dispatch_wait_ns: AtomicU64,
-    /// Time spent inside the per-file `make_file_stream` unfold on
-    /// `rx.recv().await` — i.e. consumer is asking for the next batch but the
+    // ── Producer waits on consumer (Rust ahead, Julia behind) ──
+    /// Time `run_nested` spends in `tx.send(FileScan)` to the outer
+    /// mpsc(prefetch_depth) when it's already full — i.e. Rust has pre-built
+    /// FileScans faster than Julia is calling `next_file_scan` to consume
+    /// them. Producer-side stall at the file-handoff level. Distinct from
+    /// `producer_stall_ns`: that one is per-file (per-batch buffer full
+    /// inside one file's mpsc(8)/100MB); this is per-table (the global
+    /// outer queue connecting Rust to Julia).
+    pub outer_queue_full_wait_ns: AtomicU64,
+
+    // ── Consumer waits on producer (Julia ahead, Rust behind) ──
+    /// Time spent inside `make_file_stream`'s unfold on `rx.recv().await`
+    /// for the per-file mpsc — Julia asked for the next batch but the
     /// producer hasn't produced one yet. Summed across all per-file streams.
-    /// Symmetric counterpart to `producer_stall_ns`: high = producer-bound;
-    /// low = Julia/consumer-bound.
-    pub consumer_wait_ns: AtomicU64,
+    /// One counterpart of `producer_stall_ns` viewed from the consumer.
+    pub consumer_batch_wait_ns: AtomicU64,
+    /// Time spent in the outer `IcebergFileScanStream`'s unfold on
+    /// `rx.recv().await` — Julia called `next_file_scan` but the outer
+    /// mpsc is empty (Rust hasn't pushed the next FileScan yet). One
+    /// counterpart of `outer_queue_full_wait_ns` viewed from the consumer.
+    pub consumer_file_wait_ns: AtomicU64,
 
     // ── Memory ──
     /// Live counter of serialized bytes buffered across all file tasks.
@@ -92,8 +102,9 @@ impl PipelineStats {
             fetch_decode_ns: AtomicU64::new(0),
             serialize_ns: AtomicU64::new(0),
             producer_stall_ns: AtomicU64::new(0),
-            file_dispatch_wait_ns: AtomicU64::new(0),
-            consumer_wait_ns: AtomicU64::new(0),
+            outer_queue_full_wait_ns: AtomicU64::new(0),
+            consumer_batch_wait_ns: AtomicU64::new(0),
+            consumer_file_wait_ns: AtomicU64::new(0),
             buffered_bytes: AtomicU64::new(0),
             peak_buffered_bytes: AtomicU64::new(0),
         }
@@ -115,8 +126,9 @@ impl PipelineStats {
         self.fetch_decode_ns.store(0, Ordering::Relaxed);
         self.serialize_ns.store(0, Ordering::Relaxed);
         self.producer_stall_ns.store(0, Ordering::Relaxed);
-        self.file_dispatch_wait_ns.store(0, Ordering::Relaxed);
-        self.consumer_wait_ns.store(0, Ordering::Relaxed);
+        self.outer_queue_full_wait_ns.store(0, Ordering::Relaxed);
+        self.consumer_batch_wait_ns.store(0, Ordering::Relaxed);
+        self.consumer_file_wait_ns.store(0, Ordering::Relaxed);
         self.buffered_bytes.store(0, Ordering::Relaxed);
         self.peak_buffered_bytes.store(0, Ordering::Relaxed);
     }
@@ -193,8 +205,9 @@ impl PipelineStats {
         let fd_ms = self.fetch_decode_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let ser_ms = self.serialize_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let producer_stall_ms = self.producer_stall_ns.load(Ordering::Relaxed) as f64 / 1e6;
-        let dispatch_ms = self.file_dispatch_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
-        let consumer_ms = self.consumer_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
+        let outer_full_ms = self.outer_queue_full_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
+        let consumer_batch_ms = self.consumer_batch_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
+        let consumer_file_ms = self.consumer_file_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let peak_buf = self.peak_buffered_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
 
         let bytes_mb = bytes as f64 / (1024.0 * 1024.0);
@@ -236,6 +249,17 @@ impl PipelineStats {
                 None => format!("    ({})", note),
             }
         };
+        let per_file_with_note = |sum_ms: f64, note: &str| -> String {
+            if files == 0 {
+                format!("    ({})", note)
+            } else {
+                format!(
+                    "    ({}, avg {:.2} ms/file)",
+                    note,
+                    sum_ms / files as f64
+                )
+            }
+        };
 
         // Build the box content as a list of (kind, text) where kind ∈
         // {Row, Sep, Blank}. We compute the box width from the widest line
@@ -274,18 +298,23 @@ impl PipelineStats {
                 per_batch_only(ser_ms)
             )),
             Line::Row(format!(
-                "producer stall:  {:>9.1} ms    (per-file buffer full, waiting on consumer)",
+                "batch send wait: {:>9.1} ms    (per-file buffer full: 100 MB or 8 batches)",
                 producer_stall_ms
             )),
-            Line::Sep("consumer-side wait (Julia behind, Rust waits to hand off)".to_string()),
+            Line::Row(format!(
+                "file send wait:  {:>9.1} ms    (outer queue full, prefetched ahead of Julia)",
+                outer_full_ms
+            )),
+            Line::Sep("consumer-side wait (Julia ahead, waiting on Rust)".to_string()),
             Line::Row(format!(
                 "next batch wait: {:>9.1} ms{}",
-                consumer_ms,
-                per_batch_with_note(consumer_ms, "no batch buffered")
+                consumer_batch_ms,
+                per_batch_with_note(consumer_batch_ms, "per-file mpsc empty")
             )),
             Line::Row(format!(
-                "next file wait:  {:>9.1} ms    (outer queue full; mirror of Julia next_file_scan)",
-                dispatch_ms
+                "next file wait:  {:>9.1} ms{}",
+                consumer_file_ms,
+                per_file_with_note(consumer_file_ms, "outer mpsc empty")
             )),
             Line::Sep("memory".to_string()),
             Line::Row(format!(
@@ -383,10 +412,11 @@ mod tests {
         s.fetch_decode_ns.store(8, Ordering::Relaxed);
         s.serialize_ns.store(9, Ordering::Relaxed);
         s.producer_stall_ns.store(10, Ordering::Relaxed);
-        s.file_dispatch_wait_ns.store(11, Ordering::Relaxed);
-        s.consumer_wait_ns.store(12, Ordering::Relaxed);
-        s.buffered_bytes.store(13, Ordering::Relaxed);
-        s.peak_buffered_bytes.store(14, Ordering::Relaxed);
+        s.outer_queue_full_wait_ns.store(11, Ordering::Relaxed);
+        s.consumer_batch_wait_ns.store(12, Ordering::Relaxed);
+        s.consumer_file_wait_ns.store(13, Ordering::Relaxed);
+        s.buffered_bytes.store(14, Ordering::Relaxed);
+        s.peak_buffered_bytes.store(15, Ordering::Relaxed);
 
         s.reset();
 
@@ -403,8 +433,9 @@ mod tests {
         assert_eq!(s.fetch_decode_ns.load(Ordering::Relaxed), 0);
         assert_eq!(s.serialize_ns.load(Ordering::Relaxed), 0);
         assert_eq!(s.producer_stall_ns.load(Ordering::Relaxed), 0);
-        assert_eq!(s.file_dispatch_wait_ns.load(Ordering::Relaxed), 0);
-        assert_eq!(s.consumer_wait_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.outer_queue_full_wait_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.consumer_batch_wait_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(s.consumer_file_wait_ns.load(Ordering::Relaxed), 0);
         assert_eq!(s.buffered_bytes.load(Ordering::Relaxed), 0);
         assert_eq!(s.peak_buffered_bytes.load(Ordering::Relaxed), 0);
     }
@@ -551,24 +582,34 @@ mod tests {
     }
 
     #[test]
-    fn file_dispatch_wait_accumulates_via_add_elapsed() {
+    fn outer_queue_full_wait_accumulates_via_add_elapsed() {
         let s = fresh();
         let start = Instant::now();
         std::thread::sleep(Duration::from_millis(2));
-        s.add_elapsed(&s.file_dispatch_wait_ns, start);
-        assert!(s.file_dispatch_wait_ns.load(Ordering::Relaxed) > 0);
+        s.add_elapsed(&s.outer_queue_full_wait_ns, start);
+        assert!(s.outer_queue_full_wait_ns.load(Ordering::Relaxed) > 0);
         // Other fields are unaffected.
         assert_eq!(s.producer_stall_ns.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn consumer_wait_accumulates_via_add_elapsed() {
+    fn consumer_batch_wait_accumulates_via_add_elapsed() {
         let s = fresh();
         let start = Instant::now();
         std::thread::sleep(Duration::from_millis(2));
-        s.add_elapsed(&s.consumer_wait_ns, start);
-        assert!(s.consumer_wait_ns.load(Ordering::Relaxed) > 0);
-        assert_eq!(s.producer_stall_ns.load(Ordering::Relaxed), 0);
+        s.add_elapsed(&s.consumer_batch_wait_ns, start);
+        assert!(s.consumer_batch_wait_ns.load(Ordering::Relaxed) > 0);
+        assert_eq!(s.consumer_file_wait_ns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn consumer_file_wait_accumulates_via_add_elapsed() {
+        let s = fresh();
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        s.add_elapsed(&s.consumer_file_wait_ns, start);
+        assert!(s.consumer_file_wait_ns.load(Ordering::Relaxed) > 0);
+        assert_eq!(s.consumer_batch_wait_ns.load(Ordering::Relaxed), 0);
     }
 
     // ── format_summary alignment ──────────────────────────────────────────────
@@ -600,8 +641,12 @@ mod tests {
             .store(1_691_200_000, Ordering::Relaxed); // 1691.2 ms
         s.serialize_ns.store(1_430_000_000, Ordering::Relaxed); // 1430.0 ms
         s.producer_stall_ns.store(100_000, Ordering::Relaxed); // 0.1 ms
-        s.consumer_wait_ns.store(746_500_000, Ordering::Relaxed); // 746.5 ms
-        s.file_dispatch_wait_ns.store(17_800_000, Ordering::Relaxed); // 17.8 ms
+        s.outer_queue_full_wait_ns
+            .store(54_000_000, Ordering::Relaxed); // 54.0 ms
+        s.consumer_batch_wait_ns
+            .store(597_000_000, Ordering::Relaxed); // 597.0 ms (over 40 batches)
+        s.consumer_file_wait_ns
+            .store(7_500_000, Ordering::Relaxed); // 7.5 ms (over 10 files)
         s.peak_buffered_bytes
             .store((345.9 * 1024.0 * 1024.0) as u64, Ordering::Relaxed);
         s.format_summary()
@@ -703,12 +748,13 @@ mod tests {
             "reader setup:",
             "fetch+decode:",
             "serialize IPC:",
-            "producer stall:",
+            "batch send wait:",
+            "file send wait:",
             "next batch wait:",
             "next file wait:",
             "peak buffered:",
-            "(avg",
             "ms/batch",
+            "ms/file",
         ] {
             assert!(
                 out.contains(needle),
