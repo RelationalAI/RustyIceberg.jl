@@ -1450,14 +1450,13 @@ end
         @test tbl !== nothing
         @test length(tbl.id) == 1
 
-        row = tbl[1]
         # Arrow.jl collect() returns Dates.Date / Dates.DateTime for date/timestamp columns.
         # If the epoch offset is correct, these should round-trip to the original calendar values.
-        @test row.event_date == Dates.Date(2024, 1, 1)
-        println("✅ event_date = $(row.event_date) (expected 2024-01-01)")
+        @test tbl.event_date[1] == Dates.Date(2024, 1, 1)
+        println("✅ event_date = $(tbl.event_date[1]) (expected 2024-01-01)")
 
-        @test row.event_ts == Dates.DateTime(2024, 1, 1, 0, 0, 0)
-        println("✅ event_ts = $(row.event_ts) (expected 2024-01-01T00:00:00)")
+        @test tbl.event_ts[1] == Dates.DateTime(2024, 1, 1, 0, 0, 0)
+        println("✅ event_ts = $(tbl.event_ts[1]) (expected 2024-01-01T00:00:00)")
 
         RustyIceberg.free_table(updated_table)
 
