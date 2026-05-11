@@ -120,7 +120,7 @@ manifest planning.
    │                                     prefetch_depth)         │
    │     │                                                       │
    │     │  source.map(|res| async { res.map(start_one) })       │
-   │     │        .buffered(prefetch_depth)                       │
+   │     │        .buffered(prefetch_depth)                      │
    │     ▼                                                       │
    │   spawn_file_task<S, BSF>(filename, rc, build_batch_stream) │
    │     │                                                       │
