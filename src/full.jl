@@ -215,7 +215,7 @@ end
 Set the width of the full-scan pipeline's `Stream::buffered(prefetch_depth)`
 window. Higher values keep the consumer busy and overlap manifest planning
 with reading, but use more memory. `0` = auto (= `cpu_count()`). Full-scan
-only. See the Rust crate's `ordered_file_pipeline` module-level docs for the
+only. See the Rust crate's `nested_pipeline` module-level docs for the
 exact cap on alive `process_file` tasks.
 """
 function with_file_prefetch_depth!(scan::Scan, n::UInt)

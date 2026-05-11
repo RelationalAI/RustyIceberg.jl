@@ -219,17 +219,16 @@ export_runtime_op!(
     scan: *mut IcebergIncrementalScan
 );
 
-/// Resolve the three pipeline tuning knobs from an IncrementalScan, applying
+/// Resolve the two pipeline tuning knobs from an IncrementalScan, applying
 /// the same "0 = auto" convention as resolve_pipeline_params in full.rs.
-fn resolve_incremental_pipeline_params(scan: &IcebergIncrementalScan) -> (usize, usize, usize) {
+/// `file_concurrency` is stored on the struct for FFI ABI compatibility but
+/// is no longer consulted: the nested-append pipeline is bounded by
+/// `prefetch_depth` alone (via `Stream::buffered`), matching the full-scan
+/// shape.
+fn resolve_incremental_pipeline_params(scan: &IcebergIncrementalScan) -> (usize, usize) {
     let n = crate::cpu_count();
-    let concurrency = if scan.file_concurrency == 0 {
-        n
-    } else {
-        scan.file_concurrency
-    };
     let prefetch_depth = if scan.file_prefetch_depth == 0 {
-        concurrency
+        n
     } else {
         scan.file_prefetch_depth
     };
@@ -238,7 +237,7 @@ fn resolve_incremental_pipeline_params(scan: &IcebergIncrementalScan) -> (usize,
     } else {
         scan.serialization_concurrency
     };
-    (concurrency, prefetch_depth, serialization_concurrency)
+    (prefetch_depth, serialization_concurrency)
 }
 
 /// Response for iceberg_incremental_file_scan_stream.
@@ -302,13 +301,12 @@ export_runtime_op!(
             .file_io
             .clone()
             .ok_or_else(|| anyhow::anyhow!("FileIO not available; create scan from table"))?;
-        let (concurrency, prefetch_depth, serialization_concurrency) =
+        let (prefetch_depth, serialization_concurrency) =
             resolve_incremental_pipeline_params(scan_ptr);
         let batch_size = scan_ptr.batch_size;
 
         Ok((
             scan_ref.as_ref().unwrap(),
-            concurrency,
             prefetch_depth,
             serialization_concurrency,
             batch_size,
@@ -317,18 +315,18 @@ export_runtime_op!(
     },
     result_tuple,
     async {
-        let (scan_ref, concurrency, prefetch_depth, serialization_concurrency, batch_size, file_io) =
+        let (scan_ref, prefetch_depth, serialization_concurrency, batch_size, file_io) =
             result_tuple;
 
         let (append_tasks, delete_tasks) = scan_ref.plan_files().await?;
 
+        // `STATS.reset()` is called inside `create_nested_pipeline`.
         let (append_stream, delete_stream) =
             crate::incremental_pipeline::create_incremental_nested_pipeline(
                 append_tasks,
                 delete_tasks,
                 file_io,
                 batch_size,
-                concurrency,
                 prefetch_depth,
                 serialization_concurrency,
             )

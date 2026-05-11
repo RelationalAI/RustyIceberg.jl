@@ -31,8 +31,10 @@ pub struct IcebergScan {
     /// Captured when Julia calls with_batch_size. Forwarded to each per-file
     /// ArrowReaderBuilder inside the pipeline.
     pub batch_size: Option<usize>,
-    /// Dead field kept for shape-symmetry with `IncrementalScan` (which
-    /// still uses `file_concurrency`). The full-scan FFI setter
+    /// Dead field kept for FFI ABI compatibility and shape-symmetry with
+    /// `IncrementalScan` (whose `file_concurrency` is likewise dead — both
+    /// pipelines are now bounded by `file_prefetch_depth` alone via
+    /// `Stream::buffered`). The FFI setter
     /// `iceberg_scan_with_data_file_concurrency_limit` is a no-op and
     /// does not write here; nothing reads this. Removing it would force
     /// `scan_common.rs` macros to switch to functional-record-update
@@ -40,7 +42,7 @@ pub struct IcebergScan {
     pub file_concurrency: usize,
     /// How many FileScan items the full-scan pipeline keeps in flight (i.e.
     /// `Stream::buffered(prefetch_depth)`). 0 = auto (= cpu_count()). This is
-    /// the only concurrency knob; see `ordered_file_pipeline`'s module-level
+    /// the only concurrency knob; see `nested_pipeline`'s module-level
     /// "Concurrency invariant" doc for the cap on alive `process_file` tasks.
     pub file_prefetch_depth: usize,
 }
@@ -132,7 +134,7 @@ impl_scan_builder_method!(
 // files in arbitrary order), we:
 //   1. Call `scan.plan_files()` to get an ordered list of FileScanTasks.
 //   2. Feed them into our own file-parallel pipeline
-//      (ordered_file_pipeline.rs) which processes N files concurrently
+//      (nested_pipeline.rs) which processes N files concurrently
 //      but yields batches in strict file-then-row order.
 
 /// Resolve the pipeline tuning parameters from a configured scan.
@@ -171,8 +173,9 @@ export_runtime_op!(
         let tasks: Vec<iceberg::scan::FileScanTask> =
             scan_ref.plan_files().await?.try_collect().await?;
 
-        // Hand off to the file-parallel pipeline.
-        let stream = crate::ordered_file_pipeline::create_pipeline(
+        // Hand off to the file-parallel pipeline. `STATS.reset()` is called
+        // inside `create_nested_pipeline`, which this composes with.
+        let stream = crate::full_pipeline::create_pipeline(
             tasks, file_io, batch_size, prefetch_depth,
         )
         .await;
@@ -214,7 +217,8 @@ export_runtime_op!(
         let tasks: Vec<iceberg::scan::FileScanTask> =
             scan_ref.plan_files().await?.try_collect().await?;
 
-        let stream = crate::ordered_file_pipeline::create_nested_pipeline(
+        // `STATS.reset()` is called inside `create_nested_pipeline`.
+        let stream = crate::full_pipeline::create_full_scan_pipeline(
             tasks, file_io, batch_size, prefetch_depth,
         )
         .await;

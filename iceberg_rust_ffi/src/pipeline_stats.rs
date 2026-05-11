@@ -60,17 +60,6 @@ pub(crate) struct PipelineStats {
     /// combined.
     pub producer_stall_ns: AtomicU64,
 
-    // ── Producer waits on consumer (Rust ahead, Julia behind) ──
-    /// Time the incremental pipeline's `run_nested_pipeline` orchestrator
-    /// spends in `tx.send(FileScan)` to its outer mpsc(prefetch_depth) when
-    /// it's already full — i.e. Rust has pre-built FileScans faster than
-    /// Julia is consuming them. Producer-side stall at the file-handoff
-    /// level. Always 0 for full-scan, which has no outer mpsc (it uses
-    /// `Stream::buffered` instead). Distinct from `producer_stall_ns`:
-    /// that one is per-file (per-batch buffer full inside one file's
-    /// mpsc(8)/100MB); this is per-table.
-    pub outer_queue_full_wait_ns: AtomicU64,
-
     // ── Consumer waits on producer (Julia ahead, Rust behind) ──
     /// Time spent inside `make_file_stream`'s unfold on `rx.recv().await`
     /// for the per-file mpsc — Julia asked for the next batch but the
@@ -104,7 +93,6 @@ impl PipelineStats {
             fetch_decode_ns: AtomicU64::new(0),
             serialize_ns: AtomicU64::new(0),
             producer_stall_ns: AtomicU64::new(0),
-            outer_queue_full_wait_ns: AtomicU64::new(0),
             consumer_batch_wait_ns: AtomicU64::new(0),
             consumer_file_wait_ns: AtomicU64::new(0),
             buffered_bytes: AtomicU64::new(0),
@@ -113,7 +101,8 @@ impl PipelineStats {
     }
 
     /// Reset all counters and stamp `pipeline_start_ns` with "now". Called
-    /// from `create_nested_pipeline` before the pipeline kicks off.
+    /// from each pipeline-creating FFI entry point before the pipeline
+    /// kicks off.
     pub(crate) fn reset(&self) {
         self.pipeline_start_ns
             .store(nanos_since_process_start(), Ordering::Relaxed);
@@ -127,7 +116,6 @@ impl PipelineStats {
         self.fetch_decode_ns.store(0, Ordering::Relaxed);
         self.serialize_ns.store(0, Ordering::Relaxed);
         self.producer_stall_ns.store(0, Ordering::Relaxed);
-        self.outer_queue_full_wait_ns.store(0, Ordering::Relaxed);
         self.consumer_batch_wait_ns.store(0, Ordering::Relaxed);
         self.consumer_file_wait_ns.store(0, Ordering::Relaxed);
         self.buffered_bytes.store(0, Ordering::Relaxed);
@@ -206,7 +194,6 @@ impl PipelineStats {
         let fd_ms = self.fetch_decode_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let ser_ms = self.serialize_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let producer_stall_ms = self.producer_stall_ns.load(Ordering::Relaxed) as f64 / 1e6;
-        let outer_full_ms = self.outer_queue_full_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let consumer_batch_ms = self.consumer_batch_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let consumer_file_ms = self.consumer_file_wait_ns.load(Ordering::Relaxed) as f64 / 1e6;
         let peak_buf = self.peak_buffered_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
@@ -300,10 +287,6 @@ impl PipelineStats {
             Line::Row(format!(
                 "batch send wait: {:>9.1} ms    (per-file buffer full: 100 MB or 8 batches)",
                 producer_stall_ms
-            )),
-            Line::Row(format!(
-                "file send wait:  {:>9.1} ms    (incremental only: outer mpsc full, prefetched ahead of Julia)",
-                outer_full_ms
             )),
             Line::Sep("consumer-side wait (Julia ahead, waiting on Rust)".to_string()),
             Line::Row(format!(
@@ -406,11 +389,10 @@ mod tests {
         s.fetch_decode_ns.store(8, Ordering::Relaxed);
         s.serialize_ns.store(9, Ordering::Relaxed);
         s.producer_stall_ns.store(10, Ordering::Relaxed);
-        s.outer_queue_full_wait_ns.store(11, Ordering::Relaxed);
-        s.consumer_batch_wait_ns.store(12, Ordering::Relaxed);
-        s.consumer_file_wait_ns.store(13, Ordering::Relaxed);
-        s.buffered_bytes.store(14, Ordering::Relaxed);
-        s.peak_buffered_bytes.store(15, Ordering::Relaxed);
+        s.consumer_batch_wait_ns.store(11, Ordering::Relaxed);
+        s.consumer_file_wait_ns.store(12, Ordering::Relaxed);
+        s.buffered_bytes.store(13, Ordering::Relaxed);
+        s.peak_buffered_bytes.store(14, Ordering::Relaxed);
 
         s.reset();
 
@@ -427,7 +409,6 @@ mod tests {
         assert_eq!(s.fetch_decode_ns.load(Ordering::Relaxed), 0);
         assert_eq!(s.serialize_ns.load(Ordering::Relaxed), 0);
         assert_eq!(s.producer_stall_ns.load(Ordering::Relaxed), 0);
-        assert_eq!(s.outer_queue_full_wait_ns.load(Ordering::Relaxed), 0);
         assert_eq!(s.consumer_batch_wait_ns.load(Ordering::Relaxed), 0);
         assert_eq!(s.consumer_file_wait_ns.load(Ordering::Relaxed), 0);
         assert_eq!(s.buffered_bytes.load(Ordering::Relaxed), 0);
@@ -576,17 +557,6 @@ mod tests {
     }
 
     #[test]
-    fn outer_queue_full_wait_accumulates_via_add_elapsed() {
-        let s = fresh();
-        let start = Instant::now();
-        std::thread::sleep(Duration::from_millis(2));
-        s.add_elapsed(&s.outer_queue_full_wait_ns, start);
-        assert!(s.outer_queue_full_wait_ns.load(Ordering::Relaxed) > 0);
-        // Other fields are unaffected.
-        assert_eq!(s.producer_stall_ns.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
     fn consumer_batch_wait_accumulates_via_add_elapsed() {
         let s = fresh();
         let start = Instant::now();
@@ -634,8 +604,6 @@ mod tests {
         s.fetch_decode_ns.store(1_691_200_000, Ordering::Relaxed); // 1691.2 ms
         s.serialize_ns.store(1_430_000_000, Ordering::Relaxed); // 1430.0 ms
         s.producer_stall_ns.store(100_000, Ordering::Relaxed); // 0.1 ms
-        s.outer_queue_full_wait_ns
-            .store(54_000_000, Ordering::Relaxed); // 54.0 ms
         s.consumer_batch_wait_ns
             .store(597_000_000, Ordering::Relaxed); // 597.0 ms (over 40 batches)
         s.consumer_file_wait_ns.store(7_500_000, Ordering::Relaxed); // 7.5 ms (over 10 files)
@@ -741,7 +709,6 @@ mod tests {
             "fetch+decode:",
             "serialize IPC:",
             "batch send wait:",
-            "file send wait:",
             "next batch wait:",
             "next file wait:",
             "peak buffered:",

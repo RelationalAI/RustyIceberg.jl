@@ -1,4 +1,4 @@
-use crate::ordered_file_pipeline::FileScan;
+use crate::nested_pipeline::FileScan;
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
@@ -127,8 +127,8 @@ impl RawResponse for IcebergFileScanResponse {
                 // ATTACHED_SLOTS so the producer can fully fill the per-file
                 // mpsc. See `BufferedBatch::slot_sem` for the policy.
                 fs.slot_sem.add_permits(
-                    crate::ordered_file_pipeline::ATTACHED_SLOTS
-                        - crate::ordered_file_pipeline::UNATTACHED_SLOTS,
+                    crate::nested_pipeline::ATTACHED_SLOTS
+                        - crate::nested_pipeline::UNATTACHED_SLOTS,
                 );
                 let filename = std::ffi::CString::new(fs.filename)
                     .unwrap_or_default()
