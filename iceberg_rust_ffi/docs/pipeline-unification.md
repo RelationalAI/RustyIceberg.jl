@@ -68,8 +68,13 @@ manifest planning.
    Two concurrency knobs (per pipeline!):
      • data_file_concurrency_limit  — bounds FuturesUnordered
      • file_prefetch_depth          — bounds the outer mpsc
-     Interaction is non-obvious; `prefetch_depth` doesn't actually cap
-     alive `process_file` tasks (FuturesUnordered does).
+     Interaction is non-obvious. Neither knob actually caps alive
+     `process_file` tasks directly: the futures inside FuturesUnordered
+     resolve immediately after `tokio::spawn(process_file(...))`, so the
+     spawned tasks live outside the set. The only real bound is outer-
+     mpsc back-pressure on the orchestrator's `tx.send`. See the
+     dedicated "What the old data_file_concurrency_limit knob actually
+     did" section below for a full breakdown.
 
    Truly shared:
      • run_nested_pipeline<T,…>        (generic FuturesUnordered driver)
@@ -81,10 +86,13 @@ manifest planning.
      • process_file               vs  process_incremental_file
      • run_nested / run_flat      vs  run_incremental_nested
 
-   Result: ~3 of the per-file stats counters (reader_setup_ns,
-   peak_concurrency, buffered_bytes) silently stay zero on the
-   incremental path, because the parallel implementation doesn't write
-   them.
+   Result: several per-file stats counters are broken on the
+   incremental path because its parallel implementation doesn't go
+   through the same call sites as the full-scan one. `reader_setup_ns`
+   and `peak_concurrency` stay 0; `buffered_bytes` accumulates
+   monotonically to the total bytes produced (no decrement on consumer
+   pull). Wall-clock is broken on both paths but in different ways —
+   see the "Stats accounting" section.
 ```
 
 ## After (this branch)
@@ -212,27 +220,186 @@ once the FFI consumer has called `iceberg_next_file_scan`. The promotion
 prevents serialized bytes from accumulating in front of files that may
 never get drained (e.g. cancelled scans, slow consumers).
 
+## What the old `data_file_concurrency_limit` knob actually did
+
+The pre-unification API exposed two concurrency knobs:
+`data_file_concurrency_limit` and `file_prefetch_depth`. The first was
+advertised as "how many files are read concurrently". Reading the master
+orchestrator (`ordered_file_pipeline.rs` `run_nested_pipeline`,
+`spawn_file_task_with_meta`, `spawn_incremental_file_task`) reveals that
+this is not what it did.
+
+`run_nested_pipeline` kept `concurrency` items in a `FuturesUnordered`
+set, refilling on each `next()`. But each item in the set was a future
+returned by `spawn_file_task_with_meta`:
+
+```rust
+fn spawn_file_task_with_meta(...) -> impl Future<Output = ...> {
+    let (file_tx, file_rx) = mpsc::channel(8);
+    tokio::spawn(process_file(task, file_io, batch_size, sem, file_tx)); // detach
+    async move { Ok((filename, record_count, file_rx)) }                  // resolve now
+}
+```
+
+The future is trivially resolved — its first poll returns
+`Ok((filename, record_count, file_rx))` after the `tokio::spawn` has
+already kicked off the real work in a detached task. So
+`FuturesUnordered` is not bounding **anything** that does I/O; it is
+bounding the *rate* at which `spawn_file_task_with_meta` is called.
+Every alive `process_file` task runs entirely outside the `FuturesUnordered`
+set, throttled only by its own per-file 100 MB byte semaphore and its
+own 8-slot mpsc.
+
+The only thing that actually slowed the spawning loop down was outer-
+mpsc back-pressure: `run_nested_pipeline` pushes each `FileScan` into
+`mpsc::channel(prefetch_depth)`, and when that fills, the `tx.send`
+inside the orchestrator stops the loop. So the effective cap on alive
+`process_file` tasks was roughly:
+
+```
+concurrency + prefetch_depth + 1
+```
+
+dominated by `prefetch_depth` in practice (master's defaults were
+`concurrency = 2 × nthreads`, `prefetch_depth = nthreads`). Setting
+`data_file_concurrency_limit = 1` from Julia did not give you "one file
+at a time" — it gave you roughly `1 + prefetch_depth + 1 ≈ nthreads + 2`
+alive readers, each holding an open Parquet file and up to ~100 MB of
+serialized Arrow IPC in its per-file mpsc.
+
+Net consequences:
+
+* **Memory was much higher than the knob suggested.** Each alive
+  `process_file` task can buffer up to `MAX_BUFFERED_BYTES_PER_TASK`
+  (100 MB) of serialized IPC. With the master defaults, peak in-flight
+  bytes were on the order of `(concurrency + prefetch_depth) × 100 MB`
+  ≈ ~1.2 GB on a 4-thread default — not the `concurrency × 100 MB` a
+  reader would infer.
+* **The setter lied to callers.** The Julia binding (and its raicode-side
+  use in `IcebergPerfConfig`) treated `data_file_concurrency_limit` as a
+  meaningful tuning lever; in practice the only knob that influenced
+  alive-task count was `prefetch_depth`, and it was the one users
+  generally didn't touch.
+
+This branch collapses to one knob. `create_nested_pipeline` uses
+`futures::stream::Stream::buffered(prefetch_depth)` to drive a closure
+that ends in `tokio::spawn(process_file(...))`. `Stream::buffered(N)`
+keeps exactly `N` inner futures actively polled — and because each one
+ends with a `tokio::spawn` followed by `FileScan` return, advancing past
+`N` requires the consumer to first pull a `FileScan` out, which only
+happens after the previous file has been handed off. The cap on alive
+`process_file` tasks therefore matches the documented invariant
+(`prefetch_depth + M`, where `M` is the number of `FileScan`s held by
+FFI consumers) and the test
+`create_full_scan_pipeline_caps_in_flight_at_prefetch_depth_plus_one`
+locks it in.
+
 ## Stats accounting
 
-`STATS.reset()` is called once inside `create_nested_pipeline` — i.e. on
-both the full and incremental paths, after manifest planning has resolved
-and just before the per-file pipeline starts. Wall time is timestamp-based:
-`pipeline_start_ns` is captured at reset; `pipeline_end_ns` is updated by
-`fetch_max` from each per-file `make_file_stream` close (so the latest
-closing file wins). The summary formula is
-`pipeline_end_ns - pipeline_start_ns`. This works identically for nested
-and flat FFI paths, replacing the previous shape where the flat path
-computed its own `wall_ns` and the nested path's `wall_ns` was misleading.
+Stats on this branch are written from a single set of call sites
+(`nested_pipeline.rs::process_file`, `process_file_inner`,
+`drain_batch_stream`, `make_file_stream`, plus the orchestrator's outer
+unfold), and that single set of writes feeds both pipelines correctly.
+Compared to master, two classes of bugs are fixed:
 
-Producer-side waits collapse into one counter, `producer_stall_ns`, which
-covers byte_sem, slot_sem, and `tx.send` (all three stall the same
-producer for the same reason — consumer behind). The previous separate
-`semaphore_wait_ns` + `file_dispatch_wait_ns` + `outer_queue_full_wait_ns`
-fields are gone.
+### (1) Incremental path was missing most stats
 
-Consumer-side waits are split as before:
-`consumer_batch_wait_ns` (Julia waiting on the per-file batch channel) and
-`consumer_file_wait_ns` (Julia waiting on the outer FileScan channel).
+Master's incremental pipeline (`incremental_pipeline.rs` at `origin/main`)
+defined its own `process_incremental_file` /
+`process_incremental_file_inner` / `spawn_incremental_file_task` — siblings
+of the full-scan equivalents that shared only `drain_batch_stream`. Direct
+consequences in the master code:
+
+* **`peak_concurrency` / `active_tasks` stayed at 0** — `track_task_start()`
+  / `track_task_end()` only existed on the full-scan `process_file`
+  wrapper, not on `process_incremental_file`.
+* **`reader_setup_ns` stayed at 0** — the timing wrapper around the
+  reader-setup phase only existed in the full-scan `process_file_inner`.
+* **`buffered_bytes` never decremented** —
+  `spawn_incremental_file_task` passed `|_| {}` as the
+  `on_release` callback for `make_file_stream`, so consumer-side batch
+  pulls never called `track_buffer_release`. After a run, `buffered_bytes`
+  ended up equal to total `bytes_produced`, telling you nothing about
+  the peak in-flight situation. (`peak_buffered_bytes` itself was still
+  correct, but the running gauge was useless.)
+
+On this branch all of these counters are written once, in the shared
+`process_file` / `make_file_stream` paths, so the incremental pipeline
+gets the same numbers as the full-scan pipeline.
+
+### (2) Wall-clock metric was inconsistent / misleading
+
+Master had one `pipeline_wall_ns` field with two writers using
+`store_elapsed` (= "store, overwriting"):
+
+* `run_flat` wrote it on the legacy flat-FFI path, measured from start
+  of the flat orchestrator to the moment the consumer fully drained the
+  flattened batch stream.
+* `run_nested` wrote it on the nested FFI path, measured from start of
+  the nested orchestrator to the moment the **last `FileScan`** was
+  pushed into the outer mpsc.
+
+The nested writer fires when each per-file `process_file` task has
+**spawned**, not when each file's batches have been drained. Once raicode
+moved to consuming files in parallel via `ICEBERG_FILE_TASK_GROUP`, the
+spawn-completion timestamp had essentially nothing to do with end-to-end
+data flow — the actual data was still streaming through Julia for tens
+to hundreds of milliseconds after `run_nested` had already written its
+"wall" timestamp and returned. The reported number was effectively the
+manifest-planning + spawn-loop latency, not a wall clock; the printed
+summary's `parallelism: NNNx` ratio (computed from `wall_ns`) became
+nonsense.
+
+The flat writer's number was correct for its own path, but it was
+written with `store_elapsed`, racing the nested writer; whichever
+finished last won. The flat path was effectively dead in raicode (the
+nested API had replaced it), so in practice the misleading nested value
+was the one that printed.
+
+The fix on this branch:
+
+* `pipeline_wall_ns` is replaced by two timestamps,
+  `pipeline_start_ns` and `pipeline_end_ns`, both expressed as nanos
+  since a `LazyLock<Instant>` `PROCESS_START`. The summary computes
+  wall as `pipeline_end_ns - pipeline_start_ns`.
+* `pipeline_start_ns` is stamped in `STATS.reset()`, which is called
+  once inside `create_nested_pipeline` (after `plan_files()` has
+  resolved). So manifest planning is excluded; per-file pipeline
+  execution is what's measured.
+* `pipeline_end_ns` is updated via `fetch_max` in `make_file_stream`
+  whenever a per-file `recv()` returns `None` (i.e. that file's
+  `process_file` task has dropped its `tx`). Since the consumer is the
+  one driving the `recv()`, this fires after the file's last batch has
+  actually been pulled, not when the file was scheduled. With
+  `fetch_max`, the field ends up holding the timestamp of whichever
+  file finished latest — which is exactly the wall-clock-end of the
+  whole pipeline run regardless of file ordering or consumer
+  parallelism.
+
+Both pipelines now produce identical, correctly-meaning wall stats
+under either FFI flavour, including the multi-file-at-a-time consumer
+shape that raicode uses today.
+
+### Smaller related changes
+
+* **Producer-side waits collapsed into one field.** Master had separate
+  `semaphore_wait_ns` (byte_sem) and `file_dispatch_wait_ns` (outer
+  mpsc `tx.send` block). The latter was only ever written from the
+  master orchestrator's send-FileScan-to-outer-channel call, which no
+  longer exists. The current code has three producer-side back-pressure
+  points (byte_sem, slot_sem, per-file `tx.send`), all of which share
+  one root cause ("consumer behind"), so they all feed into a single
+  `producer_stall_ns`. Useful one-glance signal for "is the consumer
+  draining fast enough?"
+* **Consumer-side waits added.** Two new counters time consumer-side
+  blocking on the inner per-file mpsc (`consumer_batch_wait_ns`) and on
+  the outer FileScan stream (`consumer_file_wait_ns`). Useful one-glance
+  signal for "is Julia ahead of Rust?" Master had no consumer-side
+  timing at all.
+* **New atomic helpers.** `pipeline_stats::PROCESS_START` /
+  `nanos_since_process_start` are the building blocks the new wall
+  metric is built on (and are also used by the wall-clock-invariant
+  test in `full_pipeline.rs::tests`).
 
 ## FFI surface
 
