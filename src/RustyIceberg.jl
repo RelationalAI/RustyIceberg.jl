@@ -258,18 +258,19 @@ const Table = Ptr{Cvoid}
 """
     ArrowBatch
 
-Structure representing a batch of Arrow data from the Rust FFI layer.
+Structure representing a batch of Arrow data from the Rust FFI layer (Arrow C Data Interface).
 
 # Fields
-- `data::Ptr{UInt8}`: Pointer to the Arrow IPC format data
-- `length::Csize_t`: Length of the data buffer in bytes
-- `rust_ptr::Ptr{Cvoid}`: Rust-side pointer for memory management
+- `schema::Ptr{Arrow.ArrowSchema}`: Pointer to the struct-typed ArrowSchema; children are the columns.
+- `array::Ptr{Arrow.ArrowArray}`: Pointer to the corresponding ArrowArray.
+- `rust_ptr::Ptr{Cvoid}`: Rust-side pointer for memory management.
 
-Batches should be freed using `free_batch` after processing.
+Use `Arrow.from_c_data(batch.schema, batch.array)` to obtain a zero-copy `CImportedArray`.
+Materialise or copy any data you need before calling `free_batch`, which releases the Rust memory.
 """
 struct ArrowBatch
-    data::Ptr{UInt8}
-    length::Csize_t
+    schema::Ptr{Arrow.ArrowSchema}
+    array::Ptr{Arrow.ArrowArray}
     rust_ptr::Ptr{Cvoid}
 end
 

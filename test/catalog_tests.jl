@@ -592,11 +592,11 @@ end
 
         if batch_ptr != C_NULL
             batch = unsafe_load(batch_ptr)
-            if batch.data != C_NULL && batch.length > 0
-                println("✅ Successfully read first batch with $(batch.length) bytes of Arrow IPC data")
+            if batch.schema != C_NULL && batch.array != C_NULL
+                println("✅ Successfully read first batch via Arrow C Data Interface")
 
                 # Verify we got actual data from the customer table
-                @test batch.length > 0
+                @test batch.schema != C_NULL
                 println("✅ Batch contains valid Arrow data from catalog-loaded customer table")
 
                 # Clean up the batch
@@ -679,11 +679,11 @@ end
 
         if batch_ptr != C_NULL
             batch = unsafe_load(batch_ptr)
-            if batch.data != C_NULL && batch.length > 0
-                println("✅ Successfully read first batch with $(batch.length) bytes of Arrow IPC data")
+            if batch.schema != C_NULL && batch.array != C_NULL
+                println("✅ Successfully read first batch via Arrow C Data Interface")
 
                 # Verify we got actual data
-                @test batch.length > 0
+                @test batch.schema != C_NULL
                 println("✅ Batch contains valid Arrow data from catalog-loaded customer table with vended credentials")
 
                 # Clean up the batch
@@ -826,10 +826,10 @@ end
 
             if batch_ptr != C_NULL
                 batch = unsafe_load(batch_ptr)
-                if batch.data != C_NULL && batch.length > 0
-                    println("✅ Successfully read first batch with $(batch.length) bytes of Arrow IPC data")
+                if batch.schema != C_NULL && batch.array != C_NULL
+                    println("✅ Successfully read first batch via Arrow C Data Interface")
 
-                    @test batch.length > 0
+                    @test batch.schema != C_NULL
                     println("✅ Batch contains valid Arrow data - storage credentials loader worked!")
 
                     RustyIceberg.free_batch(batch_ptr)
@@ -911,9 +911,8 @@ end
         while batch_ptr != C_NULL
             inserts_count += 1
             batch = unsafe_load(batch_ptr)
-            if batch.data != C_NULL && batch.length > 0
-                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
-                df = DataFrame(arrow_table)
+            if batch.schema != C_NULL && batch.array != C_NULL
+                df = DataFrame(Arrow.from_c_data(batch.schema, batch.array))
                 @test "n" in names(df)
                 total_inserts += nrow(df)
 
@@ -934,9 +933,8 @@ end
         while batch_ptr != C_NULL
             deletes_count += 1
             batch = unsafe_load(batch_ptr)
-            if batch.data != C_NULL && batch.length > 0
-                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
-                df = DataFrame(arrow_table)
+            if batch.schema != C_NULL && batch.array != C_NULL
+                df = DataFrame(Arrow.from_c_data(batch.schema, batch.array))
                 @test "file_path" in names(df) || "pos" in names(df)
                 total_deletes += nrow(df)
 

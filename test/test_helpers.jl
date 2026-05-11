@@ -19,15 +19,16 @@ function read_table_data(table)
     scan = RustyIceberg.new_scan(table)
     stream = RustyIceberg.scan!(scan)
 
-    all_batches = Arrow.Table[]
+    # Collect column data across batches as plain Julia vectors.
+    # Each batch is imported zero-copy via Arrow C Data Interface, then
+    # materialised into a DataFrame before free_batch releases Rust memory.
+    all_dfs = DataFrame[]
     batch_ptr = RustyIceberg.next_batch(stream)
     while batch_ptr != C_NULL
         batch = unsafe_load(batch_ptr)
-        if batch.length > 0
-            # Copy the arrow data before freeing the batch
-            arrow_data = unsafe_wrap(Array, batch.data, batch.length)
-            arrow_data_copy = copy(arrow_data)
-            push!(all_batches, Arrow.Table(arrow_data_copy))
+        if batch.schema != C_NULL && batch.array != C_NULL
+            imported = Arrow.from_c_data(batch.schema, batch.array)
+            push!(all_dfs, DataFrame(imported))
         end
         RustyIceberg.free_batch(batch_ptr)
         batch_ptr = RustyIceberg.next_batch(stream)
@@ -35,27 +36,9 @@ function read_table_data(table)
     RustyIceberg.free_stream(stream)
     RustyIceberg.free_scan!(scan)
 
-    if isempty(all_batches)
-        return nothing
-    end
+    isempty(all_dfs) && return nothing
 
-    # Get column names from first batch
-    first_tbl = all_batches[1]
-    cols = Tables.columns(first_tbl)
-    names = Tables.columnnames(cols)
-
-    # Collect all data from all batches into plain Julia vectors
-    result = Dict{Symbol, Vector}()
-    for name in names
-        # Collect from all batches into a single vector
-        all_values = []
-        for tbl in all_batches
-            col = Tables.getcolumn(Tables.columns(tbl), name)
-            # Use collect to convert Arrow array to plain Julia array
-            append!(all_values, collect(col))
-        end
-        result[name] = all_values
-    end
-
-    return NamedTuple{Tuple(names)}(Tuple(result[n] for n in names))
+    combined = vcat(all_dfs...)
+    names = Tuple(propertynames(combined))
+    return NamedTuple{names}(Tuple(collect(combined[!, n]) for n in names))
 end

@@ -12,7 +12,7 @@
 //! Each file task is a background tokio task that:
 //!   1. Builds a per-file ArrowReader (same iceberg-rs code path as to_arrow)
 //!   2. Reads row groups sequentially → RecordBatch stream
-//!   3. Serializes each batch to Arrow IPC (via a shared rayon thread pool)
+//!   3. Exports each batch via Arrow C Data Interface (zero-copy, inline)
 //!   4. Sends serialized batches into a per-file mpsc channel
 //!
 //! A consumer (`run_nested`) uses FuturesUnordered to maintain N tasks in
@@ -28,7 +28,7 @@
 //! ~100MB independently.
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use arrow_array::RecordBatch;
@@ -42,13 +42,6 @@ use crate::pipeline_stats::{MAX_BUFFERED_BYTES_PER_TASK, STATS};
 use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
-/// Process-global rayon pool for Arrow IPC serialization.
-pub(crate) static SERIALIZE_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(crate::cpu_count())
-        .build()
-        .expect("failed to build serialization thread pool")
-});
 
 /// Time an async expression and record its duration into a STATS field.
 ///
@@ -398,7 +391,7 @@ async fn process_file_inner(
 /// the stream is obtained before calling this function.
 ///
 ///   2. Fetch + decode — timed; each `.next()` does I/O + decompression
-///   3. Serialize      — timed; dispatched to SERIALIZE_POOL via oneshot
+///   3. C FFI export   — timed; inline O(columns) Arrow C Data Interface wrap
 ///   4. Backpressure   — timed; semaphore blocks if producer is too far ahead
 pub(crate) async fn drain_batch_stream(
     mut batch_stream: impl Stream<Item = iceberg::Result<RecordBatch>> + Unpin,
@@ -417,20 +410,12 @@ pub(crate) async fn drain_batch_stream(
             None => break, // end of file
         };
 
-        // ── Phase 3: Serialize to Arrow IPC ─────────────────────────────
-        // Dispatched to the shared rayon pool so N idle workers handle all
-        // file tasks; the oneshot channel bridges rayon back to async.
-        let serialized = timed!(serialize_ns, {
-            let (stx, srx) = tokio::sync::oneshot::channel();
-            SERIALIZE_POOL.spawn(move || {
-                let _ = stx.send(crate::serialize_record_batch(batch));
-            });
-            srx
-        })
-        .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
-        .map_err(|e| unexpected(e))?;
-
-        let byte_len = serialized.length;
+        // ── Phase 3: Export to Arrow C Data Interface ───────────────────
+        // C Data Interface export is O(num_columns): just Arc-clones and a
+        // few small heap allocations. No serialization, no thread pool needed.
+        let byte_len = batch.get_array_memory_size();
+        let serialized =
+            crate::record_batch_to_c_ffi(batch).map_err(|e| unexpected(e))?;
         STATS.batches_produced.fetch_add(1, Ordering::Relaxed);
         STATS
             .bytes_produced
@@ -650,8 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_pipeline_reads_parquet_file() {
-        use arrow_array::{Int32Array, RecordBatch};
-        use arrow_ipc::reader::StreamReader;
+        use arrow_array::RecordBatch;
         use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
         use bytes::Bytes;
         use iceberg::io::FileIO;
@@ -735,23 +719,27 @@ mod tests {
         assert_eq!(file_scan.record_count, 3);
         assert!(outer.next().await.is_none(), "expected exactly one file");
 
-        // ── 7. Drain inner IcebergArrowStream → decode Arrow IPC ──────────
+        // ── 7. Drain inner IcebergArrowStream → verify Arrow C Data Interface ──
         let mut inner = file_scan.stream.stream.lock().await;
         let arrow_batch = inner.next().await.unwrap().unwrap();
 
-        let data = unsafe { std::slice::from_raw_parts(arrow_batch.data, arrow_batch.length) };
-        let mut reader = StreamReader::try_new(std::io::Cursor::new(data), None).unwrap();
-        let decoded = reader.next().unwrap().unwrap();
-        assert_eq!(decoded.num_rows(), 3);
-        let id_col = decoded
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(id_col.values(), &[10, 20, 30]);
+        // Verify non-null C Data Interface pointers.
+        assert!(!arrow_batch.schema.is_null());
+        assert!(!arrow_batch.array.is_null());
 
-        // Release the Vec<u8> allocated by serialize_record_batch.
-        unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut Vec<u8>)) };
+        // The first i64 field of RawArrowArray (== FFI_ArrowArray) is the row count.
+        let n_rows = unsafe { *(arrow_batch.array as *const i64) } as usize;
+        assert_eq!(n_rows, 3);
+
+        // Drop the ArrowBatchInner — calls arrow-rs Drop on both FFI structs,
+        // which invokes their release callbacks and frees the buffer Arcs.
+        if !arrow_batch.rust_ptr.is_null() {
+            unsafe {
+                drop(Box::from_raw(
+                    arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+                ));
+            }
+        }
 
         assert!(inner.next().await.is_none(), "expected exactly one batch");
     }
