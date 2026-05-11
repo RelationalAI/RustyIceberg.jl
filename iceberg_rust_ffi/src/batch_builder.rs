@@ -86,8 +86,10 @@ impl ColumnValues {
             COLUMN_TYPE_BOOLEAN => ColumnValues::Bool(Vec::with_capacity(coalesce_rows)),
             COLUMN_TYPE_STRING => ColumnValues::Str {
                 bytes: Vec::new(),
+                // Start empty; finalize_and_reset right-sizes to the actual slice length
+                // after the first flush, so we never hold a 4MB coalesce_rows-sized Vec.
                 offsets: {
-                    let mut v = Vec::with_capacity(coalesce_rows + 1);
+                    let mut v = Vec::new();
                     v.push(0i32);
                     v
                 },
@@ -219,10 +221,31 @@ unsafe fn append_to_state(
                     state.null_bits.resize(needed, 0u8);
                 }
             }
-            for i in 0..len {
-                let b = unsafe { (*slice.validity_ptr.add(i / 8) >> (i % 8)) & 1 };
-                let pos = out_start + i;
-                state.null_bits[pos / 8] |= b << (pos % 8);
+            // Copy validity bits. When source and destination are byte-aligned (out_start
+            // is a multiple of 8 — always true for flush-per-slice), one copy_nonoverlapping
+            // replaces the 4096-iteration per-bit loop.
+            if out_start % 8 == 0 {
+                let dst = out_start / 8;
+                let n_bytes = (len + 7) / 8;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        slice.validity_ptr,
+                        state.null_bits.as_mut_ptr().add(dst),
+                        n_bytes,
+                    );
+                }
+                // Mask off garbage bits beyond `len` in the last byte so they don't
+                // corrupt a subsequent coalesced slice that shares that byte.
+                if len % 8 != 0 {
+                    let tail = state.null_bits.last_mut().unwrap();
+                    *tail &= (1u8 << (len % 8)) - 1;
+                }
+            } else {
+                for i in 0..len {
+                    let b = unsafe { (*slice.validity_ptr.add(i / 8) >> (i % 8)) & 1 };
+                    let pos = out_start + i;
+                    state.null_bits[pos / 8] |= b << (pos % 8);
+                }
             }
         } else if state.has_nulls {
             // All-valid slice but nulls seen earlier — extend bitmap with 1s.
@@ -255,19 +278,26 @@ unsafe fn append_to_state(
         ColumnValues::Str { bytes, offsets } => {
             // Pointer-of-pointers protocol: data_ptr is *const *const u8 (array of pointers
             // into Julia source strings), lengths_ptr is *const i64 (byte lengths per row).
-            // Null and empty rows have a null data pointer and length 0 — no bytes are copied.
+            // Null and empty rows have length 0; the nb>0 guard is sufficient since Julia
+            // always sets len=0 for null/empty rows (no null-pointer check needed).
             if slice.lengths_ptr.is_null() {
                 return Err(anyhow::anyhow!("String column: lengths_ptr is null"));
             }
             let ptrs =
                 unsafe { std::slice::from_raw_parts(slice.data_ptr as *const *const u8, len) };
             let lens = unsafe { std::slice::from_raw_parts(slice.lengths_ptr, len) };
+            // Pre-reserve so bytes never reallocates mid-loop.
+            let total: usize = lens.iter().map(|&l| l as usize).sum();
+            bytes.reserve(total);
+            // Track running offset locally instead of reading bytes.len() each iteration.
+            let mut cur_off = bytes.len();
             for i in 0..len {
                 let nb = lens[i] as usize;
-                if nb > 0 && !ptrs[i].is_null() {
+                if nb > 0 {
                     bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(ptrs[i], nb) });
+                    cur_off += nb;
                 }
-                offsets.push(bytes.len() as i32);
+                offsets.push(cur_off as i32);
             }
         }
     }
@@ -421,9 +451,14 @@ fn finalize_and_reset(
             ))
         }
         ColumnValues::Str { bytes, offsets } => {
-            let taken_bytes = std::mem::replace(bytes, Vec::with_capacity(bytes.capacity()));
+            // Capacity hints from the previous window so the reset never over-allocates.
+            // With has_strings flush-per-slice, offsets.len() == slice_len+1 (~4097), not
+            // coalesce_rows+1 (1M). Using len() here shrinks the reset from 4MB to ~16KB.
+            let bytes_cap = bytes.capacity();
+            let offsets_hint = offsets.len(); // rows+1 from the window just taken
+            let taken_bytes = std::mem::replace(bytes, Vec::with_capacity(bytes_cap));
             let taken_offsets = std::mem::replace(offsets, {
-                let mut v = Vec::with_capacity(coalesce_rows + 1);
+                let mut v = Vec::with_capacity(offsets_hint.max(1));
                 v.push(0i32);
                 v
             });
