@@ -27,16 +27,17 @@ concurrency knob, and the cap on alive `process_file` tasks is exactly
 
 ## File layout
 
-| File | Lines | Role |
-|---|---:|---|
-| `src/nested_pipeline.rs` | 640 | Shared core: `create_nested_pipeline<T, Src, F>`, `spawn_file_task<S, BSF>`, `process_file`, `drain_batch_stream`, `make_file_stream`, `BufferedBatch`, `FileScan`, constants (`UNATTACHED_SLOTS=1`, `ATTACHED_SLOTS=8`), and orchestration tests (with a stub `start_one` closure). |
-| `src/full_pipeline.rs` | 457 | Full-scan entries: `create_full_scan_pipeline` (nested FFI) and `create_pipeline` (legacy flat-FFI wrapper = nested + `try_flatten` + inline `slot_sem` promotion). Real-parquet end-to-end tests live here. |
-| `src/incremental_pipeline.rs` | 347 | Incremental-append entry: `create_incremental_nested_pipeline`. Pulls the same shared helpers, adds `read_one_append_file` + delete-stream glue. Real-parquet tests live here. |
+| File | Role |
+|---|---|
+| `src/nested_pipeline.rs` | Shared core: `create_nested_pipeline<T, Src, F>`, `spawn_file_task<S, BSF>`, `process_file`, `drain_batch_stream`, `make_file_stream`, `BufferedBatch`, `FileScan`, constants (`UNATTACHED_SLOTS=1`, `ATTACHED_SLOTS=8`), and orchestration tests (with a stub `start_one` closure). |
+| `src/full_pipeline.rs` | Full-scan entries: `create_full_scan_pipeline` (nested FFI) and `create_pipeline` (legacy flat-FFI wrapper = nested + `try_flatten` + inline `slot_sem` promotion). Real-parquet end-to-end tests live here. |
+| `src/incremental_pipeline.rs` | Incremental-append entry: `create_incremental_nested_pipeline`. Pulls the same shared helpers, adds `read_one_append_file` + delete-stream glue. Real-parquet tests live here. |
 
 `src/pipeline_stats.rs` hosts the global `STATS` counters used by both
-pipelines. Reset is done at FFI entry (`iceberg_arrow_stream`,
-`iceberg_file_scan_stream`, `iceberg_incremental_file_scan_stream`) so each
-top-level scan starts from zero.
+pipelines. Reset is done once inside `create_nested_pipeline` (after
+`plan_files()` has been awaited and the per-file pipeline is about to
+start), so each scan's wall-clock counts only per-file execution, not
+manifest planning.
 
 ## Before (master)
 
@@ -110,7 +111,8 @@ top-level scan starts from zero.
    │   create_nested_pipeline<T, Src, F>(source, start_one,      │
    │                                     prefetch_depth)         │
    │     │                                                       │
-   │     │  source.map_ok(start_one).buffered(prefetch_depth)    │
+   │     │  source.map(|res| async { res.map(start_one) })       │
+   │     │        .buffered(prefetch_depth)                       │
    │     ▼                                                       │
    │   spawn_file_task<S, BSF>(filename, rc, build_batch_stream) │
    │     │                                                       │
@@ -142,25 +144,6 @@ top-level scan starts from zero.
 
 ## What is *shared* vs *merely similar in shape*
 
-Word choice matters here, because at master the two pipelines already
-"mirrored" each other in shape. The difference is moving from two parallel
-implementations that happen to look alike to **one function reached from
-both entry points**.
-
-Each pipeline now supplies exactly two things:
-
-| Spot | Full-scan | Incremental-append |
-|---|---|---|
-| **Source `Stream<T>`** | `iter(Vec<FileScanTask>).map(Ok)` | iceberg-rs incremental scan stream of `AppendedFileScanTask` |
-| **`build_batch_stream` closure** | `ArrowReaderBuilder…build().read(once(task))` | `read_one_append_file(reader, task)` |
-
-Everything else — orchestration, prefetch bound, semaphores, serialize
-spawn, cancellation, stats — is one body in `nested_pipeline.rs`. The
-delete-files side of incremental is a separate stream and is unaffected
-by this unification.
-
-## What is *shared* vs *merely similar in shape*
-
 Word choice matters here, because "the incremental pipeline mirrors the
 full pipeline" was already true at master. The change is moving from
 **shape-mirroring** (two parallel implementations that happen to look
@@ -189,17 +172,20 @@ Now genuinely *shared* (one body, called by both):
   were silently zero on the incremental path because the parallel
   implementation didn't update them.)
 
-Per-pipeline (not shared, by necessity):
+Per-pipeline (not shared, by necessity). Each entry point supplies
+exactly two things to `create_nested_pipeline`:
 
-* The **source stream** (entry point chooses `iter(Vec<FileScanTask>)` or
-  the iceberg-rs incremental-append stream).
-* The **`build_batch_stream` closure** (full builds an
-  `ArrowReaderBuilder`-based reader; incremental builds a per-append-file
-  reader via `read_one_append_file`).
-* The **delete-file stream** (incremental only).
+| Spot | Full-scan | Incremental-append |
+|---|---|---|
+| **Source `Stream<T>`** | `iter(Vec<FileScanTask>).map(Ok)` | iceberg-rs incremental scan stream of `AppendedFileScanTask` |
+| **`build_batch_stream` closure** | `ArrowReaderBuilder…build().read(once(task))` | `read_one_append_file(reader, task)` |
 
-The flat-FFI wrapper `create_pipeline` is also full-only — flat output is
-not part of the incremental API.
+Everything else — orchestration, prefetch bound, semaphores, serialize
+spawn, cancellation, stats — is one body in `nested_pipeline.rs`. The
+delete-files side of incremental is a separate stream (`StreamsInto`-based,
+not file-grouped) and is unaffected by this unification. The flat-FFI
+wrapper `create_pipeline` is full-only — flat output is not part of the
+incremental API.
 
 ## Concurrency invariant (single knob)
 
@@ -228,16 +214,15 @@ never get drained (e.g. cancelled scans, slow consumers).
 
 ## Stats accounting
 
-`STATS.reset()` is called once per top-level FFI scan
-(`iceberg_arrow_stream`, `iceberg_file_scan_stream`,
-`iceberg_incremental_file_scan_stream`) before invoking the pipeline. Wall
-time is timestamp-based: `pipeline_start_ns` is captured at reset;
-`pipeline_end_ns` is updated by `fetch_max` from each per-file
-`make_file_stream` close (so the latest closing file wins). The summary
-formula is `pipeline_end_ns - pipeline_start_ns`. This works identically
-for nested and flat FFI paths, replacing the previous shape where the flat
-path computed its own `wall_ns` and the nested path's `wall_ns` was
-misleading.
+`STATS.reset()` is called once inside `create_nested_pipeline` — i.e. on
+both the full and incremental paths, after manifest planning has resolved
+and just before the per-file pipeline starts. Wall time is timestamp-based:
+`pipeline_start_ns` is captured at reset; `pipeline_end_ns` is updated by
+`fetch_max` from each per-file `make_file_stream` close (so the latest
+closing file wins). The summary formula is
+`pipeline_end_ns - pipeline_start_ns`. This works identically for nested
+and flat FFI paths, replacing the previous shape where the flat path
+computed its own `wall_ns` and the nested path's `wall_ns` was misleading.
 
 Producer-side waits collapse into one counter, `producer_stall_ns`, which
 covers byte_sem, slot_sem, and `tx.send` (all three stall the same
@@ -304,6 +289,7 @@ These are not done on this branch; flagging them for future work.
   tunable knobs.** Currently hardcoded; some Julia workloads (very wide
   schemas, small batch sizes) might benefit from a different mix.
 * **Per-pipeline stats namespaces.** Right now `STATS` is process-global
-  and reset at FFI entry. If two scans run concurrently in the same
-  process the counters interleave. Currently irrelevant (Julia serializes
-  scan starts) but would matter if the FFI ever becomes re-entrant.
+  and reset inside `create_nested_pipeline`. If two scans run concurrently
+  in the same process the counters interleave. Currently irrelevant
+  (Julia serializes scan starts) but would matter if the FFI ever
+  becomes re-entrant.

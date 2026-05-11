@@ -22,8 +22,13 @@ use object_store_ffi::{
 pub struct IcebergScan {
     pub builder: Option<TableScanBuilder<'static>>,
     pub scan: Option<TableScan>,
-    /// Serialization thread count (0 = auto-detect). Currently unused by the
-    /// pipeline (kept for future use / backward compat with incremental scan).
+    /// Dead field kept for FFI ABI compatibility and shape-symmetry with
+    /// `IncrementalScan` (whose twin *is* still used, but only for the
+    /// incremental delete-stream's parallel serialization — the per-file
+    /// append/full pipeline uses `tokio::task::spawn_blocking` directly,
+    /// with parallelism implicitly bounded by `file_prefetch_depth`).
+    /// The FFI setter `iceberg_scan_with_serialization_concurrency_limit`
+    /// writes this field, but nothing reads it.
     pub serialization_concurrency: usize,
     /// Cloned from the Table at construction time. Passed to the pipeline so
     /// each per-file ArrowReader can open its own parquet file.

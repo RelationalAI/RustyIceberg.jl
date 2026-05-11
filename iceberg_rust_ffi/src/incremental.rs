@@ -130,12 +130,24 @@ impl_scan_builder_method!(
     n: usize
 );
 
-impl_scan_builder_method!(
-    iceberg_incremental_scan_with_data_file_concurrency_limit,
-    IcebergIncrementalScan,
-    with_data_file_concurrency_limit,
-    n: usize
-);
+/// FFI-stable no-op kept for API compatibility with Julia callers. Same
+/// rationale as the full-scan twin (`iceberg_scan_with_data_file_concurrency_limit`):
+/// the incremental nested pipeline is now bounded by `file_prefetch_depth`
+/// alone, and the iceberg-rs scan builder's own
+/// `with_data_file_concurrency_limit` only affects `to_arrow()` /
+/// `to_unzipped_arrow()` (which we don't call — we use `plan_files()` +
+/// our own per-file `ArrowReader`s pinned to concurrency 1), so forwarding
+/// would have no effect anyway.
+#[no_mangle]
+pub extern "C" fn iceberg_incremental_scan_with_data_file_concurrency_limit(
+    scan: &mut *mut IcebergIncrementalScan,
+    _n: usize,
+) -> CResult {
+    if scan.is_null() || (*scan).is_null() {
+        return CResult::Error;
+    }
+    CResult::Ok
+}
 
 impl_scan_builder_method!(
     iceberg_incremental_scan_with_manifest_entry_concurrency_limit,
@@ -168,8 +180,13 @@ impl_with_serialization_concurrency_limit!(
     IcebergIncrementalScan
 );
 
-// Get unzipped Arrow streams from incremental scan (async)
-// Returns two separate streams: one for inserts, one for deletes
+// Legacy unzipped FFI: returns two separate flat IcebergArrowStreams
+// (inserts + deletes) via iceberg-rs's own `to_unzipped_arrow()`. This
+// path bypasses the shared `nested_pipeline` core entirely — it has no
+// per-file slot/byte semaphores, no STATS accounting, and no strict
+// file-then-row ordering. Kept for any Julia caller still on the
+// pre-nested API. New callers should use the nested API
+// (`iceberg_incremental_file_scan_stream`) instead.
 export_runtime_op!(
     iceberg_incremental_arrow_stream_unzipped,
     IcebergUnzippedStreamsResponse,
@@ -219,12 +236,14 @@ export_runtime_op!(
     scan: *mut IcebergIncrementalScan
 );
 
-/// Resolve the two pipeline tuning knobs from an IncrementalScan, applying
-/// the same "0 = auto" convention as resolve_pipeline_params in full.rs.
+/// Resolve pipeline tuning knobs from an IncrementalScan. Same `0 = auto`
+/// convention as `resolve_pipeline_params` in `full.rs`, applied here to
+/// the two knobs that the incremental path actually consults: `prefetch_depth`
+/// (the append-pipeline's `Stream::buffered` width) and
+/// `serialization_concurrency` (parallelism for the delete-stream IPC fan-out).
 /// `file_concurrency` is stored on the struct for FFI ABI compatibility but
 /// is no longer consulted: the nested-append pipeline is bounded by
-/// `prefetch_depth` alone (via `Stream::buffered`), matching the full-scan
-/// shape.
+/// `prefetch_depth` alone, matching the full-scan shape.
 fn resolve_incremental_pipeline_params(scan: &IcebergIncrementalScan) -> (usize, usize) {
     let n = crate::cpu_count();
     let prefetch_depth = if scan.file_prefetch_depth == 0 {

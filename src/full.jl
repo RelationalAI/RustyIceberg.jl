@@ -59,22 +59,10 @@ end
 """
     with_data_file_concurrency_limit!(scan::Scan, n::UInt)
 
-No-op for full scans (kept for API stability). The full-scan pipeline derives
-its concurrency from `with_file_prefetch_depth!` only; this entry point is
-retained so existing Julia callers compile unchanged. For `IncrementalScan`
-the equivalent setter is the real knob — see `incremental.jl`.
+No-op (kept for API stability). The full-scan pipeline derives its
+concurrency from `with_file_prefetch_depth!` only.
 """
-function with_data_file_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_data_file_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set data file concurrency limit", result))
-    end
-    return nothing
-end
+with_data_file_concurrency_limit!(::Scan, ::UInt) = nothing
 
 """
     with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)

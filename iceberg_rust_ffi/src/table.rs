@@ -422,3 +422,76 @@ pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char 
         Err(_) => ptr::null_mut(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nested_pipeline::{FileScan, ATTACHED_SLOTS, UNATTACHED_SLOTS};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Semaphore};
+
+    /// `IcebergFileScanResponse::set_payload(Some(Some(fs)))` is the FFI
+    /// handoff that promotes a per-file producer's slot budget from
+    /// `UNATTACHED_SLOTS` to `ATTACHED_SLOTS`. The empty `None` variant
+    /// must not touch the slot_sem.
+    #[test]
+    fn set_payload_promotes_slot_sem_to_attached_on_handoff() {
+        let slot_sem = Arc::new(Semaphore::new(UNATTACHED_SLOTS));
+        assert_eq!(slot_sem.available_permits(), UNATTACHED_SLOTS);
+
+        // Build a minimal FileScan with an empty inner stream. We only
+        // care about the slot_sem promotion here, not stream draining.
+        let (_tx, rx) =
+            mpsc::channel::<Result<crate::nested_pipeline::BufferedBatch, iceberg::Error>>(1);
+        let fs = FileScan {
+            filename: "test.parquet".into(),
+            record_count: 0,
+            stream: crate::nested_pipeline::make_file_stream(rx),
+            slot_sem: slot_sem.clone(),
+        };
+
+        // Construct an empty response and hand off the FileScan.
+        let mut resp = IcebergFileScanResponse(IcebergBoxedResponse {
+            result: CResult::default(),
+            value: ptr::null_mut(),
+            error_message: ptr::null_mut(),
+            context: ptr::null(),
+        });
+        resp.set_payload(Some(Some(fs)));
+
+        assert_eq!(slot_sem.available_permits(), ATTACHED_SLOTS);
+
+        // Free the FFI-owned bits we allocated via set_payload so the
+        // test doesn't leak (CString filename + boxed IcebergFileScan +
+        // boxed inner stream).
+        let scan_ptr = resp.0.value;
+        assert!(!scan_ptr.is_null());
+        unsafe {
+            let scan = Box::from_raw(scan_ptr);
+            drop(std::ffi::CString::from_raw(scan.filename));
+            drop(Box::from_raw(scan.stream));
+        }
+    }
+
+    /// The `None` handoff (used by the stream-exhausted path on the nested
+    /// FFI) must leave the slot_sem untouched — there is no consumer to
+    /// attach, so the producer should not be allowed to expand its
+    /// prefetch window.
+    #[test]
+    fn set_payload_does_not_promote_on_end_of_stream() {
+        let slot_sem = Arc::new(Semaphore::new(UNATTACHED_SLOTS));
+        let mut resp = IcebergFileScanResponse(IcebergBoxedResponse {
+            result: CResult::default(),
+            value: ptr::null_mut(),
+            error_message: ptr::null_mut(),
+            context: ptr::null(),
+        });
+        // Both `None` (outer "no payload") and `Some(None)` (stream
+        // returned `None` from try_next) must skip the promotion.
+        resp.set_payload(Some(None));
+        assert_eq!(slot_sem.available_permits(), UNATTACHED_SLOTS);
+        resp.set_payload(None);
+        assert_eq!(slot_sem.available_permits(), UNATTACHED_SLOTS);
+        assert!(resp.0.value.is_null());
+    }
+}

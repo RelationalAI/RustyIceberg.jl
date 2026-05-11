@@ -184,7 +184,7 @@ pub(crate) async fn create_nested_pipeline<T, Src, F>(
 where
     T: Send + 'static,
     Src: Stream<Item = iceberg::Result<T>> + Send + 'static,
-    F: Fn(T) -> FileScan + Clone + Send + Sync + 'static,
+    F: Fn(T) -> FileScan + Clone + Send + 'static,
 {
     let prefetch_depth = prefetch_depth.max(1);
 
@@ -231,6 +231,7 @@ where
 ///     closure.
 ///   * incremental (`incremental_pipeline.rs`) passes a
 ///     `read_one_append_file(reader, task)` closure.
+///
 /// The reader-setup time is timed centrally inside `process_file`.
 pub(crate) fn spawn_file_task<S, BSF>(
     filename: String,
@@ -347,7 +348,7 @@ pub(crate) async fn drain_batch_stream(
             tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch))
         )
         .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
-        .map_err(|e| unexpected(e))?;
+        .map_err(unexpected)?;
 
         let byte_len = serialized.length;
         STATS.batches_produced.fetch_add(1, Ordering::Relaxed);
@@ -553,6 +554,39 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].as_ref().unwrap(), &("a.parquet".to_string(), 1));
         assert!(got[1].as_ref().err().unwrap().to_string().contains("drain error"));
+    }
+
+    /// If a per-pipeline `build_batch_stream` closure returns `Err` (e.g.
+    /// the underlying reader failed to open the file), `process_file`
+    /// must surface that error on the per-file inner stream rather than
+    /// panicking or hanging. Then the inner stream must close cleanly.
+    #[tokio::test]
+    async fn build_batch_stream_err_propagates_to_inner_stream() {
+        let _guard = PIPELINE_TEST_LOCK.lock().await;
+        // Use spawn_file_task directly so we can supply a build_batch_stream
+        // closure that fails. The closure has the same signature as the one
+        // full_pipeline / incremental_pipeline pass at the real call sites.
+        let fs = spawn_file_task::<futures::stream::Empty<iceberg::Result<RecordBatch>>, _>(
+            "bad.parquet".into(),
+            0,
+            || {
+                Err(iceberg::Error::new(
+                    iceberg::ErrorKind::Unexpected,
+                    "reader setup failed",
+                ))
+            },
+        );
+        let mut inner = fs.stream.stream.lock().await;
+        // First item: the error from the builder closure, forwarded by
+        // process_file as Err(...) on the per-file mpsc.
+        let first = inner.next().await.expect("expected one error item");
+        let err = first.err().expect("expected Err");
+        assert!(
+            err.to_string().contains("reader setup failed"),
+            "unexpected error message: {err}"
+        );
+        // Then the inner stream closes (process_file's tx is dropped).
+        assert!(inner.next().await.is_none(), "stream did not close after Err");
     }
 
     #[tokio::test]

@@ -49,7 +49,7 @@ pub async fn create_full_scan_pipeline(
                 }
                 let reader = builder.build();
                 let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
-                reader.read(task_stream).map_err(|e| unexpected(e))
+                reader.read(task_stream).map_err(unexpected)
             })
         },
         prefetch_depth,
@@ -94,7 +94,7 @@ pub async fn create_pipeline(
 mod tests {
     use super::*;
     use crate::nested_pipeline::PIPELINE_TEST_LOCK;
-    use crate::pipeline_stats::STATS;
+    use crate::pipeline_stats::{nanos_since_process_start, STATS};
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
@@ -202,6 +202,18 @@ mod tests {
         unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut Vec<u8>)) };
 
         assert!(inner.next().await.is_none(), "expected exactly one batch");
+
+        // Wall-clock invariant: `pipeline_start_ns` was set by `reset()`
+        // inside `create_nested_pipeline`; `pipeline_end_ns` is bumped by
+        // each `make_file_stream` close. Both timestamps are "nanos since
+        // process start", so they may be 0 if the test runs early enough
+        // — we assert order, not magnitude.
+        let now_after = nanos_since_process_start();
+        let start = STATS.pipeline_start_ns.load(Ordering::Relaxed);
+        let end = STATS.pipeline_end_ns.load(Ordering::Relaxed);
+        assert!(end >= start, "pipeline_end_ns ({end}) < pipeline_start_ns ({start})");
+        assert!(start <= now_after, "pipeline_start_ns ({start}) > now ({now_after})");
+        assert!(end <= now_after, "pipeline_end_ns ({end}) > now ({now_after})");
     }
 
     #[tokio::test]
