@@ -12,7 +12,7 @@
 //! Each file task is a background tokio task that:
 //!   1. Builds a per-file ArrowReader (same iceberg-rs code path as to_arrow)
 //!   2. Reads row groups sequentially → RecordBatch stream
-//!   3. Serializes each batch to Arrow IPC (via a shared rayon thread pool)
+//!   3. Serializes each batch to Arrow IPC (on Tokio's blocking thread pool)
 //!   4. Sends serialized batches into a per-file mpsc channel
 //!
 //! For full scans, `create_full_scan_stream` drives the spawn rate via
@@ -46,7 +46,7 @@
 //! ~100MB independently.
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use arrow_array::RecordBatch;
@@ -60,18 +60,10 @@ use crate::pipeline_stats::{MAX_BUFFERED_BYTES_PER_TASK, STATS};
 use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
-/// Process-global rayon pool for Arrow IPC serialization.
-pub(crate) static SERIALIZE_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(crate::cpu_count())
-        .build()
-        .expect("failed to build serialization thread pool")
-});
-
 /// Time an async expression and record its duration into a STATS field.
 ///
 /// ```ignore
-/// let result = timed!(serialize_ns, { rayon_dispatch(&pool, batch) })
+/// let result = timed!(serialize_ns, tokio::task::spawn_blocking(move || work()))
 ///     .map_err(...)?;
 /// ```
 macro_rules! timed {
@@ -379,7 +371,7 @@ async fn process_file(
 /// the stream is obtained before calling this function.
 ///
 ///   2. Fetch + decode — timed; each `.next()` does I/O + decompression
-///   3. Serialize      — timed; dispatched to SERIALIZE_POOL via oneshot
+///   3. Serialize      — timed; dispatched via tokio::task::spawn_blocking
 ///   4. Backpressure   — timed; semaphore blocks if producer is too far ahead
 pub(crate) async fn drain_batch_stream(
     mut batch_stream: impl Stream<Item = iceberg::Result<RecordBatch>> + Unpin,
@@ -400,15 +392,13 @@ pub(crate) async fn drain_batch_stream(
         };
 
         // ── Phase 3: Serialize to Arrow IPC ─────────────────────────────
-        // Dispatched to the shared rayon pool so N idle workers handle all
-        // file tasks; the oneshot channel bridges rayon back to async.
-        let serialized = timed!(serialize_ns, {
-            let (stx, srx) = tokio::sync::oneshot::channel();
-            SERIALIZE_POOL.spawn(move || {
-                let _ = stx.send(crate::serialize_record_batch(batch));
-            });
-            srx
-        })
+        // Dispatched to Tokio's blocking thread pool so Tokio worker
+        // threads stay free to make progress on async work while the CPU-
+        // heavy IPC serialization runs on a dedicated blocking thread.
+        let serialized = timed!(
+            serialize_ns,
+            tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch))
+        )
         .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
         .map_err(|e| unexpected(e))?;
 
@@ -708,7 +698,11 @@ mod tests {
             .expect("producer did not deliver batch 1 within timeout")
             .expect("mpsc closed unexpectedly")
             .expect("batch 1 was an Err");
-        assert_eq!(slot_sem.available_permits(), 0, "slot_sem should be drained");
+        assert_eq!(
+            slot_sem.available_permits(),
+            0,
+            "slot_sem should be drained"
+        );
 
         // Drop rx → tx.closed() fires → the cancellation arm in
         // drain_batch_stream wakes the parked producer.
@@ -717,7 +711,9 @@ mod tests {
         // Without the cancellation fix, this would never complete.
         let result = tokio::time::timeout(std::time::Duration::from_millis(500), drain)
             .await
-            .expect("drain_batch_stream did not exit after consumer dropped rx (parked on slot_sem)")
+            .expect(
+                "drain_batch_stream did not exit after consumer dropped rx (parked on slot_sem)",
+            )
             .expect("drain task panicked");
         assert!(result.is_ok());
     }
