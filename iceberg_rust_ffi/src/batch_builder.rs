@@ -253,22 +253,19 @@ unsafe fn append_to_state(
             }
         }
         ColumnValues::Str { bytes, offsets } => {
+            // Pointer-of-pointers protocol: data_ptr is *const *const u8 (array of pointers
+            // into Julia source strings), lengths_ptr is *const i64 (byte lengths per row).
+            // Null and empty rows have a null data pointer and length 0 — no bytes are copied.
             if slice.lengths_ptr.is_null() {
                 return Err(anyhow::anyhow!("String column: lengths_ptr is null"));
             }
             let ptrs =
                 unsafe { std::slice::from_raw_parts(slice.data_ptr as *const *const u8, len) };
             let lens = unsafe { std::slice::from_raw_parts(slice.lengths_ptr, len) };
-            let out_start = state.rows;
             for i in 0..len {
-                let is_null = state.is_nullable && state.has_nulls && {
-                    let pos = out_start + i;
-                    (state.null_bits[pos / 8] >> (pos % 8)) & 1 == 0
-                };
-                if !is_null && !ptrs[i].is_null() {
-                    bytes.extend_from_slice(unsafe {
-                        std::slice::from_raw_parts(ptrs[i], lens[i] as usize)
-                    });
+                let nb = lens[i] as usize;
+                if nb > 0 && !ptrs[i].is_null() {
+                    bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(ptrs[i], nb) });
                 }
                 offsets.push(bytes.len() as i32);
             }
