@@ -53,20 +53,22 @@ pub(crate) struct PipelineStats {
     /// to Arrow IPC wire format for transfer to Julia.
     pub serialize_ns: AtomicU64,
     /// Time a producer (`drain_batch_stream`) is suspended on per-file
-    /// backpressure — either the per-file 100 MB byte semaphore
-    /// (`semaphore.acquire_many`) or the per-file mpsc(8) being full
-    /// (`tx.send`). Both stall the same producer for the same reason
-    /// ("consumer hasn't drained enough"), so they're combined.
+    /// backpressure: any of (a) `byte_sem.acquire_many` (100 MB cap),
+    /// (b) `slot_sem.acquire` (UNATTACHED/ATTACHED batch-slot cap), or
+    /// (c) `tx.send` (per-file mpsc full). All three stall the same producer
+    /// for the same reason ("consumer hasn't drained enough"), so they're
+    /// combined.
     pub producer_stall_ns: AtomicU64,
 
     // ── Producer waits on consumer (Rust ahead, Julia behind) ──
-    /// Time `run_nested` spends in `tx.send(FileScan)` to the outer
-    /// mpsc(prefetch_depth) when it's already full — i.e. Rust has pre-built
-    /// FileScans faster than Julia is calling `next_file_scan` to consume
-    /// them. Producer-side stall at the file-handoff level. Distinct from
-    /// `producer_stall_ns`: that one is per-file (per-batch buffer full
-    /// inside one file's mpsc(8)/100MB); this is per-table (the global
-    /// outer queue connecting Rust to Julia).
+    /// Time the incremental pipeline's `run_nested_pipeline` orchestrator
+    /// spends in `tx.send(FileScan)` to its outer mpsc(prefetch_depth) when
+    /// it's already full — i.e. Rust has pre-built FileScans faster than
+    /// Julia is consuming them. Producer-side stall at the file-handoff
+    /// level. Always 0 for full-scan, which has no outer mpsc (it uses
+    /// `Stream::buffered` instead). Distinct from `producer_stall_ns`:
+    /// that one is per-file (per-batch buffer full inside one file's
+    /// mpsc(8)/100MB); this is per-table.
     pub outer_queue_full_wait_ns: AtomicU64,
 
     // ── Consumer waits on producer (Julia ahead, Rust behind) ──
@@ -75,10 +77,10 @@ pub(crate) struct PipelineStats {
     /// producer hasn't produced one yet. Summed across all per-file streams.
     /// One counterpart of `producer_stall_ns` viewed from the consumer.
     pub consumer_batch_wait_ns: AtomicU64,
-    /// Time spent in the outer `IcebergFileScanStream`'s unfold on
-    /// `rx.recv().await` — Julia called `next_file_scan` but the outer
-    /// mpsc is empty (Rust hasn't pushed the next FileScan yet). One
-    /// counterpart of `outer_queue_full_wait_ns` viewed from the consumer.
+    /// Time spent in the outer `IcebergFileScanStream` waiting on
+    /// `next().await` — Julia called `next_file_scan` but no `FileScan` is
+    /// ready yet. For full-scan: `Stream::buffered(prefetch_depth)` hasn't
+    /// yielded the next file. For incremental: the outer mpsc is empty.
     pub consumer_file_wait_ns: AtomicU64,
 
     // ── Memory ──
@@ -111,8 +113,7 @@ impl PipelineStats {
     }
 
     /// Reset all counters and stamp `pipeline_start_ns` with "now". Called
-    /// from `create_nested_pipeline` (and the flat wrapper) before the
-    /// pipeline kicks off.
+    /// from `create_full_scan_stream` before the pipeline kicks off.
     pub(crate) fn reset(&self) {
         self.pipeline_start_ns
             .store(nanos_since_process_start(), Ordering::Relaxed);
@@ -301,7 +302,7 @@ impl PipelineStats {
                 producer_stall_ms
             )),
             Line::Row(format!(
-                "file send wait:  {:>9.1} ms    (outer queue full, prefetched ahead of Julia)",
+                "file send wait:  {:>9.1} ms    (incremental only: outer mpsc full, prefetched ahead of Julia)",
                 outer_full_ms
             )),
             Line::Sep("consumer-side wait (Julia ahead, waiting on Rust)".to_string()),
@@ -313,7 +314,7 @@ impl PipelineStats {
             Line::Row(format!(
                 "next file wait:  {:>9.1} ms{}",
                 consumer_file_ms,
-                per_file_with_note(consumer_file_ms, "outer mpsc empty")
+                per_file_with_note(consumer_file_ms, "no FileScan ready yet")
             )),
             Line::Sep("memory".to_string()),
             Line::Row(format!(

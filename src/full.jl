@@ -59,7 +59,10 @@ end
 """
     with_data_file_concurrency_limit!(scan::Scan, n::UInt)
 
-Sets the data file concurrency level for the scan.
+No-op for full scans (kept for API stability). The full-scan pipeline derives
+its concurrency from `with_file_prefetch_depth!` only; this entry point is
+retained so existing Julia callers compile unchanged. For `IncrementalScan`
+the equivalent setter is the real knob — see `incremental.jl`.
 """
 function with_data_file_concurrency_limit!(scan::Scan, n::UInt)
     result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_data_file_concurrency_limit(
@@ -209,8 +212,11 @@ end
 """
     with_file_prefetch_depth!(scan::Scan, n::UInt)
 
-Set how many FileScan tasks are queued ahead in the outer FileScanStream.
-Higher values keep the Julia consumer busy but use more memory.
+Set the width of the full-scan pipeline's `Stream::buffered(prefetch_depth)`
+window. Higher values keep the consumer busy and overlap manifest planning
+with reading, but use more memory. `0` = auto (= `cpu_count()`). Full-scan
+only. See the Rust crate's `ordered_file_pipeline` module-level docs for the
+exact cap on alive `process_file` tasks.
 """
 function with_file_prefetch_depth!(scan::Scan, n::UInt)
     result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_file_prefetch_depth(

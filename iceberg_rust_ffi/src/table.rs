@@ -123,9 +123,9 @@ impl RawResponse for IcebergFileScanResponse {
         match payload.flatten() {
             Some(fs) => {
                 // Promote: this file is now attached to a Julia consumer.
-                // Lift the prefetch budget from UNATTACHED_SLOTS (2) to
-                // ATTACHED_SLOTS (8) so the producer can fully fill the
-                // per-file mpsc. See `BufferedBatch::slot_sem` for the policy.
+                // Lift the prefetch budget from UNATTACHED_SLOTS to
+                // ATTACHED_SLOTS so the producer can fully fill the per-file
+                // mpsc. See `BufferedBatch::slot_sem` for the policy.
                 fs.slot_sem.add_permits(
                     crate::ordered_file_pipeline::ATTACHED_SLOTS
                         - crate::ordered_file_pipeline::UNATTACHED_SLOTS,

@@ -31,11 +31,10 @@ pub struct IcebergScan {
     /// Captured when Julia calls with_batch_size. Forwarded to each per-file
     /// ArrowReaderBuilder inside the pipeline.
     pub batch_size: Option<usize>,
-    /// How many parquet files to process concurrently in the pipeline.
-    /// Set by with_data_file_concurrency_limit (0 = auto-detect).
-    pub file_concurrency: usize,
-    /// How many FileScan items to queue in the outer channel of the nested pipeline.
-    /// 0 = use file_concurrency as the default.
+    /// How many FileScan items the full-scan pipeline keeps in flight (i.e.
+    /// `Stream::buffered(prefetch_depth)`). 0 = auto (= cpu_count()). This is
+    /// the only concurrency knob; see `ordered_file_pipeline`'s module-level
+    /// "Concurrency invariant" doc for the cap on alive `process_file` tasks.
     pub file_prefetch_depth: usize,
 }
 
@@ -57,7 +56,6 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
         serialization_concurrency: 0,
         file_io,
         batch_size: None,
-        file_concurrency: 0,
         file_prefetch_depth: 0,
     }))
 }
@@ -66,32 +64,20 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
 
 impl_select_columns!(iceberg_select_columns, IcebergScan);
 
-/// Set file concurrency. Hand-written (not macro-generated) because we need
-/// to both (a) forward the value to the iceberg-rs scan builder and (b)
-/// capture it in `file_concurrency` for our pipeline.
+/// FFI-stable no-op kept for API compatibility with Julia callers. The
+/// full-scan pipeline used to take this as a separate concurrency cap, but
+/// it overlapped with `file_prefetch_depth` and is now replaced by
+/// `Stream::buffered(prefetch_depth)`. The iceberg-rs scan builder's own
+/// `with_data_file_concurrency_limit` only affects `to_arrow()` (which we
+/// don't call — we use `plan_files()` directly), so forwarding is unnecessary.
 #[no_mangle]
 pub extern "C" fn iceberg_scan_with_data_file_concurrency_limit(
     scan: &mut *mut IcebergScan,
-    n: usize,
+    _n: usize,
 ) -> CResult {
     if scan.is_null() || (*scan).is_null() {
         return CResult::Error;
     }
-    let scan_ref = unsafe { Box::from_raw(*scan) };
-    if scan_ref.builder.is_none() {
-        return CResult::Error;
-    }
-    *scan = Box::into_raw(Box::new(IcebergScan {
-        builder: scan_ref
-            .builder
-            .map(|b| b.with_data_file_concurrency_limit(n)),
-        scan: scan_ref.scan,
-        serialization_concurrency: scan_ref.serialization_concurrency,
-        file_io: scan_ref.file_io,
-        batch_size: scan_ref.batch_size,
-        file_concurrency: n,
-        file_prefetch_depth: scan_ref.file_prefetch_depth,
-    }));
     CResult::Ok
 }
 
@@ -142,26 +128,15 @@ impl_scan_builder_method!(
 //      but yields batches in strict file-then-row order.
 
 /// Resolve the pipeline tuning parameters from a configured scan.
-/// Returns `(concurrency, prefetch_depth, file_io, batch_size)`.
-/// A stored value of 0 means "auto": concurrency defaults to available
-/// parallelism; prefetch_depth defaults to concurrency.
-fn resolve_pipeline_params(scan: &IcebergScan) -> (usize, usize, FileIO, Option<usize>) {
-    let concurrency = if scan.file_concurrency == 0 {
-        crate::cpu_count()
-    } else {
-        scan.file_concurrency
-    };
+/// Returns `(prefetch_depth, file_io, batch_size)`. A stored
+/// `file_prefetch_depth` of 0 means "auto" → defaults to `cpu_count()`.
+fn resolve_pipeline_params(scan: &IcebergScan) -> (usize, FileIO, Option<usize>) {
     let prefetch_depth = if scan.file_prefetch_depth == 0 {
-        concurrency
+        crate::cpu_count()
     } else {
         scan.file_prefetch_depth
     };
-    (
-        concurrency,
-        prefetch_depth,
-        scan.file_io.clone(),
-        scan.batch_size,
-    )
+    (prefetch_depth, scan.file_io.clone(), scan.batch_size)
 }
 
 export_runtime_op!(
@@ -176,26 +151,50 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Scan not initialized"));
         }
-        let (concurrency, prefetch_depth, file_io, batch_size) =
-            resolve_pipeline_params(scan_ptr);
-        Ok((scan_ref.as_ref().unwrap(), concurrency, prefetch_depth, file_io, batch_size))
+        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr);
+        Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))
     },
     result_tuple,
     async {
-        let (scan_ref, concurrency, prefetch_depth, file_io, batch_size) = result_tuple;
+        let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
 
         // Collect the ordered file task list from iceberg-rs.
-        use futures::TryStreamExt;
+        use futures::{StreamExt, TryStreamExt};
         let tasks: Vec<iceberg::scan::FileScanTask> =
             scan_ref.plan_files().await?.try_collect().await?;
 
-        // Hand off to the file-parallel pipeline.
-        let stream = crate::ordered_file_pipeline::create_pipeline(
-            tasks, file_io, batch_size, concurrency, prefetch_depth,
+        // Build the nested per-file stream and flatten it into a single
+        // batch stream for the legacy flat FFI API. `try_flatten` propagates
+        // a per-file Err as a single Err item and otherwise concatenates the
+        // inner batch streams in source order.
+        //
+        // The flat path bypasses `iceberg_next_file_scan` entirely, which is
+        // the only other site that promotes `slot_sem` from UNATTACHED_SLOTS
+        // to ATTACHED_SLOTS (see `IcebergFileScanResponse::set_payload` in
+        // `table.rs`). Without an explicit promotion here, every flat-path
+        // producer would stay at UNATTACHED_SLOTS forever, throttling the
+        // pipeline. Since the flat path always drains files immediately
+        // (each is "attached" by construction), promote inline.
+        let nested = crate::ordered_file_pipeline::create_full_scan_stream(
+            tasks, file_io, batch_size, prefetch_depth,
         )
-        .await?;
+        .await;
+        let flat = nested
+            .stream
+            .into_inner()
+            .map_ok(|fs| {
+                fs.slot_sem.add_permits(
+                    crate::ordered_file_pipeline::ATTACHED_SLOTS
+                        - crate::ordered_file_pipeline::UNATTACHED_SLOTS,
+                );
+                fs.stream.stream.into_inner()
+            })
+            .try_flatten()
+            .boxed();
 
-        Ok::<IcebergArrowStream, anyhow::Error>(stream)
+        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
+            stream: tokio::sync::Mutex::new(flat),
+        })
     },
     scan: *mut IcebergScan
 );
@@ -206,8 +205,8 @@ impl_scan_free!(iceberg_scan_free, IcebergScan);
 //
 // Returns an IcebergFileScanStream whose items are per-file (filename,
 // record_count, inner-batch-stream) tuples, yielded in strict file order.
-// The flat iceberg_arrow_stream is implemented as a flattening wrapper over
-// this same nested pipeline.
+// The flat iceberg_arrow_stream above is implemented as a flattening wrapper
+// over this same nested pipeline.
 
 export_runtime_op!(
     iceberg_file_scan_stream,
@@ -221,22 +220,21 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Scan not initialized"));
         }
-        let (concurrency, prefetch_depth, file_io, batch_size) =
-            resolve_pipeline_params(scan_ptr);
-        Ok((scan_ref.as_ref().unwrap(), concurrency, prefetch_depth, file_io, batch_size))
+        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr);
+        Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))
     },
     result_tuple,
     async {
-        let (scan_ref, concurrency, prefetch_depth, file_io, batch_size) = result_tuple;
+        let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
 
         use futures::TryStreamExt;
         let tasks: Vec<iceberg::scan::FileScanTask> =
             scan_ref.plan_files().await?.try_collect().await?;
 
-        let stream = crate::ordered_file_pipeline::create_nested_pipeline(
-            tasks, file_io, batch_size, concurrency, prefetch_depth,
+        let stream = crate::ordered_file_pipeline::create_full_scan_stream(
+            tasks, file_io, batch_size, prefetch_depth,
         )
-        .await?;
+        .await;
 
         Ok::<IcebergFileScanStream, anyhow::Error>(stream)
     },
