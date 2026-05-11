@@ -279,6 +279,40 @@ unsafe fn append_to_state(
     Ok(())
 }
 
+// Bulk-copy or 1-based-scattered-gather a slice of primitive T into buf (no transform).
+// Identity selection → single memcpy; scattered selection → element-wise gather.
+macro_rules! append_primitive {
+    ($buf:expr, $slice:expr, $len:expr, $T:ty) => {{
+        let src = unsafe { std::slice::from_raw_parts($slice.data_ptr as *const $T, $len) };
+        if $slice.sel_ptr.is_null() {
+            $buf.extend_from_slice(unsafe { as_bytes(src) });
+        } else {
+            let sel = unsafe { std::slice::from_raw_parts($slice.sel_ptr, $len) };
+            for &idx in sel {
+                $buf.extend_from_slice(&src[(idx - 1) as usize].to_ne_bytes());
+            }
+        }
+    }};
+}
+
+// Element-wise transform from source type S with optional 1-based scattered gather.
+// `$f` maps S → a value whose `.to_ne_bytes()` is written to buf.
+macro_rules! append_transform {
+    ($buf:expr, $slice:expr, $len:expr, $S:ty, $f:expr) => {{
+        let src = unsafe { std::slice::from_raw_parts($slice.data_ptr as *const $S, $len) };
+        if $slice.sel_ptr.is_null() {
+            for &v in src {
+                $buf.extend_from_slice(&($f)(v).to_ne_bytes());
+            }
+        } else {
+            let sel = unsafe { std::slice::from_raw_parts($slice.sel_ptr, $len) };
+            for &idx in sel {
+                $buf.extend_from_slice(&($f)(src[(idx - 1) as usize]).to_ne_bytes());
+            }
+        }
+    }};
+}
+
 /// Append numeric slice data directly into a `MutableBuffer`.
 /// Identity (sequential) slices use a bulk byte copy; scattered slices loop element-wise.
 unsafe fn append_numeric(
@@ -288,78 +322,20 @@ unsafe fn append_numeric(
     len: usize,
 ) -> Result<(), anyhow::Error> {
     match column_type {
-        COLUMN_TYPE_INT32 | COLUMN_TYPE_DATE => {
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const i32, len) };
-            if slice.sel_ptr.is_null() {
-                buf.extend_from_slice(as_bytes(src));
-            } else {
-                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
-                    buf.extend_from_slice(&src[(idx - 1) as usize].to_ne_bytes());
-                }
-            }
-        }
+        COLUMN_TYPE_INT32 | COLUMN_TYPE_DATE => append_primitive!(buf, slice, len, i32),
         COLUMN_TYPE_INT64 | COLUMN_TYPE_TIMESTAMP | COLUMN_TYPE_TIMESTAMPTZ => {
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const i64, len) };
-            if slice.sel_ptr.is_null() {
-                buf.extend_from_slice(as_bytes(src));
-            } else {
-                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
-                    buf.extend_from_slice(&src[(idx - 1) as usize].to_ne_bytes());
-                }
-            }
+            append_primitive!(buf, slice, len, i64)
         }
-        COLUMN_TYPE_FLOAT32 => {
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const f32, len) };
-            if slice.sel_ptr.is_null() {
-                buf.extend_from_slice(as_bytes(src));
-            } else {
-                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
-                    buf.extend_from_slice(&src[(idx - 1) as usize].to_ne_bytes());
-                }
-            }
-        }
-        COLUMN_TYPE_FLOAT64 => {
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const f64, len) };
-            if slice.sel_ptr.is_null() {
-                buf.extend_from_slice(as_bytes(src));
-            } else {
-                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
-                    buf.extend_from_slice(&src[(idx - 1) as usize].to_ne_bytes());
-                }
-            }
-        }
+        COLUMN_TYPE_FLOAT32 => append_primitive!(buf, slice, len, f32),
+        COLUMN_TYPE_FLOAT64 => append_primitive!(buf, slice, len, f64),
         COLUMN_TYPE_DECIMAL_INT32 => {
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const i32, len) };
-            if slice.sel_ptr.is_null() {
-                for &x in src {
-                    buf.extend_from_slice(&(x as i128).to_ne_bytes());
-                }
-            } else {
-                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
-                    buf.extend_from_slice(&(src[(idx - 1) as usize] as i128).to_ne_bytes());
-                }
-            }
+            append_transform!(buf, slice, len, i32, |x: i32| x as i128)
         }
         COLUMN_TYPE_DECIMAL_INT64 => {
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const i64, len) };
-            if slice.sel_ptr.is_null() {
-                for &x in src {
-                    buf.extend_from_slice(&(x as i128).to_ne_bytes());
-                }
-            } else {
-                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
-                    buf.extend_from_slice(&(src[(idx - 1) as usize] as i128).to_ne_bytes());
-                }
-            }
+            append_transform!(buf, slice, len, i64, |x: i64| x as i128)
         }
         COLUMN_TYPE_DECIMAL_INT128 | COLUMN_TYPE_UUID => {
-            // 16-byte elements
+            // 16-byte elements — no primitive type; copy as raw bytes.
             let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const u8, len * 16) };
             if slice.sel_ptr.is_null() {
                 buf.extend_from_slice(src);
@@ -371,58 +347,25 @@ unsafe fn append_numeric(
                 }
             }
         }
+        // Julia date/timestamp types carry a Julia-epoch offset that Rust removes here.
+        // Source: i64[] days since 0001-01-01 → i32 days since 1970-01-01 (Date32).
         COLUMN_TYPE_JULIA_DATE => {
-            // Source: i64[] of Julia days (since 0001-01-01). Destination: i32 Date32 (since Unix epoch).
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const i64, len) };
-            if slice.sel_ptr.is_null() {
-                for &v in src {
-                    buf.extend_from_slice(&((v - JULIA_DATE_OFFSET) as i32).to_ne_bytes());
-                }
-            } else {
-                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
-                    let v = src[(idx - 1) as usize];
-                    buf.extend_from_slice(&((v - JULIA_DATE_OFFSET) as i32).to_ne_bytes());
-                }
-            }
+            append_transform!(buf, slice, len, i64, |v: i64| (v - JULIA_DATE_OFFSET)
+                as i32)
         }
+        // Source: i64[] ms since 0001-01-01 → i64 μs since 1970-01-01.
         COLUMN_TYPE_JULIA_TIMESTAMP | COLUMN_TYPE_JULIA_TIMESTAMPTZ => {
-            // Source: i64[] of Julia ms (since 0001-01-01). Destination: i64 μs since Unix epoch.
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const i64, len) };
-            if slice.sel_ptr.is_null() {
-                for &v in src {
-                    buf.extend_from_slice(&((v - JULIA_TIMESTAMP_OFFSET_MS) * 1_000).to_ne_bytes());
-                }
-            } else {
-                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
-                    let v = src[(idx - 1) as usize];
-                    buf.extend_from_slice(&((v - JULIA_TIMESTAMP_OFFSET_MS) * 1_000).to_ne_bytes());
-                }
-            }
+            append_transform!(buf, slice, len, i64, |v: i64| (v
+                - JULIA_TIMESTAMP_OFFSET_MS)
+                * 1_000)
         }
+        // Source: i64[] ms since 0001-01-01 → i64 ns since 1970-01-01.
         COLUMN_TYPE_JULIA_TIMESTAMP_NS | COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS => {
-            // Source: i64[] of Julia ms (since 0001-01-01). Destination: i64 ns since Unix epoch.
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const i64, len) };
-            if slice.sel_ptr.is_null() {
-                for &v in src {
-                    buf.extend_from_slice(
-                        &((v - JULIA_TIMESTAMP_OFFSET_MS) * 1_000_000).to_ne_bytes(),
-                    );
-                }
-            } else {
-                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
-                    let v = src[(idx - 1) as usize];
-                    buf.extend_from_slice(
-                        &((v - JULIA_TIMESTAMP_OFFSET_MS) * 1_000_000).to_ne_bytes(),
-                    );
-                }
-            }
+            append_transform!(buf, slice, len, i64, |v: i64| (v
+                - JULIA_TIMESTAMP_OFFSET_MS)
+                * 1_000_000)
         }
-        _ => {
-            return Err(anyhow::anyhow!("unsupported column type {}", column_type));
-        }
+        _ => return Err(anyhow::anyhow!("unsupported column type {}", column_type)),
     }
     Ok(())
 }
@@ -513,7 +456,8 @@ fn build_numeric_array(
             ScalarBuffer::new(buf, 0, rows),
             null_buf,
         )),
-        COLUMN_TYPE_DATE => Arc::new(PrimitiveArray::<Date32Type>::new(
+        // JULIA_DATE stores the epoch-adjusted i32 value; Arrow type is the same as DATE.
+        COLUMN_TYPE_DATE | COLUMN_TYPE_JULIA_DATE => Arc::new(PrimitiveArray::<Date32Type>::new(
             ScalarBuffer::new(buf, 0, rows),
             null_buf,
         )),
@@ -521,11 +465,15 @@ fn build_numeric_array(
             ScalarBuffer::new(buf, 0, rows),
             null_buf,
         )),
-        COLUMN_TYPE_TIMESTAMP => Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(
-            ScalarBuffer::new(buf, 0, rows),
-            null_buf,
-        )),
-        COLUMN_TYPE_TIMESTAMPTZ => Arc::new(
+        // JULIA_TIMESTAMP stores epoch-adjusted μs; Arrow type is the same as TIMESTAMP.
+        COLUMN_TYPE_TIMESTAMP | COLUMN_TYPE_JULIA_TIMESTAMP => {
+            Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(
+                ScalarBuffer::new(buf, 0, rows),
+                null_buf,
+            ))
+        }
+        // JULIA_TIMESTAMPTZ stores epoch-adjusted μs; Arrow type is the same as TIMESTAMPTZ.
+        COLUMN_TYPE_TIMESTAMPTZ | COLUMN_TYPE_JULIA_TIMESTAMPTZ => Arc::new(
             PrimitiveArray::<TimestampMicrosecondType>::new(
                 ScalarBuffer::new(buf, 0, rows),
                 null_buf,
@@ -564,21 +512,6 @@ fn build_numeric_array(
                     .map_err(|e| anyhow::anyhow!("UUID FixedSizeBinary: {}", e))?,
             )
         }
-        COLUMN_TYPE_JULIA_DATE => Arc::new(PrimitiveArray::<Date32Type>::new(
-            ScalarBuffer::new(buf, 0, rows),
-            null_buf,
-        )),
-        COLUMN_TYPE_JULIA_TIMESTAMP => Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(
-            ScalarBuffer::new(buf, 0, rows),
-            null_buf,
-        )),
-        COLUMN_TYPE_JULIA_TIMESTAMPTZ => Arc::new(
-            PrimitiveArray::<TimestampMicrosecondType>::new(
-                ScalarBuffer::new(buf, 0, rows),
-                null_buf,
-            )
-            .with_timezone("UTC"),
-        ),
         COLUMN_TYPE_JULIA_TIMESTAMP_NS => Arc::new(PrimitiveArray::<TimestampNanosecondType>::new(
             ScalarBuffer::new(buf, 0, rows),
             null_buf,
