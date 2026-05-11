@@ -63,15 +63,22 @@ async fn process_incremental_file(
     slot_sem: Arc<Semaphore>,
     tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) {
-    let result: Result<(), iceberg::Error> = async {
-        let batch_stream = read_one_append_file(reader, task)
-            .map_err(|e| unexpected(format!("reader setup: {e}")))?;
-        drain_batch_stream(batch_stream, &byte_sem, &slot_sem, &tx).await
-    }
-    .await;
+    let result = process_incremental_file_inner(task, reader, &byte_sem, &slot_sem, &tx).await;
     if let Err(e) = result {
         let _ = tx.send(Err(e)).await;
     }
+}
+
+async fn process_incremental_file_inner(
+    task: AppendedFileScanTask,
+    reader: ArrowReader,
+    byte_sem: &Arc<Semaphore>,
+    slot_sem: &Arc<Semaphore>,
+    tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
+) -> Result<(), iceberg::Error> {
+    let batch_stream = read_one_append_file(reader, task)
+        .map_err(|e| unexpected(format!("reader setup: {e}")))?;
+    drain_batch_stream(batch_stream, byte_sem, slot_sem, tx).await
 }
 
 /// Spawn one file task. Returns a future that resolves immediately to
@@ -308,8 +315,8 @@ mod tests {
     /// Full end-to-end test for the append path.
     ///
     /// Exercises: `run_incremental_nested` → `spawn_incremental_file_task` →
-    /// `process_incremental_file` → `read_one_append_file` (wraps the task
-    /// in a one-element stream and calls the `StreamsInto` machinery) →
+    /// `process_incremental_file_inner` → `read_one_append_file` (wraps the
+    /// task in a one-element stream and calls the `StreamsInto` machinery) →
     /// Arrow IPC serialization (spawn_blocking) → semaphore backpressure →
     /// `make_file_stream` semaphore release.
     ///

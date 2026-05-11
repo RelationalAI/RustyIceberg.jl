@@ -15,7 +15,7 @@
 //!   3. Serializes each batch to Arrow IPC (on Tokio's blocking thread pool)
 //!   4. Sends serialized batches into a per-file mpsc channel
 //!
-//! For full scans, `create_full_scan_stream` drives the spawn rate via
+//! For full scans, `create_nested_pipeline` drives the spawn rate via
 //! `futures::stream::iter(tasks).map(start_file_task).buffered(prefetch_depth)`.
 //! Each `FileScan` wraps its file's batch channel as an `IcebergArrowStream`
 //! with integrated semaphore-permit release.
@@ -50,7 +50,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arrow_array::RecordBatch;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use iceberg::arrow::ArrowReaderBuilder;
 use iceberg::io::FileIO;
 use iceberg::scan::FileScanTask;
@@ -162,7 +162,7 @@ where
 /// `Stream::buffered(prefetch_depth)` over a synchronous spawn factory.
 /// See the module-level "Concurrency invariant" doc for the bound on alive
 /// `process_file` tasks.
-pub async fn create_full_scan_stream(
+pub async fn create_nested_pipeline(
     tasks: Vec<FileScanTask>,
     file_io: FileIO,
     batch_size: Option<usize>,
@@ -190,6 +190,38 @@ pub async fn create_full_scan_stream(
 
     IcebergFileScanStream {
         stream: AsyncMutex::new(timed),
+    }
+}
+
+/// Build the flat (concatenated) per-batch stream used by the legacy
+/// `iceberg_arrow_stream` FFI. Implemented as `create_nested_pipeline +
+/// try_flatten` so the nested pipeline's ordering and backpressure logic
+/// applies unchanged.
+///
+/// The flat path bypasses `iceberg_next_file_scan`, which is the FFI
+/// handoff that promotes `slot_sem` from UNATTACHED_SLOTS to ATTACHED_SLOTS
+/// (see `IcebergFileScanResponse::set_payload` in `table.rs`). Without an
+/// explicit promotion here every flat-path producer would stay at
+/// UNATTACHED_SLOTS forever; since the flat path always drains each file
+/// immediately (i.e. each is "attached" by construction), promote inline.
+pub async fn create_pipeline(
+    tasks: Vec<FileScanTask>,
+    file_io: FileIO,
+    batch_size: Option<usize>,
+    prefetch_depth: usize,
+) -> IcebergArrowStream {
+    let nested = create_nested_pipeline(tasks, file_io, batch_size, prefetch_depth).await;
+    let flat = nested
+        .stream
+        .into_inner()
+        .map_ok(|fs| {
+            fs.slot_sem.add_permits(ATTACHED_SLOTS - UNATTACHED_SLOTS);
+            fs.stream.stream.into_inner()
+        })
+        .try_flatten()
+        .boxed();
+    IcebergArrowStream {
+        stream: AsyncMutex::new(flat),
     }
 }
 
@@ -226,7 +258,7 @@ fn start_file_task(task: FileScanTask, file_io: FileIO, batch_size: Option<usize
 }
 
 /// Generic `FuturesUnordered` orchestrator used by the incremental append
-/// pipeline (the full-scan path uses `create_full_scan_stream` directly).
+/// pipeline (the full-scan path uses `create_nested_pipeline` directly).
 ///
 /// Keeps `concurrency` file tasks in flight from `task_stream`, wraps each
 /// completed receiver as an `IcebergArrowStream` via `make_file_stream`, and
@@ -322,15 +354,10 @@ pub(crate) async fn run_nested_pipeline<T, S, SpawnFut, F>(
     }
 }
 
-/// Process a single parquet file through four timed phases:
-///   1. Reader setup — build ArrowReader, open file, resolve schema
-///   2. Fetch + decode — I/O, ZSTD decompression, column assembly
-///   3. Serialize — RecordBatch → Arrow IPC for transfer to Julia
-///   4. Backpressure — wait on semaphore if buffered too far ahead
-///
-/// Each phase's cumulative time is recorded in STATS for the summary. When
-/// this function returns, `tx` is dropped, causing the consumer's
-/// `file_rx.recv()` to return None — signaling that this file is done.
+/// Wrapper around process_file_inner that ensures errors are sent to the
+/// channel and stats are updated even on failure. When this function
+/// returns, `tx` is dropped, causing the consumer's `file_rx.recv()` to
+/// return None — signaling that this file is done.
 async fn process_file(
     task: FileScanTask,
     file_io: FileIO,
@@ -340,29 +367,44 @@ async fn process_file(
     tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) {
     STATS.track_task_start();
-    let result: Result<(), iceberg::Error> = async {
-        // ── Phase 1: Reader setup ───────────────────────────────────────
-        // Builds a per-file ArrowReader using the same iceberg-rs code path
-        // as to_arrow(): opens parquet metadata, resolves schema, loads
-        // delete files, builds row filters. with_data_file_concurrency_limit(1)
-        // means this reader processes one file (the one we give it).
-        let setup_start = Instant::now();
-        let mut builder = ArrowReaderBuilder::new(file_io).with_data_file_concurrency_limit(1);
-        if let Some(bs) = batch_size {
-            builder = builder.with_batch_size(bs);
-        }
-        let reader = builder.build();
-        let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
-        let batch_stream = reader.read(task_stream).map_err(|e| unexpected(e))?;
-        STATS.add_elapsed(&STATS.reader_setup_ns, setup_start);
-
-        drain_batch_stream(batch_stream, &byte_sem, &slot_sem, &tx).await
-    }
-    .await;
+    let result = process_file_inner(task, file_io, batch_size, &byte_sem, &slot_sem, &tx).await;
     if let Err(e) = result {
         let _ = tx.send(Err(e)).await;
     }
     STATS.track_task_end();
+}
+
+/// Process a single parquet file through four timed phases:
+///   1. Reader setup — build ArrowReader, open file, resolve schema
+///   2. Fetch + decode — I/O, ZSTD decompression, column assembly
+///   3. Serialize — RecordBatch → Arrow IPC for transfer to Julia
+///   4. Backpressure — wait on semaphore if buffered too far ahead
+///
+/// Each phase's cumulative time is recorded in STATS for the summary.
+async fn process_file_inner(
+    task: FileScanTask,
+    file_io: FileIO,
+    batch_size: Option<usize>,
+    byte_sem: &Arc<Semaphore>,
+    slot_sem: &Arc<Semaphore>,
+    tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
+) -> Result<(), iceberg::Error> {
+    // ── Phase 1: Reader setup ───────────────────────────────────────────
+    // Builds a per-file ArrowReader using the same iceberg-rs code path as
+    // to_arrow(): opens parquet metadata, resolves schema, loads delete
+    // files, builds row filters. with_data_file_concurrency_limit(1) means
+    // this reader processes one file (the one we give it).
+    let setup_start = Instant::now();
+    let mut builder = ArrowReaderBuilder::new(file_io).with_data_file_concurrency_limit(1);
+    if let Some(bs) = batch_size {
+        builder = builder.with_batch_size(bs);
+    }
+    let reader = builder.build();
+    let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
+    let batch_stream = reader.read(task_stream).map_err(|e| unexpected(e))?;
+    STATS.add_elapsed(&STATS.reader_setup_ns, setup_start);
+
+    drain_batch_stream(batch_stream, byte_sem, slot_sem, tx).await
 }
 
 /// Drain a batch stream through phases 2-4 of the file pipeline, recording
@@ -470,10 +512,18 @@ pub(crate) async fn drain_batch_stream(
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::sync::LazyLock;
 
     use super::*;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// Serialise pipeline-level tests so they don't race on the process-global
+    /// `STATS` (e.g. `peak_concurrency`). Tests that drive a full pipeline
+    /// (vs the orchestrator-stub tests that pass `spawn_empty`/`spawn_failing`)
+    /// acquire this lock for their duration.
+    static PIPELINE_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     type SpawnOutput = iceberg::Result<(
         String,
@@ -726,6 +776,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_pipeline_reads_parquet_file() {
+        let _guard = PIPELINE_TEST_LOCK.lock().await;
         use arrow_array::{Int32Array, RecordBatch};
         use arrow_ipc::reader::StreamReader;
         use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
@@ -797,10 +848,10 @@ mod tests {
         };
 
         // ── 5. Run the full pipeline ───────────────────────────────────────
-        // Exercises: create_full_scan_stream → start_file_task → process_file
+        // Exercises: create_nested_pipeline → start_file_task → process_file
         //   (reader setup, fetch/decode, serialize IPC, semaphore acquire)
         //   → make_file_stream (semaphore release)
-        let nested = create_full_scan_stream(vec![task], file_io, None, 1).await;
+        let nested = create_nested_pipeline(vec![task], file_io, None, 1).await;
 
         // ── 6. Drain outer FileScanStream ──────────────────────────────────
         let mut outer = nested.stream.lock().await;
@@ -831,7 +882,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_full_scan_stream_caps_in_flight_at_prefetch_depth_plus_one() {
+    async fn flat_pipeline_reads_multiple_parquet_files() {
+        let _guard = PIPELINE_TEST_LOCK.lock().await;
+        // Exercises the legacy flat FFI path (`create_pipeline` →
+        // `try_flatten` over the nested stream) across 10 in-memory parquet
+        // files. This is the multi-file analogue of `full_pipeline_reads_parquet_file`
+        // (which only covers the nested path with one file). batch_size=1
+        // turns each 3-row file into 3 batches so we also exercise the
+        // per-batch backpressure cycle on the flat path (the inline
+        // `slot_sem.add_permits` promotion in `create_pipeline` plus the
+        // per-batch permit release in `make_file_stream`). Assert all 30
+        // rows arrive in 30 batches.
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_ipc::reader::StreamReader;
+        use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
+        use bytes::Bytes;
+        use iceberg::io::FileIO;
+        use iceberg::scan::FileScanTask;
+        use iceberg::spec::{
+            DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type,
+        };
+        use parquet::arrow::ArrowWriter;
+        use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+        use std::collections::HashMap;
+
+        let arrow_field = ArrowField::new("id", DataType::Int32, false).with_metadata(
+            HashMap::from([(PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string())]),
+        );
+        let arrow_schema = std::sync::Arc::new(ArrowSchema::new(vec![arrow_field]));
+        let batch = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![std::sync::Arc::new(Int32Array::from(vec![10, 20, 30]))],
+        )
+        .unwrap();
+        let mut buf = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buf, arrow_schema.clone(), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let parquet_bytes = Bytes::from(buf);
+        let file_size = parquet_bytes.len() as u64;
+
+        let iceberg_schema = std::sync::Arc::new(
+            IcebergSchema::builder()
+                .with_fields(vec![std::sync::Arc::new(NestedField::required(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Int),
+                ))])
+                .build()
+                .unwrap(),
+        );
+
+        let file_io = FileIO::new_with_memory();
+        let mut tasks = Vec::with_capacity(10);
+        for i in 0..10 {
+            let path = format!("memory:///flat_test/data-{i}.parquet");
+            file_io
+                .new_output(&path)
+                .unwrap()
+                .write(parquet_bytes.clone())
+                .await
+                .unwrap();
+            tasks.push(FileScanTask {
+                data_file_path: path,
+                file_size_in_bytes: file_size,
+                start: 0,
+                length: file_size,
+                record_count: Some(3),
+                data_file_format: DataFileFormat::Parquet,
+                schema: iceberg_schema.clone(),
+                project_field_ids: vec![1],
+                predicate: None,
+                deletes: vec![],
+                partition: None,
+                partition_spec: None,
+                name_mapping: None,
+                case_sensitive: false,
+            });
+        }
+
+        // Run the flat pipeline. batch_size=1 forces 3 batches per file so
+        // each unattached producer parks on slot_sem.acquire() after batch 1;
+        // the test then verifies that the inline `slot_sem.add_permits`
+        // promotion in `create_pipeline` lets all 30 rows drain. Without it
+        // each producer would stall after one batch and the test would hang.
+        let flat = create_pipeline(tasks, file_io, Some(1), 2).await;
+
+        // Drain all batches and verify total row count + per-batch payload.
+        let mut stream = flat.stream.lock().await;
+        let mut total_rows = 0usize;
+        let mut batches_seen = 0usize;
+        while let Some(item) = stream.next().await {
+            let arrow_batch = item.unwrap();
+            let data =
+                unsafe { std::slice::from_raw_parts(arrow_batch.data, arrow_batch.length) };
+            let mut reader = StreamReader::try_new(std::io::Cursor::new(data), None).unwrap();
+            let decoded = reader.next().unwrap().unwrap();
+            total_rows += decoded.num_rows();
+            batches_seen += 1;
+            // Release the Vec<u8> allocated by serialize_record_batch.
+            unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut Vec<u8>)) };
+        }
+        assert_eq!(batches_seen, 30, "expected 3 batches per file × 10 files");
+        assert_eq!(total_rows, 30, "expected 30 rows total (10 files × 3 rows)");
+    }
+
+    #[tokio::test]
+    async fn create_nested_pipeline_caps_in_flight_at_prefetch_depth_plus_one() {
+        let _guard = PIPELINE_TEST_LOCK.lock().await;
         // Verify the single-consumer slice of the concurrency invariant
         // (see module-level "Concurrency invariant" doc): with one FileScan
         // pulled out and held, alive `process_file` tasks ≤ prefetch_depth + 1.
@@ -919,7 +1077,7 @@ mod tests {
         let prefetch_depth = 2;
         // batch_size=1 → 3 batches/file → producers actually park on slot_sem
         // (UNATTACHED_SLOTS=1) after batch 1 instead of finishing instantly.
-        let nested = create_full_scan_stream(tasks, file_io, Some(1), prefetch_depth).await;
+        let nested = create_nested_pipeline(tasks, file_io, Some(1), prefetch_depth).await;
 
         // Pull the first FileScan (the "+1"). Don't drain its inner stream —
         // its producer stays alive parked on slot_sem after one ATTACHED_SLOTS

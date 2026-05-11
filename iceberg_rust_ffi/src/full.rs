@@ -31,6 +31,13 @@ pub struct IcebergScan {
     /// Captured when Julia calls with_batch_size. Forwarded to each per-file
     /// ArrowReaderBuilder inside the pipeline.
     pub batch_size: Option<usize>,
+    /// Dead field kept for shape-symmetry with `IncrementalScan` (which
+    /// still uses `file_concurrency`). The full-scan FFI setter
+    /// `iceberg_scan_with_data_file_concurrency_limit` is a no-op and
+    /// does not write here; nothing reads this. Removing it would force
+    /// `scan_common.rs` macros to switch to functional-record-update
+    /// just to skip one field on one of the two structs they handle.
+    pub file_concurrency: usize,
     /// How many FileScan items the full-scan pipeline keeps in flight (i.e.
     /// `Stream::buffered(prefetch_depth)`). 0 = auto (= cpu_count()). This is
     /// the only concurrency knob; see `ordered_file_pipeline`'s module-level
@@ -56,6 +63,7 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
         serialization_concurrency: 0,
         file_io,
         batch_size: None,
+        file_concurrency: 0,
         file_prefetch_depth: 0,
     }))
 }
@@ -159,42 +167,17 @@ export_runtime_op!(
         let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
 
         // Collect the ordered file task list from iceberg-rs.
-        use futures::{StreamExt, TryStreamExt};
+        use futures::TryStreamExt;
         let tasks: Vec<iceberg::scan::FileScanTask> =
             scan_ref.plan_files().await?.try_collect().await?;
 
-        // Build the nested per-file stream and flatten it into a single
-        // batch stream for the legacy flat FFI API. `try_flatten` propagates
-        // a per-file Err as a single Err item and otherwise concatenates the
-        // inner batch streams in source order.
-        //
-        // The flat path bypasses `iceberg_next_file_scan` entirely, which is
-        // the only other site that promotes `slot_sem` from UNATTACHED_SLOTS
-        // to ATTACHED_SLOTS (see `IcebergFileScanResponse::set_payload` in
-        // `table.rs`). Without an explicit promotion here, every flat-path
-        // producer would stay at UNATTACHED_SLOTS forever, throttling the
-        // pipeline. Since the flat path always drains files immediately
-        // (each is "attached" by construction), promote inline.
-        let nested = crate::ordered_file_pipeline::create_full_scan_stream(
+        // Hand off to the file-parallel pipeline.
+        let stream = crate::ordered_file_pipeline::create_pipeline(
             tasks, file_io, batch_size, prefetch_depth,
         )
         .await;
-        let flat = nested
-            .stream
-            .into_inner()
-            .map_ok(|fs| {
-                fs.slot_sem.add_permits(
-                    crate::ordered_file_pipeline::ATTACHED_SLOTS
-                        - crate::ordered_file_pipeline::UNATTACHED_SLOTS,
-                );
-                fs.stream.stream.into_inner()
-            })
-            .try_flatten()
-            .boxed();
 
-        Ok::<IcebergArrowStream, anyhow::Error>(IcebergArrowStream {
-            stream: tokio::sync::Mutex::new(flat),
-        })
+        Ok::<IcebergArrowStream, anyhow::Error>(stream)
     },
     scan: *mut IcebergScan
 );
@@ -231,7 +214,7 @@ export_runtime_op!(
         let tasks: Vec<iceberg::scan::FileScanTask> =
             scan_ref.plan_files().await?.try_collect().await?;
 
-        let stream = crate::ordered_file_pipeline::create_full_scan_stream(
+        let stream = crate::ordered_file_pipeline::create_nested_pipeline(
             tasks, file_io, batch_size, prefetch_depth,
         )
         .await;

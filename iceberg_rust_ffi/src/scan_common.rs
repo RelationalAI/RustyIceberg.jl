@@ -36,7 +36,12 @@ macro_rules! impl_select_columns {
             }
             *scan = Box::into_raw(Box::new($scan_type {
                 builder: scan_ref.builder.map(|b| b.select(columns)),
-                ..*scan_ref
+                scan: scan_ref.scan,
+                serialization_concurrency: scan_ref.serialization_concurrency,
+                file_io: scan_ref.file_io,
+                batch_size: scan_ref.batch_size,
+                file_concurrency: scan_ref.file_concurrency,
+                file_prefetch_depth: scan_ref.file_prefetch_depth,
             }));
 
             CResult::Ok
@@ -81,7 +86,12 @@ macro_rules! impl_scan_builder_method {
 
             *scan = Box::into_raw(Box::new($scan_type {
                 builder: scan_ref.builder.map(|b| b.$builder_method($($param),*)),
-                ..*scan_ref
+                scan: scan_ref.scan,
+                serialization_concurrency: scan_ref.serialization_concurrency,
+                file_io: scan_ref.file_io,
+                batch_size: scan_ref.batch_size,
+                file_concurrency: scan_ref.file_concurrency,
+                file_prefetch_depth: scan_ref.file_prefetch_depth,
             }));
 
             CResult::Ok
@@ -107,8 +117,12 @@ macro_rules! impl_with_batch_size {
 
             *scan = Box::into_raw(Box::new($scan_type {
                 builder: scan_ref.builder.map(|b| b.with_batch_size(Some(n))),
+                scan: None,
+                serialization_concurrency: scan_ref.serialization_concurrency,
+                file_io: scan_ref.file_io,
                 batch_size: Some(n),
-                ..*scan_ref
+                file_concurrency: scan_ref.file_concurrency,
+                file_prefetch_depth: scan_ref.file_prefetch_depth,
             }));
 
             CResult::Ok
@@ -135,7 +149,11 @@ macro_rules! impl_scan_build {
                     *scan = Box::into_raw(Box::new($scan_type {
                         builder: None,
                         scan: Some(built_scan),
-                        ..*scan_ref
+                        serialization_concurrency: scan_ref.serialization_concurrency,
+                        file_io: scan_ref.file_io,
+                        batch_size: scan_ref.batch_size,
+                        file_concurrency: scan_ref.file_concurrency,
+                        file_prefetch_depth: scan_ref.file_prefetch_depth,
                     }));
                     CResult::Ok
                 }

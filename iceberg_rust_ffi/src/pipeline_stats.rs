@@ -113,7 +113,7 @@ impl PipelineStats {
     }
 
     /// Reset all counters and stamp `pipeline_start_ns` with "now". Called
-    /// from `create_full_scan_stream` before the pipeline kicks off.
+    /// from `create_nested_pipeline` before the pipeline kicks off.
     pub(crate) fn reset(&self) {
         self.pipeline_start_ns
             .store(nanos_since_process_start(), Ordering::Relaxed);
