@@ -17,8 +17,7 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    types::*,
-    ArrayRef, BooleanArray, FixedSizeBinaryArray, PrimitiveArray, StringArray,
+    types::*, ArrayRef, BooleanArray, FixedSizeBinaryArray, PrimitiveArray, StringArray,
 };
 use arrow_buffer::{BooleanBuffer, Buffer, MutableBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -26,10 +25,10 @@ use arrow_schema::SchemaRef as ArrowSchemaRef;
 use crate::writer::{submit_batch, IcebergDataFileWriter, GLOBAL_ENCODE_POOL};
 use crate::writer_columns::{
     SliceRef, COLUMN_TYPE_BOOLEAN, COLUMN_TYPE_DATE, COLUMN_TYPE_DECIMAL_INT128,
-    COLUMN_TYPE_DECIMAL_INT32, COLUMN_TYPE_DECIMAL_INT64, COLUMN_TYPE_FLOAT32,
-    COLUMN_TYPE_FLOAT64, COLUMN_TYPE_INT32, COLUMN_TYPE_INT64, COLUMN_TYPE_JULIA_DATE,
-    COLUMN_TYPE_JULIA_TIMESTAMP, COLUMN_TYPE_JULIA_TIMESTAMPTZ, COLUMN_TYPE_JULIA_TIMESTAMP_NS,
-    COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS, COLUMN_TYPE_STRING, COLUMN_TYPE_TIMESTAMP,
+    COLUMN_TYPE_DECIMAL_INT32, COLUMN_TYPE_DECIMAL_INT64, COLUMN_TYPE_FLOAT32, COLUMN_TYPE_FLOAT64,
+    COLUMN_TYPE_INT32, COLUMN_TYPE_INT64, COLUMN_TYPE_JULIA_DATE, COLUMN_TYPE_JULIA_TIMESTAMP,
+    COLUMN_TYPE_JULIA_TIMESTAMPTZ, COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS,
+    COLUMN_TYPE_JULIA_TIMESTAMP_NS, COLUMN_TYPE_STRING, COLUMN_TYPE_TIMESTAMP,
     COLUMN_TYPE_TIMESTAMPTZ, COLUMN_TYPE_UUID,
 };
 
@@ -45,12 +44,20 @@ const DEFAULT_COALESCE_ROWS: usize = 1_048_576;
 /// Bytes per row for numeric column types (0 for Bool/Str which are not Numeric).
 fn column_bytes_per_row(column_type: i32) -> usize {
     match column_type {
-        COLUMN_TYPE_INT32 | COLUMN_TYPE_DATE | COLUMN_TYPE_FLOAT32
-        | COLUMN_TYPE_DECIMAL_INT32 | COLUMN_TYPE_JULIA_DATE => 4,
-        COLUMN_TYPE_INT64 | COLUMN_TYPE_TIMESTAMP | COLUMN_TYPE_TIMESTAMPTZ
-        | COLUMN_TYPE_FLOAT64 | COLUMN_TYPE_DECIMAL_INT64
-        | COLUMN_TYPE_JULIA_TIMESTAMP | COLUMN_TYPE_JULIA_TIMESTAMPTZ
-        | COLUMN_TYPE_JULIA_TIMESTAMP_NS | COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS => 8,
+        COLUMN_TYPE_INT32
+        | COLUMN_TYPE_DATE
+        | COLUMN_TYPE_FLOAT32
+        | COLUMN_TYPE_DECIMAL_INT32
+        | COLUMN_TYPE_JULIA_DATE => 4,
+        COLUMN_TYPE_INT64
+        | COLUMN_TYPE_TIMESTAMP
+        | COLUMN_TYPE_TIMESTAMPTZ
+        | COLUMN_TYPE_FLOAT64
+        | COLUMN_TYPE_DECIMAL_INT64
+        | COLUMN_TYPE_JULIA_TIMESTAMP
+        | COLUMN_TYPE_JULIA_TIMESTAMPTZ
+        | COLUMN_TYPE_JULIA_TIMESTAMP_NS
+        | COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS => 8,
         COLUMN_TYPE_DECIMAL_INT128 | COLUMN_TYPE_UUID => 16,
         _ => 0,
     }
@@ -69,7 +76,7 @@ enum ColumnValues {
     Bool(Vec<u8>),          // BOOLEAN — 1 byte per row; bit-packed at finalize
     Str {
         bytes: Vec<u8>,
-        offsets: Vec<i32>,  // Arrow offset buffer; offsets[0] = 0 always
+        offsets: Vec<i32>, // Arrow offset buffer; offsets[0] = 0 always
     },
 }
 
@@ -146,11 +153,13 @@ impl ColumnBatchBuilder {
         let columns = col_types
             .iter()
             .zip(arrow_schema.fields().iter())
-            .map(|(&ct, field)| {
-                ColumnBuilderState::new(ct, field.is_nullable(), coalesce_rows)
-            })
+            .map(|(&ct, field)| ColumnBuilderState::new(ct, field.is_nullable(), coalesce_rows))
             .collect();
-        Ok(Self { columns, arrow_schema, coalesce_rows })
+        Ok(Self {
+            columns,
+            arrow_schema,
+            coalesce_rows,
+        })
     }
 
     pub(crate) unsafe fn append_slice(&mut self, slices: &[SliceRef]) -> Result<(), anyhow::Error> {
@@ -247,18 +256,15 @@ unsafe fn append_to_state(
             if slice.lengths_ptr.is_null() {
                 return Err(anyhow::anyhow!("String column: lengths_ptr is null"));
             }
-            let ptrs = unsafe {
-                std::slice::from_raw_parts(slice.data_ptr as *const *const u8, len)
-            };
+            let ptrs =
+                unsafe { std::slice::from_raw_parts(slice.data_ptr as *const *const u8, len) };
             let lens = unsafe { std::slice::from_raw_parts(slice.lengths_ptr, len) };
             let out_start = state.rows;
             for i in 0..len {
-                let is_null = state.is_nullable
-                    && state.has_nulls
-                    && {
-                        let pos = out_start + i;
-                        (state.null_bits[pos / 8] >> (pos % 8)) & 1 == 0
-                    };
+                let is_null = state.is_nullable && state.has_nulls && {
+                    let pos = out_start + i;
+                    (state.null_bits[pos / 8] >> (pos % 8)) & 1 == 0
+                };
                 if !is_null && !ptrs[i].is_null() {
                     bytes.extend_from_slice(unsafe {
                         std::slice::from_raw_parts(ptrs[i], lens[i] as usize)
@@ -354,8 +360,7 @@ unsafe fn append_numeric(
         }
         COLUMN_TYPE_DECIMAL_INT128 | COLUMN_TYPE_UUID => {
             // 16-byte elements
-            let src =
-                unsafe { std::slice::from_raw_parts(slice.data_ptr as *const u8, len * 16) };
+            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const u8, len * 16) };
             if slice.sel_ptr.is_null() {
                 buf.extend_from_slice(src);
             } else {
@@ -516,12 +521,10 @@ fn build_numeric_array(
             ScalarBuffer::new(buf, 0, rows),
             null_buf,
         )),
-        COLUMN_TYPE_TIMESTAMP => Arc::new(
-            PrimitiveArray::<TimestampMicrosecondType>::new(
-                ScalarBuffer::new(buf, 0, rows),
-                null_buf,
-            ),
-        ),
+        COLUMN_TYPE_TIMESTAMP => Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(
+            ScalarBuffer::new(buf, 0, rows),
+            null_buf,
+        )),
         COLUMN_TYPE_TIMESTAMPTZ => Arc::new(
             PrimitiveArray::<TimestampMicrosecondType>::new(
                 ScalarBuffer::new(buf, 0, rows),
@@ -565,21 +568,34 @@ fn build_numeric_array(
             ScalarBuffer::new(buf, 0, rows),
             null_buf,
         )),
-        COLUMN_TYPE_JULIA_TIMESTAMP => Arc::new(
-            PrimitiveArray::<TimestampMicrosecondType>::new(ScalarBuffer::new(buf, 0, rows), null_buf),
-        ),
+        COLUMN_TYPE_JULIA_TIMESTAMP => Arc::new(PrimitiveArray::<TimestampMicrosecondType>::new(
+            ScalarBuffer::new(buf, 0, rows),
+            null_buf,
+        )),
         COLUMN_TYPE_JULIA_TIMESTAMPTZ => Arc::new(
-            PrimitiveArray::<TimestampMicrosecondType>::new(ScalarBuffer::new(buf, 0, rows), null_buf)
-                .with_timezone("UTC"),
+            PrimitiveArray::<TimestampMicrosecondType>::new(
+                ScalarBuffer::new(buf, 0, rows),
+                null_buf,
+            )
+            .with_timezone("UTC"),
         ),
-        COLUMN_TYPE_JULIA_TIMESTAMP_NS => Arc::new(
-            PrimitiveArray::<TimestampNanosecondType>::new(ScalarBuffer::new(buf, 0, rows), null_buf),
-        ),
+        COLUMN_TYPE_JULIA_TIMESTAMP_NS => Arc::new(PrimitiveArray::<TimestampNanosecondType>::new(
+            ScalarBuffer::new(buf, 0, rows),
+            null_buf,
+        )),
         COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS => Arc::new(
-            PrimitiveArray::<TimestampNanosecondType>::new(ScalarBuffer::new(buf, 0, rows), null_buf)
-                .with_timezone("UTC"),
+            PrimitiveArray::<TimestampNanosecondType>::new(
+                ScalarBuffer::new(buf, 0, rows),
+                null_buf,
+            )
+            .with_timezone("UTC"),
         ),
-        ct => return Err(anyhow::anyhow!("unsupported column type {} in finalize", ct)),
+        ct => {
+            return Err(anyhow::anyhow!(
+                "unsupported column type {} in finalize",
+                ct
+            ))
+        }
     })
 }
 
@@ -597,8 +613,8 @@ fn set_bits_range(bits: &mut [u8], start: usize, end: usize) {
         // All bits in the same byte: set bits [fi, li].
         bits[fb] |= ((1u16 << (li + 1)) - 1) as u8 & (0xFF_u8 << fi);
     } else {
-        bits[fb] |= 0xFF_u8 << fi;            // partial first byte: bits [fi, 7]
-        bits[(fb + 1)..lb].fill(0xFF);         // full middle bytes
+        bits[fb] |= 0xFF_u8 << fi; // partial first byte: bits [fi, 7]
+        bits[(fb + 1)..lb].fill(0xFF); // full middle bytes
         bits[lb] |= ((1u16 << (li + 1)) - 1) as u8; // partial last byte: bits [0, li]
     }
 }

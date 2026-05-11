@@ -1250,9 +1250,10 @@ end
         @test sorted_ids == Int64[1, 2, 3, 4]
         println("✅ id values correct")
 
+        # sel=[2,1] on [99.9, 3.3, 88.8] → row0=src[2]=3.3 (valid), row1=src[1]=99.9 (null)
         @test !ismissing(sorted_scores[1]) && sorted_scores[1] ≈ 1.1
-        @test ismissing(sorted_scores[2])
-        @test !ismissing(sorted_scores[3]) && sorted_scores[3] ≈ 3.3
+        @test !ismissing(sorted_scores[2]) && sorted_scores[2] ≈ 3.3
+        @test ismissing(sorted_scores[3])
         @test ismissing(sorted_scores[4])
         println("✅ score values correct (including nulls and scattered access)")
 
@@ -1450,11 +1451,13 @@ end
         @test length(tbl.id) == 1
 
         row = tbl[1]
-        @test Int64(row.event_date.x) == 19723
-        println("✅ event_date = $(row.event_date.x) (expected 19723)")
+        # Arrow.jl collect() returns Dates.Date / Dates.DateTime for date/timestamp columns.
+        # If the epoch offset is correct, these should round-trip to the original calendar values.
+        @test row.event_date == Dates.Date(2024, 1, 1)
+        println("✅ event_date = $(row.event_date) (expected 2024-01-01)")
 
-        @test row.event_ts.x == 1_704_067_200_000_000
-        println("✅ event_ts = $(row.event_ts.x) (expected 1_704_067_200_000_000 μs)")
+        @test row.event_ts == Dates.DateTime(2024, 1, 1, 0, 0, 0)
+        println("✅ event_ts = $(row.event_ts) (expected 2024-01-01T00:00:00)")
 
         RustyIceberg.free_table(updated_table)
 
