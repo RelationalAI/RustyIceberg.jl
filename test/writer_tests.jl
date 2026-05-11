@@ -1450,13 +1450,13 @@ end
         @test tbl !== nothing
         @test length(tbl.id) == 1
 
-        # Arrow.jl collect() returns Dates.Date / Dates.DateTime for date/timestamp columns.
-        # If the epoch offset is correct, these should round-trip to the original calendar values.
-        @test tbl.event_date[1] == Dates.Date(2024, 1, 1)
-        println("✅ event_date = $(tbl.event_date[1]) (expected 2024-01-01)")
+        # Arrow.jl returns Arrow.Date / Arrow.Timestamp wrappers with a raw integer in .x.
+        # Check the raw values directly to verify the Julia→Unix epoch offset is correct.
+        @test tbl.event_date[1].x == Int32(19723)     # 2024-01-01 = day 19723 since 1970-01-01
+        println("✅ event_date.x = $(tbl.event_date[1].x) (expected 19723)")
 
-        @test tbl.event_ts[1] == Dates.DateTime(2024, 1, 1, 0, 0, 0)
-        println("✅ event_ts = $(tbl.event_ts[1]) (expected 2024-01-01T00:00:00)")
+        @test tbl.event_ts[1].x == Int64(1_704_067_200_000_000)  # 2024-01-01T00:00:00 in μs
+        println("✅ event_ts.x = $(tbl.event_ts[1].x) (expected 1_704_067_200_000_000)")
 
         RustyIceberg.free_table(updated_table)
 
