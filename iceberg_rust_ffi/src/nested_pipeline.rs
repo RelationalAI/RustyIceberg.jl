@@ -553,7 +553,12 @@ mod tests {
         let got = collect_filescans(items, 1).await;
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].as_ref().unwrap(), &("a.parquet".to_string(), 1));
-        assert!(got[1].as_ref().err().unwrap().to_string().contains("drain error"));
+        assert!(got[1]
+            .as_ref()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("drain error"));
     }
 
     /// If a per-pipeline `build_batch_stream` closure returns `Err` (e.g.
@@ -586,7 +591,10 @@ mod tests {
             "unexpected error message: {err}"
         );
         // Then the inner stream closes (process_file's tx is dropped).
-        assert!(inner.next().await.is_none(), "stream did not close after Err");
+        assert!(
+            inner.next().await.is_none(),
+            "stream did not close after Err"
+        );
     }
 
     #[tokio::test]

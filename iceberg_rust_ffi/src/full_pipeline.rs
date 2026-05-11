@@ -211,9 +211,18 @@ mod tests {
         let now_after = nanos_since_process_start();
         let start = STATS.pipeline_start_ns.load(Ordering::Relaxed);
         let end = STATS.pipeline_end_ns.load(Ordering::Relaxed);
-        assert!(end >= start, "pipeline_end_ns ({end}) < pipeline_start_ns ({start})");
-        assert!(start <= now_after, "pipeline_start_ns ({start}) > now ({now_after})");
-        assert!(end <= now_after, "pipeline_end_ns ({end}) > now ({now_after})");
+        assert!(
+            end >= start,
+            "pipeline_end_ns ({end}) < pipeline_start_ns ({start})"
+        );
+        assert!(
+            start <= now_after,
+            "pipeline_start_ns ({start}) > now ({now_after})"
+        );
+        assert!(
+            end <= now_after,
+            "pipeline_end_ns ({end}) > now ({now_after})"
+        );
     }
 
     #[tokio::test]
@@ -309,8 +318,7 @@ mod tests {
         let mut batches_seen = 0usize;
         while let Some(item) = stream.next().await {
             let arrow_batch = item.unwrap();
-            let data =
-                unsafe { std::slice::from_raw_parts(arrow_batch.data, arrow_batch.length) };
+            let data = unsafe { std::slice::from_raw_parts(arrow_batch.data, arrow_batch.length) };
             let mut reader = StreamReader::try_new(std::io::Cursor::new(data), None).unwrap();
             let decoded = reader.next().unwrap().unwrap();
             total_rows += decoded.num_rows();
