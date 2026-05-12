@@ -339,8 +339,9 @@ macro_rules! append_primitive {
             for (i, &idx) in sel.iter().enumerate() {
                 if i + PREFETCH_DIST < $len {
                     unsafe {
-                        prefetch_read(src.as_ptr().add((sel[i + PREFETCH_DIST] - 1) as usize)
-                            as *const u8)
+                        prefetch_read(
+                            src.as_ptr().add((sel[i + PREFETCH_DIST] - 1) as usize) as *const u8
+                        )
                     };
                 }
                 $buf.extend_from_slice(&src[(idx - 1) as usize].to_ne_bytes());
@@ -398,7 +399,9 @@ unsafe fn append_numeric(
                 for (i, &idx) in sel.iter().enumerate() {
                     if i + PREFETCH_DIST < len {
                         unsafe {
-                            prefetch_read(src.as_ptr().add((sel[i + PREFETCH_DIST] - 1) as usize * 16))
+                            prefetch_read(
+                                src.as_ptr().add((sel[i + PREFETCH_DIST] - 1) as usize * 16),
+                            )
                         };
                     }
                     let off = (idx - 1) as usize * 16;
