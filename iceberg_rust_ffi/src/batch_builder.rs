@@ -286,12 +286,17 @@ unsafe fn append_to_state(
             let ptrs =
                 unsafe { std::slice::from_raw_parts(slice.data_ptr as *const *const u8, len) };
             let lens = unsafe { std::slice::from_raw_parts(slice.lengths_ptr, len) };
-            // Pre-reserve so bytes never reallocates mid-loop.
+            // Pre-reserve so bytes/offsets never reallocate mid-loop.
             let total: usize = lens.iter().map(|&l| l as usize).sum();
             bytes.reserve(total);
+            offsets.reserve(len);
             // Track running offset locally instead of reading bytes.len() each iteration.
             let mut cur_off = bytes.len();
             for i in 0..len {
+                // Prefetch the string data that will be read PREFETCH_DIST iterations ahead.
+                if i + PREFETCH_DIST < len {
+                    unsafe { prefetch_read(ptrs[i + PREFETCH_DIST]) };
+                }
                 let nb = lens[i] as usize;
                 if nb > 0 {
                     bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(ptrs[i], nb) });
@@ -306,8 +311,24 @@ unsafe fn append_to_state(
     Ok(())
 }
 
+/// Issue a read prefetch for the cache line at `ptr`.
+/// Compiles to a real prefetch on x86_64 and aarch64; no-op elsewhere.
+#[inline(always)]
+unsafe fn prefetch_read(ptr: *const u8) {
+    #[cfg(target_arch = "x86_64")]
+    std::arch::x86_64::_mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T1);
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!("prfm pldl2keep, [{ptr}]", ptr = in(reg) ptr, options(nostack, readonly));
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = ptr;
+}
+
 // Bulk-copy or 1-based-scattered-gather a slice of primitive T into buf (no transform).
 // Identity selection → single memcpy; scattered selection → element-wise gather.
+// Prefetch distance for scatter-gather loops: enough to cover ~200-cycle cache miss
+// latency at typical throughput of a few cycles per element.
+const PREFETCH_DIST: usize = 16;
+
 macro_rules! append_primitive {
     ($buf:expr, $slice:expr, $len:expr, $T:ty) => {{
         let src = unsafe { std::slice::from_raw_parts($slice.data_ptr as *const $T, $len) };
@@ -315,7 +336,13 @@ macro_rules! append_primitive {
             $buf.extend_from_slice(unsafe { as_bytes(src) });
         } else {
             let sel = unsafe { std::slice::from_raw_parts($slice.sel_ptr, $len) };
-            for &idx in sel {
+            for (i, &idx) in sel.iter().enumerate() {
+                if i + PREFETCH_DIST < $len {
+                    unsafe {
+                        prefetch_read(src.as_ptr().add((sel[i + PREFETCH_DIST] - 1) as usize)
+                            as *const u8)
+                    };
+                }
                 $buf.extend_from_slice(&src[(idx - 1) as usize].to_ne_bytes());
             }
         }
@@ -368,7 +395,12 @@ unsafe fn append_numeric(
                 buf.extend_from_slice(src);
             } else {
                 let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for &idx in sel {
+                for (i, &idx) in sel.iter().enumerate() {
+                    if i + PREFETCH_DIST < len {
+                        unsafe {
+                            prefetch_read(src.as_ptr().add((sel[i + PREFETCH_DIST] - 1) as usize * 16))
+                        };
+                    }
                     let off = (idx - 1) as usize * 16;
                     buf.extend_from_slice(&src[off..off + 16]);
                 }
