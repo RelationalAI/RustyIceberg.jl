@@ -41,6 +41,9 @@ mod writer;
 // Column-based writer module (zero-copy from Julia)
 mod writer_columns;
 
+// Incremental batch builder: per-slice copy into owned buffers, finalize to RecordBatch
+mod batch_builder;
+
 // Profiling stats for the file-parallel pipeline
 mod pipeline_stats;
 

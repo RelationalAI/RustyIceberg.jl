@@ -6,8 +6,7 @@
 /// a given writer at a time, and the FIFO global queue ensures batches are submitted
 /// in order.
 use std::any::Any;
-use std::cell::RefCell;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_void};
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -92,13 +91,12 @@ impl ParquetWriterPropertiesFFI {
     }
 }
 
+use crate::batch_builder::ColumnBatchBuilder;
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
 use crate::transaction::IcebergDataFiles;
 use crate::util::parse_c_string;
-use crate::writer_columns::{
-    build_arrow_array_gathered, ColumnDescriptor, GatheredColumnDescriptor, SliceRef,
-};
+use crate::writer_columns::{ColumnDescriptor, SliceRef};
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
@@ -108,7 +106,7 @@ type ConcreteDataFileWriter =
     DataFileWriter<ParquetWriterBuilder, DefaultLocationGenerator, DefaultFileNameGenerator>;
 
 /// Encode task submitted to the global worker pool.
-struct EncodeTask {
+pub(crate) struct EncodeTask {
     batch: RecordBatch,
     state: Arc<WriterState>,
 }
@@ -136,37 +134,11 @@ unsafe impl Send for WriterState {}
 unsafe impl Sync for WriterState {}
 
 /// Global pool of N=available_parallelism encode worker threads shared across all writers.
-struct GlobalWorkerPool {
-    task_tx: tokio::sync::mpsc::Sender<EncodeTask>,
+pub(crate) struct GlobalWorkerPool {
+    pub(crate) task_tx: tokio::sync::mpsc::Sender<EncodeTask>,
 }
 
-static GLOBAL_ENCODE_POOL: OnceLock<GlobalWorkerPool> = OnceLock::new();
-
-// Thread-local storage for the most recent synchronous gather error.
-// Set by iceberg_writer_write_gathered_columns on failure; consumed by iceberg_take_gather_error.
-thread_local! {
-    static LAST_GATHER_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
-}
-
-fn store_gather_error(e: &anyhow::Error) {
-    let msg = format!("{:#}", e);
-    LAST_GATHER_ERROR.with(|cell| {
-        *cell.borrow_mut() = CString::new(msg).ok();
-    });
-}
-
-/// Returns a heap-allocated C string with the most recent gather error on this thread,
-/// or NULL if none. Must be called on the same thread as the failed write call, immediately
-/// after it returns. The caller must free the returned string with `iceberg_destroy_cstring`.
-#[no_mangle]
-pub extern "C" fn iceberg_take_gather_error() -> *mut c_char {
-    LAST_GATHER_ERROR.with(|cell| {
-        cell.borrow_mut()
-            .take()
-            .map(|s| s.into_raw())
-            .unwrap_or(std::ptr::null_mut())
-    })
-}
+pub(crate) static GLOBAL_ENCODE_POOL: OnceLock<GlobalWorkerPool> = OnceLock::new();
 
 /// Formats a Rust panic payload into an anyhow error, preserving the message where possible.
 fn format_panic_error(panic: Box<dyn Any + Send>) -> anyhow::Error {
@@ -312,32 +284,15 @@ fn store_writer_error(writer_ref: &IcebergDataFileWriter, e: anyhow::Error) {
     }
 }
 
-/// Build a `RecordBatch` from a slice of `GatheredColumnDescriptor`s.
-///
-/// # Safety
-/// All pointers inside each `GatheredColumnDescriptor` must be valid for the duration of
-/// this call (callers hold `GC.@preserve` or equivalent).
-unsafe fn build_record_batch<I>(
-    arrow_schema: ArrowSchemaRef,
-    col_descs: I,
-) -> Result<RecordBatch, anyhow::Error>
-where
-    I: IntoIterator<Item = GatheredColumnDescriptor>,
-    I::IntoIter: ExactSizeIterator,
-{
-    let iter = col_descs.into_iter();
-    let mut arrays = Vec::with_capacity(iter.len());
-    for (i, desc) in iter.enumerate() {
-        arrays.push(unsafe { build_arrow_array_gathered(&desc, arrow_schema.field(i))? });
-    }
-    RecordBatch::try_new(arrow_schema, arrays)
-        .map_err(|_| anyhow::anyhow!("failed to construct RecordBatch"))
+/// Store an error in the writer state (public for batch_builder module).
+pub(crate) fn store_writer_error_pub(writer_ref: &IcebergDataFileWriter, e: anyhow::Error) {
+    store_writer_error(writer_ref, e);
 }
 
 /// Submit a `RecordBatch` to the global encode pool.
 ///
 /// Increments the writer's pending count before sending and rolls it back on channel failure.
-fn submit_batch(
+pub(crate) fn submit_batch(
     writer_ref: &IcebergDataFileWriter,
     pool: &GlobalWorkerPool,
     batch: RecordBatch,
@@ -365,35 +320,10 @@ fn submit_batch(
     }
 }
 
-/// Validates column count, builds a `RecordBatch` from pre-built gathered descriptors,
-/// and submits it to the encode pool.
-unsafe fn write_gathered_inner<I>(
-    writer_ref: &IcebergDataFileWriter,
-    pool: &GlobalWorkerPool,
-    arrow_schema: ArrowSchemaRef,
-    num_columns: usize,
-    col_descs: I,
-) -> Result<(), anyhow::Error>
-where
-    I: IntoIterator<Item = GatheredColumnDescriptor>,
-    I::IntoIter: ExactSizeIterator,
-{
-    if num_columns != arrow_schema.fields().len() {
-        return Err(anyhow::anyhow!(
-            "Column count mismatch: got {} but schema has {}",
-            num_columns,
-            arrow_schema.fields().len()
-        ));
-    }
-    let batch = unsafe { build_record_batch(arrow_schema, col_descs) }?;
-    submit_batch(writer_ref, pool, batch)
-}
-
-/// Validates column count, builds a `RecordBatch` from flat `ColumnDescriptor`s (each
-/// treated as a single sequential slice), and submits it to the encode pool.
-///
-/// Each `SliceRef` is constructed on the stack and used within the same loop iteration,
-/// so no heap allocation is needed for the descriptor conversion.
+/// Validates column count, converts each `ColumnDescriptor` into a single-slice `SliceRef`,
+/// routes through `ColumnBatchBuilder`, and submits the resulting `RecordBatch` to the
+/// encode pool.  Using the builder here keeps all type-conversion and null-bit logic in one
+/// place (`batch_builder.rs`) instead of duplicating it.
 unsafe fn write_columns_inner(
     writer_ref: &IcebergDataFileWriter,
     pool: &GlobalWorkerPool,
@@ -407,73 +337,21 @@ unsafe fn write_columns_inner(
             arrow_schema.fields().len()
         ));
     }
-    let mut arrays = Vec::with_capacity(col_descs.len());
-    for (i, d) in col_descs.iter().enumerate() {
-        // SliceRef lives on the stack for exactly this iteration; the raw pointer
-        // is consumed by build_arrow_array_gathered before the next iteration begins.
-        let slice = SliceRef {
+    let num_rows = col_descs.iter().map(|d| d.num_rows).max().unwrap_or(0);
+    let col_types: Vec<i32> = col_descs.iter().map(|d| d.column_type).collect();
+    let mut builder = ColumnBatchBuilder::new(arrow_schema.clone(), &col_types, num_rows.max(1))?;
+    let slices: Vec<SliceRef> = col_descs
+        .iter()
+        .map(|d| SliceRef {
             data_ptr: d.data_ptr,
             lengths_ptr: d.lengths_ptr,
             validity_ptr: d.validity_ptr,
             sel_ptr: std::ptr::null(),
             len: d.num_rows,
-        };
-        let desc = GatheredColumnDescriptor {
-            slices: &slice as *const SliceRef,
-            num_slices: 1,
-            total_rows: d.num_rows,
-            column_type: d.column_type,
-            is_nullable: d.is_nullable,
-        };
-        arrays.push(unsafe { build_arrow_array_gathered(&desc, arrow_schema.field(i))? });
-    }
-    let batch = RecordBatch::try_new(arrow_schema, arrays)
-        .map_err(|_| anyhow::anyhow!("failed to construct RecordBatch"))?;
-    submit_batch(writer_ref, pool, batch)
-}
-
-/// Gather column data from Julia memory into Arrow arrays in the calling thread, then
-/// submit the RecordBatch to the global encode pool asynchronously.
-///
-/// Julia keeps source arrays alive via `GC.@preserve` for the duration of this call.
-/// After this function returns, all Julia pointers have been consumed and Julia may safely
-/// release the source data. Encode is still asynchronous in the global pool; call
-/// `iceberg_writer_close` to wait for all pending encodes.
-///
-/// Returns 0 on success, -1 on error (error stored in writer state, propagated on close).
-#[no_mangle]
-pub extern "C" fn iceberg_writer_write_gathered_columns(
-    writer: *mut IcebergDataFileWriter,
-    columns: *const GatheredColumnDescriptor,
-    num_columns: usize,
-) -> i32 {
-    if writer.is_null() || columns.is_null() || num_columns == 0 {
-        return -1;
-    }
-    let writer_ref = unsafe { &*writer };
-    let pool = match GLOBAL_ENCODE_POOL.get() {
-        Some(p) => p,
-        None => {
-            eprintln!("[iceberg] encode pool not initialized; call iceberg_writer_new first");
-            return -1;
-        }
-    };
-    let arrow_schema = writer_ref.arrow_schema.clone();
-    let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
-    if let Err(e) = unsafe {
-        write_gathered_inner(
-            writer_ref,
-            pool,
-            arrow_schema,
-            num_columns,
-            col_descs.iter().copied(),
-        )
-    } {
-        store_gather_error(&e);
-        store_writer_error(writer_ref, e);
-        return -1;
-    }
-    0
+        })
+        .collect();
+    unsafe { builder.append_slice(&slices) }?;
+    builder.write_and_reset(writer_ref, pool)
 }
 
 /// Synchronous write of flat column data: copies each column from Julia memory into

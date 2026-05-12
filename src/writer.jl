@@ -512,26 +512,6 @@ struct SliceRef
 end
 
 """
-    GatheredColumnDescriptor
-
-FFI descriptor for a column to be gathered from multiple SliceRefs.
-Pass an array of these to `write_columns`.
-
-- `slices_ptr`: pointer to array of SliceRef structs
-- `num_slices`: number of SliceRef entries
-- `total_rows`: sum of all slice lengths
-- `column_type`: ColumnType enum value
-- `is_nullable`: whether the column may contain null values
-"""
-struct GatheredColumnDescriptor
-    slices_ptr::Ptr{SliceRef}
-    num_slices::Csize_t
-    total_rows::Csize_t
-    column_type::Int32
-    is_nullable::Bool
-end
-
-"""
     ColumnType
 
 Enum for column data types, matching the Rust FFI constants.
@@ -550,6 +530,13 @@ Enum for column data types, matching the Rust FFI constants.
     COLUMN_TYPE_DECIMAL_INT32 = 10  # Decimal backed by Int32 (precision ≤ 9)
     COLUMN_TYPE_DECIMAL_INT64 = 11  # Decimal backed by Int64 (precision ≤ 18)
     COLUMN_TYPE_DECIMAL_INT128 = 12 # Decimal backed by Int128 (precision > 18)
+    # Julia-epoch variants: source data uses Julia's internal epoch (0001-01-01);
+    # Rust applies the offset to produce Iceberg's Unix-epoch representation.
+    COLUMN_TYPE_JULIA_DATE = 13           # i64[] days since year 1 → i32 days since 1970-01-01
+    COLUMN_TYPE_JULIA_TIMESTAMP = 14      # i64[] ms since year 1 → i64 μs since 1970-01-01
+    COLUMN_TYPE_JULIA_TIMESTAMPTZ = 15    # same + UTC timezone
+    COLUMN_TYPE_JULIA_TIMESTAMP_NS = 16   # i64[] ms since year 1 → i64 ns since 1970-01-01
+    COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS = 17 # same + UTC timezone
 end
 
 """
@@ -615,9 +602,11 @@ iceberg_column_type(::IcebergLong) = COLUMN_TYPE_INT64
 iceberg_column_type(::IcebergFloat) = COLUMN_TYPE_FLOAT32
 iceberg_column_type(::IcebergDouble) = COLUMN_TYPE_FLOAT64
 iceberg_column_type(::IcebergString) = COLUMN_TYPE_STRING
-iceberg_column_type(::IcebergDate) = COLUMN_TYPE_DATE
-iceberg_column_type(::IcebergTimestamp) = COLUMN_TYPE_TIMESTAMP
-iceberg_column_type(::IcebergTimestamptz) = COLUMN_TYPE_TIMESTAMPTZ
+iceberg_column_type(::IcebergDate)          = COLUMN_TYPE_JULIA_DATE
+iceberg_column_type(::IcebergTimestamp)     = COLUMN_TYPE_JULIA_TIMESTAMP
+iceberg_column_type(::IcebergTimestamptz)   = COLUMN_TYPE_JULIA_TIMESTAMPTZ
+iceberg_column_type(::IcebergTimestampNs)   = COLUMN_TYPE_JULIA_TIMESTAMP_NS
+iceberg_column_type(::IcebergTimestamptzNs) = COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS
 iceberg_column_type(::IcebergBoolean) = COLUMN_TYPE_BOOLEAN
 iceberg_column_type(::IcebergUuid) = COLUMN_TYPE_UUID
 function iceberg_column_type(d::IcebergDecimal)
@@ -884,108 +873,87 @@ function write_columns(writer::DataFileWriter, batch::ColumnBatch)
 end
 
 # ==========================================================================================
-# High-level gathered-column API
+# Incremental batch builder API
 # ==========================================================================================
 
 """
-    GatheredColumn
+    SliceBatch
 
-Accumulates one or more source slices for a single column. Rust gathers the data
-directly from source buffers when the batch is written, avoiding a Julia-side staging
-copy for numeric columns.
-
-Typical usage:
+Accumulates one column slice descriptor per column for a single `append_slice!` call.
+Handles `SliceRef` construction and GC preservation automatically, so callers work with
+plain Julia arrays instead of raw pointers.
 
 ```julia
-col = GatheredColumn(COLUMN_TYPE_INT64)
-add_slice!(col, src_array)                        # sequential: all rows
-add_slice!(col, src_array2; sel=sel_indices)      # scattered: rows at sel_indices
-add_slice!(col, src_array3; validity=valid_bv)    # nullable slice
-
-str_col = GatheredColumn(COLUMN_TYPE_STRING; nullable=true)
-add_string_slice!(str_col, ["a", "", "c"]; validity=BitVector([true, false, true]))
+sb = SliceBatch()
+push!(sb, ids)                                 # non-nullable numeric, sequential
+push!(sb, values; validity=valid_bv)           # nullable numeric, sequential
+push!(sb, scores; sel=sel_indices)             # non-nullable scattered
+push!(sb, tags; validity=valid_bv)             # nullable strings
+append_slice!(builder, sb)
 ```
 
-For string columns use `add_string_slice!` instead of `add_slice!`. Selection vectors
-are not supported for strings: Julia strings are non-contiguous, so the caller must
-build `str_ptrs`/`str_lens` arrays up-front — any row selection is applied on the Julia
-side before calling `add_string_slice!`.
+A `SliceBatch` is single-use: after `append_slice!` returns (Rust has copied all data),
+the source arrays may be released and the batch discarded.
 """
-mutable struct GatheredColumn
+mutable struct SliceBatch
     slices::Vector{SliceRef}
-    total_rows::Int
-    column_type::ColumnType
-    is_nullable::Bool
-    preserve::Vector{Any}   # source arrays kept alive until write
+    preserve::Vector{Any}
 end
 
-GatheredColumn(column_type::ColumnType; nullable::Bool=false) =
-    GatheredColumn(SliceRef[], 0, column_type, nullable, Any[])
+SliceBatch() = SliceBatch(SliceRef[], Any[])
 
 """
-    add_slice!(col::GatheredColumn, data::AbstractVector{T};
-               sel=nothing, validity=nothing)
+    push!(sb::SliceBatch, data::AbstractVector{T};
+          validity=nothing, sel=nothing)
 
-Append a slice of `data` to `col`.
+Add a non-string column slice to the batch.
 
-- `sel`: optional `Vector{Int64}` of 1-based row indices into `data` to select.
+- `validity`: optional `BitVector` where `true` = valid, `false` = null.
+- `sel`: optional `Vector{Int64}` of 1-based indices into `data` for scattered access.
   If omitted, all rows of `data` are used sequentially.
-- `validity`: optional `BitVector` (length = number of selected rows, `true` = valid).
-  Providing this marks the column as nullable.
 """
-function add_slice!(
-    col::GatheredColumn,
+function Base.push!(
+    sb::SliceBatch,
     data::AbstractVector{T};
-    sel::Union{Nothing, Vector{Int64}} = nothing,
     validity::Union{Nothing, BitVector} = nothing,
+    sel::Union{Nothing, Vector{Int64}} = nothing,
 ) where T
     len = sel === nothing ? length(data) : length(sel)
 
     sel_ptr = if sel !== nothing
-        push!(col.preserve, sel)
+        push!(sb.preserve, sel)
         pointer(sel)
     else
         Ptr{Int64}(C_NULL)
     end
 
     validity_ptr = if validity !== nothing
-        col.is_nullable = true
-        push!(col.preserve, validity)
+        push!(sb.preserve, validity)
         Ptr{UInt8}(pointer(validity.chunks))
     else
         Ptr{UInt8}(C_NULL)
     end
 
-    push!(col.preserve, data)
-    push!(col.slices, SliceRef(
+    push!(sb.preserve, data)
+    push!(sb.slices, SliceRef(
         Ptr{Cvoid}(pointer(data)),
-        Ptr{Int64}(C_NULL),   # lengths_ptr unused for non-string types
+        Ptr{Int64}(C_NULL),
         validity_ptr,
         sel_ptr,
         Csize_t(len),
     ))
-    col.total_rows += len
-    return col
+    return sb
 end
 
 """
-    add_string_slice!(col::GatheredColumn, strings::Vector{String}; validity=nothing)
+    push!(sb::SliceBatch, strings::Vector{String}; validity=nothing)
 
-Append a string slice to `col` from a plain `Vector{String}`.
+Add a string column slice to the batch.
 
-- `validity`: optional `BitVector` (`true` = valid, `false` = null). Marking a row null
-  does not require a placeholder in `strings`, but the vector must still be the same length.
-
-```julia
-col = GatheredColumn(COLUMN_TYPE_STRING; nullable=true)
-add_string_slice!(col, ["hello", "", "world"]; validity=BitVector([true, false, true]))
-```
-
-For performance-critical paths where pointer/length arrays are pre-allocated, use the
-lower-level `add_string_slice!(col, str_ptrs, str_lens; validity)` overload directly.
+- `validity`: optional `BitVector` where `true` = valid, `false` = null.
 """
-function add_string_slice!(
-    col::GatheredColumn,
+function Base.push!(
+    sb::SliceBatch,
     strings::Vector{String};
     validity::Union{Nothing, BitVector} = nothing,
 )
@@ -1002,160 +970,136 @@ function add_string_slice!(
             str_lens[i] = ncodeunits(strings[i])
         end
     end
-    push!(col.preserve, strings)  # keep String objects alive so pointers remain valid
-    return add_string_slice!(col, str_ptrs, str_lens; validity)
-end
-
-"""
-    add_string_slice!(col::GatheredColumn, str_ptrs, str_lens; validity=nothing)
-
-Low-level overload: append a string slice from pre-built pointer/length arrays.
-`str_ptrs` is a `Vector{Ptr{UInt8}}` of pointers to UTF-8 string data and `str_lens`
-is a `Vector{Int64}` of corresponding byte lengths. The caller is responsible for keeping
-the pointed-to string bytes alive until `write_columns` returns.
-"""
-function add_string_slice!(
-    col::GatheredColumn,
-    str_ptrs::Vector{Ptr{UInt8}},
-    str_lens::Vector{Int64};
-    validity::Union{Nothing, BitVector} = nothing,
-)
-    len = length(str_ptrs)
+    push!(sb.preserve, strings, str_ptrs, str_lens)
 
     validity_ptr = if validity !== nothing
-        col.is_nullable = true
-        push!(col.preserve, validity)
+        push!(sb.preserve, validity)
         Ptr{UInt8}(pointer(validity.chunks))
     else
         Ptr{UInt8}(C_NULL)
     end
 
-    push!(col.preserve, str_ptrs, str_lens)
-    push!(col.slices, SliceRef(
+    push!(sb.slices, SliceRef(
         Ptr{Cvoid}(pointer(str_ptrs)),
         pointer(str_lens),
         validity_ptr,
         Ptr{Int64}(C_NULL),
-        Csize_t(len),
+        Csize_t(n),
     ))
-    col.total_rows += len
-    return col
+    return sb
 end
 
 """
-    GatheredBatch
+    ColumnBatchBuilder
 
-Collects a `GatheredColumn` per output column, then writes all of them in one call.
+Opaque handle to a Rust-side incremental batch builder. Julia appends one slice per
+column per operator slice via `append_slice!`; Rust copies each slice's data immediately
+into owned typed buffers. When a coalesce window is full, `write_columns` finalises all
+columns into Arrow arrays, submits the `RecordBatch` to the async encode pool, and resets
+the builder in-place for the next window.
 
-```julia
-batch = GatheredBatch()
-push!(batch, col_int64)
-push!(batch, col_float64)
-write_columns(writer, batch)
-```
-
-You can also push a single-slice column inline without building a `GatheredColumn`
-explicitly:
-
-```julia
-batch = GatheredBatch()
-push!(batch, src_ints,   COLUMN_TYPE_INT64)
-push!(batch, src_floats, COLUMN_TYPE_FLOAT64; sel=indices, validity=valid_bv)
-write_columns(writer, batch)
-```
+Create with `ColumnBatchBuilder(writer, col_types)`. The builder is freed automatically
+by its finalizer, or explicitly with `free_builder!`.
 """
-mutable struct GatheredBatch
-    columns::Vector{GatheredColumn}
-end
+mutable struct ColumnBatchBuilder
+    ptr::Ptr{Cvoid}
 
-GatheredBatch() = GatheredBatch(GatheredColumn[])
+    function ColumnBatchBuilder(
+        writer::DataFileWriter,
+        col_types::Vector{ColumnType},
+    )
+        writer.ptr == C_NULL && throw(IcebergException("Writer has been freed"))
+        isempty(col_types) && throw(ArgumentError("col_types must not be empty"))
 
-"""
-    push!(batch::GatheredBatch, col::GatheredColumn)
+        col_type_codes = Int32[Int32(ct) for ct in col_types]
+        ptr = GC.@preserve col_type_codes begin
+            @ccall rust_lib.iceberg_batch_builder_new(
+                writer.ptr::Ptr{Cvoid},
+                pointer(col_type_codes)::Ptr{Int32},
+                length(col_type_codes)::Csize_t,
+            )::Ptr{Cvoid}
+        end
+        ptr == C_NULL && throw(IcebergException("iceberg_batch_builder_new failed"))
 
-Append an already-built `GatheredColumn` to the batch.
-"""
-Base.push!(batch::GatheredBatch, col::GatheredColumn) = (push!(batch.columns, col); batch)
-
-"""
-    push!(batch::GatheredBatch, data::AbstractVector, column_type::ColumnType;
-          sel=nothing, validity=nothing, nullable=false)
-
-Convenience: create a single-slice `GatheredColumn` from `data` and append it.
-"""
-function Base.push!(
-    batch::GatheredBatch,
-    data::AbstractVector,
-    column_type::ColumnType;
-    sel::Union{Nothing, Vector{Int64}} = nothing,
-    validity::Union{Nothing, BitVector} = nothing,
-    nullable::Bool = validity !== nothing,
-)
-    col = GatheredColumn(column_type; nullable)
-    add_slice!(col, data; sel, validity)
-    push!(batch.columns, col)
-    return batch
-end
-
-"""
-    write_columns(writer::DataFileWriter, batch::GatheredBatch[, extra_preserve])
-
-Gather column data from Julia memory synchronously, then encode asynchronously.
-
-Gathers all column data from Julia memory in the calling thread using a plain blocking
-`ccall`. Encode runs asynchronously in the global worker pool.
-
-`extra_preserve` (optional) is an additional collection of objects whose memory must
-stay alive during the gather (e.g. source string arrays for zero-copy string columns).
-
-The source data pointed to by the `GatheredBatch` slices and `extra_preserve` must be
-valid for the duration of this call. After the call returns, all Julia pointers have
-been consumed and the source data may be safely released.
-"""
-function write_columns(
-    writer::DataFileWriter,
-    batch::GatheredBatch,
-    extra_preserve = nothing,
-)
-    isempty(batch.columns) && throw(IcebergException("GatheredBatch has no columns"))
-    writer.ptr == C_NULL && throw(IcebergException("Writer has been freed"))
-
-    all_slice_arrays = Vector{Vector{SliceRef}}(undef, length(batch.columns))
-    descriptors = Vector{GatheredColumnDescriptor}(undef, length(batch.columns))
-    preserve = Any[]
-
-    for (i, col) in enumerate(batch.columns)
-        slices = col.slices
-        all_slice_arrays[i] = slices
-        append!(preserve, col.preserve)
-        push!(preserve, slices)
-        descriptors[i] = GatheredColumnDescriptor(
-            pointer(slices),
-            Csize_t(length(slices)),
-            Csize_t(col.total_rows),
-            Int32(col.column_type),
-            col.is_nullable,
-        )
+        b = new(ptr)
+        finalizer(free_builder!, b)
+        return b
     end
-    extra_preserve !== nothing && append!(preserve, extra_preserve)
+end
 
-    ret = GC.@preserve preserve all_slice_arrays descriptors begin
-        @ccall rust_lib.iceberg_writer_write_gathered_columns(
-            writer.ptr::Ptr{Cvoid},
-            pointer(descriptors)::Ptr{GatheredColumnDescriptor},
-            length(descriptors)::Csize_t,
+"""
+    free_builder!(builder::ColumnBatchBuilder)
+
+Free the builder without writing. Called automatically by the finalizer; also safe to
+call explicitly on error paths.
+"""
+function free_builder!(builder::ColumnBatchBuilder)
+    if builder.ptr != C_NULL
+        @ccall rust_lib.iceberg_batch_builder_free(builder.ptr::Ptr{Cvoid})::Cvoid
+        builder.ptr = C_NULL
+    end
+    return nothing
+end
+
+"""
+    append_slice!(builder::ColumnBatchBuilder, slices::Vector{SliceRef}, arrays_to_preserve)
+
+Append one slice per column to the builder. `slices[i]` describes column `i`'s data for
+this slice. Rust copies all data synchronously — source arrays referenced by the SliceRefs
+may be released (or overwritten) as soon as this call returns.
+
+`arrays_to_preserve` holds any Julia objects whose memory is pointed to by the SliceRefs
+(e.g. NullableVector backing arrays, string ptr/len buffers). They are GC-pinned only for
+the duration of this call.
+"""
+function append_slice!(
+    builder::ColumnBatchBuilder,
+    slices::Vector{SliceRef},
+    arrays_to_preserve,
+)
+    builder.ptr == C_NULL && throw(IcebergException("ColumnBatchBuilder has been freed"))
+    ret = GC.@preserve slices arrays_to_preserve begin
+        @ccall rust_lib.iceberg_batch_builder_append_slice(
+            builder.ptr::Ptr{Cvoid},
+            pointer(slices)::Ptr{SliceRef},
+            length(slices)::Csize_t,
         )::Int32
     end
-    if ret != 0
-        err_ptr = @ccall rust_lib.iceberg_take_gather_error()::Ptr{Cchar}
-        msg = if err_ptr != C_NULL
-            s = unsafe_string(err_ptr)
-            @ccall rust_lib.iceberg_destroy_cstring(err_ptr::Ptr{Cchar})::Cint
-            s
-        else
-            "gather failed (see writer close for details)"
-        end
-        throw(IcebergException("write_columns (gathered): $(msg)"))
-    end
+    ret == 0 || throw(IcebergException("append_slice! failed"))
+    return nothing
+end
+
+"""
+    append_slice!(builder::ColumnBatchBuilder, sb::SliceBatch)
+
+High-level overload: append one slice per column from a `SliceBatch`. Builds the
+`SliceRef` array and preserve list from the batch's accumulated column descriptors.
+
+```julia
+sb = SliceBatch()
+push!(sb, ids)
+push!(sb, values; validity=valid_bv)
+append_slice!(builder, sb)
+```
+"""
+function append_slice!(builder::ColumnBatchBuilder, sb::SliceBatch)
+    append_slice!(builder, sb.slices, sb.preserve)
+end
+
+"""
+    write_columns(writer::DataFileWriter, builder::ColumnBatchBuilder)
+
+Finalise the builder: assemble Arrow arrays from accumulated per-column buffers, build a
+`RecordBatch`, submit it to the async encode pool, and reset all column buffers for the
+next coalesce window. The builder is NOT freed and may be reused immediately.
+"""
+function write_columns(writer::DataFileWriter, builder::ColumnBatchBuilder)
+    writer.ptr == C_NULL && throw(IcebergException("Writer has been freed"))
+    builder.ptr == C_NULL && throw(IcebergException("ColumnBatchBuilder has been freed"))
+    ret = @ccall rust_lib.iceberg_batch_builder_write(
+        writer.ptr::Ptr{Cvoid},
+        builder.ptr::Ptr{Cvoid},
+    )::Int32
+    ret == 0 || throw(IcebergException("write_columns (builder) failed"))
     return nothing
 end
