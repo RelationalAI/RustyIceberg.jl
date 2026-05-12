@@ -101,7 +101,9 @@ end
 """
     with_batch_size!(scan::Scan, n::UInt)
 
-Sets the batch size for the scan.
+Sets the batch size for the scan. **Required**: must be called before
+`scan!` / streaming the scan; otherwise the Rust FFI will error out
+with "batch_size not set".
 """
 function with_batch_size!(scan::Scan, n::UInt)
     result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_batch_size(

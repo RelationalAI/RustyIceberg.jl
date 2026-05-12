@@ -23,9 +23,9 @@
 //!   3. Serializes each batch to Arrow IPC on Tokio's blocking thread
 //!      pool.
 //!   4. Sends serialized batches into the per-file mpsc channel,
-//!      throttled by `byte_sem` (100 MB cap) and `slot_sem` (1 batch
-//!      unattached → 8 after FFI attach via
-//!      `IcebergFileScanResponse::set_payload`).
+//!      throttled by `byte_sem` (100 MB cap) and `slot_sem` (1 batch while
+//!      the file is *waiting* → 8 once it becomes *active* via the FFI
+//!      handoff in `IcebergFileScanResponse::set_payload`).
 //!
 //! This file hosts only the shared helpers (`create_nested_pipeline`,
 //! `spawn_file_task`, `process_file`, `drain_batch_stream`,
@@ -67,10 +67,22 @@ use std::time::Instant;
 
 use arrow_array::RecordBatch;
 use futures::{Stream, StreamExt};
+use iceberg::arrow::{ArrowReader, ArrowReaderBuilder};
+use iceberg::io::FileIO;
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
 use crate::pipeline_stats::{MAX_BUFFERED_BYTES_PER_TASK, STATS};
 use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
+
+/// Build an `ArrowReader` from a `FileIO` and batch size, with per-file
+/// concurrency pinned to 1 (each reader handles one file). Shared by the
+/// full-scan and incremental-append pipelines.
+pub(crate) fn build_reader(file_io: FileIO, batch_size: usize) -> ArrowReader {
+    ArrowReaderBuilder::new(file_io)
+        .with_data_file_concurrency_limit(1)
+        .with_batch_size(batch_size)
+        .build()
+}
 use crate::unexpected;
 
 /// Time an async expression and record its duration into a STATS field.
@@ -103,21 +115,25 @@ pub(crate) struct BufferedBatch {
     pub(crate) slot_sem: Arc<Semaphore>,
 }
 
-/// Initial batch-slot budget for an unattached file (i.e. not yet picked
-/// up by `iceberg_next_file_scan`). The producer can fill at most this
-/// many batches before parking on `slot_sem.acquire()`. Promoted to
-/// `ATTACHED_SLOTS` at the FFI handoff site (see `IcebergFileScanResponse::set_payload`).
-pub(crate) const UNATTACHED_SLOTS: usize = 1;
-/// Full batch-slot budget for an attached file. Matches the per-file mpsc
-/// capacity, so once attached the slot semaphore stops being the binding
-/// constraint and the existing 100 MB byte budget is what throttles.
-pub(crate) const ATTACHED_SLOTS: usize = 8;
+/// Initial batch-slot budget for a *waiting* file — one whose `FileScan`
+/// has been produced by the outer pipeline but not yet picked up by
+/// `iceberg_next_file_scan`. The producer can fill at most this many
+/// batches before parking on `slot_sem.acquire()`. Promoted to
+/// `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE` at the FFI handoff site (see
+/// `IcebergFileScanResponse::set_payload`).
+pub(crate) const MAX_PREFETCH_BUFFERS_OF_WAITING_FILE: usize = 1;
+/// Full batch-slot budget for an *active* file — one whose `FileScan` has
+/// been handed off to a Julia consumer. Matches the per-file mpsc capacity,
+/// so once active the slot semaphore stops being the binding constraint
+/// and the existing 100 MB byte budget is what throttles.
+pub(crate) const MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE: usize = 8;
 
 /// Internal per-file scan result: filename, record count, prefetched inner
 /// batch stream, and the per-file slot semaphore. The slot semaphore is
 /// carried through the outer channel so the FFI handoff site can promote
-/// it from `UNATTACHED_SLOTS` to `ATTACHED_SLOTS` with one `add_permits`
-/// call — no separate plumbing through the orchestrator.
+/// it from `MAX_PREFETCH_BUFFERS_OF_WAITING_FILE` to
+/// `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE` with one `add_permits` call —
+/// no separate plumbing through the orchestrator.
 pub struct FileScan {
     pub filename: String,
     pub record_count: i64,
@@ -243,10 +259,11 @@ where
     S: Stream<Item = iceberg::Result<RecordBatch>> + Send + Unpin + 'static,
 {
     let byte_sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
-    // Start at the unattached prefetch floor; the FFI handoff site
-    // (`IcebergFileScanResponse::set_payload`) tops up to ATTACHED_SLOTS.
-    let slot_sem = Arc::new(Semaphore::new(UNATTACHED_SLOTS));
-    let (file_tx, file_rx) = mpsc::channel(ATTACHED_SLOTS);
+    // Start at the waiting-file prefetch floor; the FFI handoff site
+    // (`IcebergFileScanResponse::set_payload`) tops up to the active-file
+    // budget.
+    let slot_sem = Arc::new(Semaphore::new(MAX_PREFETCH_BUFFERS_OF_WAITING_FILE));
+    let (file_tx, file_rx) = mpsc::channel(MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE);
 
     tokio::spawn(process_file(
         build_batch_stream,
@@ -364,15 +381,16 @@ pub(crate) async fn drain_batch_stream(
         //       this file's outstanding buffered bytes exceed
         //       MAX_BUFFERED_BYTES_PER_TASK (100 MB).
         //   (b) batch-slot budget — `slot_sem.acquire()` blocks if the
-        //       file has hit its current cap (UNATTACHED_SLOTS before
-        //       Julia attaches; ATTACHED_SLOTS after).
+        //       file has hit its current cap (MAX_PREFETCH_BUFFERS_OF_WAITING_FILE
+        //       while waiting for Julia to pick it up; MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
+        //       once it's active).
         //   (c) channel-capacity safety — `tx.send(...)` blocks if the
-        //       mpsc is full. With slot_sem ≤ ATTACHED_SLOTS = mpsc
-        //       capacity, this is a redundant safety net.
+        //       mpsc is full. With slot_sem ≤ MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
+        //       = mpsc capacity, this is a redundant safety net.
         //
         // Each acquire races against `tx.closed()` so that if the consumer
         // drops the receiver, parked producers wake immediately and exit
-        // cleanly. Without this, an unattached producer parked on
+        // cleanly. Without this, a waiting-file producer parked on
         // `slot_sem.acquire()` would never be woken (its permits are only
         // released by consumer `recv()`) and the spawned task would leak.
         let byte_acquire_start = Instant::now();
@@ -445,7 +463,7 @@ mod tests {
     /// exercising the outer-stream plumbing without any I/O.
     fn fake_filescan(filename: String, record_count: i64) -> FileScan {
         let (_, rx) = mpsc::channel::<Result<BufferedBatch, iceberg::Error>>(1);
-        let slot_sem = Arc::new(Semaphore::new(UNATTACHED_SLOTS));
+        let slot_sem = Arc::new(Semaphore::new(MAX_PREFETCH_BUFFERS_OF_WAITING_FILE));
         FileScan {
             filename,
             record_count,

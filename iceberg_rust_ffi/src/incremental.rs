@@ -322,7 +322,11 @@ export_runtime_op!(
             .ok_or_else(|| anyhow::anyhow!("FileIO not available; create scan from table"))?;
         let (prefetch_depth, serialization_concurrency) =
             resolve_incremental_pipeline_params(scan_ptr);
-        let batch_size = scan_ptr.batch_size;
+        let batch_size = scan_ptr.batch_size.ok_or_else(|| {
+            anyhow::anyhow!(
+                "batch_size not set; call iceberg_incremental_scan_with_batch_size before scan"
+            )
+        })?;
 
         Ok((
             scan_ref.as_ref().unwrap(),

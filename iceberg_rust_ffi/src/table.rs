@@ -122,13 +122,15 @@ impl RawResponse for IcebergFileScanResponse {
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload.flatten() {
             Some(fs) => {
-                // Promote: this file is now attached to a Julia consumer.
-                // Lift the prefetch budget from UNATTACHED_SLOTS to
-                // ATTACHED_SLOTS so the producer can fully fill the per-file
-                // mpsc. See `BufferedBatch::slot_sem` for the policy.
+                // Promote: this file is now active (a Julia consumer has
+                // picked it up). Lift the prefetch budget from
+                // MAX_PREFETCH_BUFFERS_OF_WAITING_FILE to
+                // MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE so the producer can
+                // fully fill the per-file mpsc. See `BufferedBatch::slot_sem`
+                // for the policy.
                 fs.slot_sem.add_permits(
-                    crate::nested_pipeline::ATTACHED_SLOTS
-                        - crate::nested_pipeline::UNATTACHED_SLOTS,
+                    crate::nested_pipeline::MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
+                        - crate::nested_pipeline::MAX_PREFETCH_BUFFERS_OF_WAITING_FILE,
                 );
                 let filename = std::ffi::CString::new(fs.filename)
                     .unwrap_or_default()
@@ -426,18 +428,24 @@ pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nested_pipeline::{FileScan, ATTACHED_SLOTS, UNATTACHED_SLOTS};
+    use crate::nested_pipeline::{
+        FileScan, MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE, MAX_PREFETCH_BUFFERS_OF_WAITING_FILE,
+    };
     use std::sync::Arc;
     use tokio::sync::{mpsc, Semaphore};
 
     /// `IcebergFileScanResponse::set_payload(Some(Some(fs)))` is the FFI
     /// handoff that promotes a per-file producer's slot budget from
-    /// `UNATTACHED_SLOTS` to `ATTACHED_SLOTS`. The empty `None` variant
+    /// `MAX_PREFETCH_BUFFERS_OF_WAITING_FILE` to
+    /// `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE`. The empty `None` variant
     /// must not touch the slot_sem.
     #[test]
     fn set_payload_promotes_slot_sem_to_attached_on_handoff() {
-        let slot_sem = Arc::new(Semaphore::new(UNATTACHED_SLOTS));
-        assert_eq!(slot_sem.available_permits(), UNATTACHED_SLOTS);
+        let slot_sem = Arc::new(Semaphore::new(MAX_PREFETCH_BUFFERS_OF_WAITING_FILE));
+        assert_eq!(
+            slot_sem.available_permits(),
+            MAX_PREFETCH_BUFFERS_OF_WAITING_FILE
+        );
 
         // Build a minimal FileScan with an empty inner stream. We only
         // care about the slot_sem promotion here, not stream draining.
@@ -459,7 +467,10 @@ mod tests {
         });
         resp.set_payload(Some(Some(fs)));
 
-        assert_eq!(slot_sem.available_permits(), ATTACHED_SLOTS);
+        assert_eq!(
+            slot_sem.available_permits(),
+            MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
+        );
 
         // Free the FFI-owned bits we allocated via set_payload so the
         // test doesn't leak (CString filename + boxed IcebergFileScan +
@@ -475,11 +486,11 @@ mod tests {
 
     /// The `None` handoff (used by the stream-exhausted path on the nested
     /// FFI) must leave the slot_sem untouched — there is no consumer to
-    /// attach, so the producer should not be allowed to expand its
-    /// prefetch window.
+    /// activate the file, so the producer should not be allowed to expand
+    /// its prefetch window.
     #[test]
     fn set_payload_does_not_promote_on_end_of_stream() {
-        let slot_sem = Arc::new(Semaphore::new(UNATTACHED_SLOTS));
+        let slot_sem = Arc::new(Semaphore::new(MAX_PREFETCH_BUFFERS_OF_WAITING_FILE));
         let mut resp = IcebergFileScanResponse(IcebergBoxedResponse {
             result: CResult::default(),
             value: ptr::null_mut(),
@@ -489,9 +500,15 @@ mod tests {
         // Both `None` (outer "no payload") and `Some(None)` (stream
         // returned `None` from try_next) must skip the promotion.
         resp.set_payload(Some(None));
-        assert_eq!(slot_sem.available_permits(), UNATTACHED_SLOTS);
+        assert_eq!(
+            slot_sem.available_permits(),
+            MAX_PREFETCH_BUFFERS_OF_WAITING_FILE
+        );
         resp.set_payload(None);
-        assert_eq!(slot_sem.available_permits(), UNATTACHED_SLOTS);
+        assert_eq!(
+            slot_sem.available_permits(),
+            MAX_PREFETCH_BUFFERS_OF_WAITING_FILE
+        );
         assert!(resp.0.value.is_null());
     }
 }

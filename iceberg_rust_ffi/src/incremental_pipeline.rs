@@ -16,14 +16,12 @@
 //!   - delete stream: flat Arrow stream of delete records
 
 use futures::StreamExt;
-use iceberg::arrow::{
-    ArrowReader, ArrowReaderBuilder, StreamsInto, UnzippedIncrementalBatchRecordStream,
-};
+use iceberg::arrow::{ArrowReader, StreamsInto, UnzippedIncrementalBatchRecordStream};
 use iceberg::io::FileIO;
 use iceberg::scan::incremental::{AppendedFileScanTask, DeleteScanTask};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::nested_pipeline::{create_nested_pipeline, spawn_file_task};
+use crate::nested_pipeline::{build_reader, create_nested_pipeline, spawn_file_task};
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
@@ -44,16 +42,6 @@ fn read_one_append_file(
     Ok(arrow_stream)
 }
 
-/// Build an `ArrowReader` from a `FileIO` and optional batch size, with
-/// per-file concurrency pinned to 1 (each reader handles one file).
-fn build_reader(file_io: FileIO, batch_size: Option<usize>) -> ArrowReader {
-    let mut b = ArrowReaderBuilder::new(file_io).with_data_file_concurrency_limit(1);
-    if let Some(bs) = batch_size {
-        b = b.with_batch_size(bs);
-    }
-    b.build()
-}
-
 /// Build the nested incremental pipeline.
 ///
 /// Returns `(append_stream, delete_stream)`:
@@ -69,7 +57,7 @@ pub async fn create_incremental_nested_pipeline(
     append_tasks: futures::stream::BoxStream<'static, iceberg::Result<AppendedFileScanTask>>,
     delete_tasks: futures::stream::BoxStream<'static, iceberg::Result<DeleteScanTask>>,
     file_io: FileIO,
-    batch_size: Option<usize>,
+    batch_size: usize,
     prefetch_depth: usize,
     serialization_concurrency: usize,
 ) -> anyhow::Result<(IcebergFileScanStream, IcebergArrowStream)> {
@@ -229,7 +217,7 @@ mod tests {
             futures::stream::empty::<iceberg::Result<AppendedFileScanTask>>().boxed(),
             futures::stream::empty::<iceberg::Result<DeleteScanTask>>().boxed(),
             FileIO::new_with_memory(),
-            None,
+            1024,
             1,
             1,
         )
@@ -256,7 +244,7 @@ mod tests {
             futures::stream::once(async { Ok(task) }).boxed(),
             futures::stream::empty::<iceberg::Result<DeleteScanTask>>().boxed(),
             file_io,
-            None,
+            1024,
             1,
             1,
         )
@@ -329,7 +317,7 @@ mod tests {
             futures::stream::empty::<iceberg::Result<AppendedFileScanTask>>().boxed(),
             futures::stream::once(async { Ok(delete_task) }).boxed(),
             FileIO::new_with_memory(),
-            None,
+            1024,
             1,
             1,
         )

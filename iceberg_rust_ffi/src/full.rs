@@ -145,13 +145,18 @@ impl_scan_builder_method!(
 /// Resolve the pipeline tuning parameters from a configured scan.
 /// Returns `(prefetch_depth, file_io, batch_size)`. A stored
 /// `file_prefetch_depth` of 0 means "auto" → defaults to `cpu_count()`.
-fn resolve_pipeline_params(scan: &IcebergScan) -> (usize, FileIO, Option<usize>) {
+/// `batch_size` must have been set via `iceberg_scan_with_batch_size`;
+/// otherwise the FFI op returns an error.
+fn resolve_pipeline_params(scan: &IcebergScan) -> anyhow::Result<(usize, FileIO, usize)> {
     let prefetch_depth = if scan.file_prefetch_depth == 0 {
         crate::cpu_count()
     } else {
         scan.file_prefetch_depth
     };
-    (prefetch_depth, scan.file_io.clone(), scan.batch_size)
+    let batch_size = scan.batch_size.ok_or_else(|| {
+        anyhow::anyhow!("batch_size not set; call iceberg_scan_with_batch_size before scan")
+    })?;
+    Ok((prefetch_depth, scan.file_io.clone(), batch_size))
 }
 
 export_runtime_op!(
@@ -166,7 +171,7 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Scan not initialized"));
         }
-        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr);
+        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr)?;
         Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))
     },
     result_tuple,
@@ -211,7 +216,7 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Scan not initialized"));
         }
-        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr);
+        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr)?;
         Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))
     },
     result_tuple,

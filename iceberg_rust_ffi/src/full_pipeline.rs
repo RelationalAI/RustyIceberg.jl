@@ -15,23 +15,35 @@
 //!     promotion site).
 
 use futures::{StreamExt, TryStreamExt};
-use iceberg::arrow::ArrowReaderBuilder;
+use iceberg::arrow::ArrowReader;
 use iceberg::io::FileIO;
 use iceberg::scan::FileScanTask;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::nested_pipeline::{
-    create_nested_pipeline, spawn_file_task, ATTACHED_SLOTS, UNATTACHED_SLOTS,
+    build_reader, create_nested_pipeline, spawn_file_task, MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE,
+    MAX_PREFETCH_BUFFERS_OF_WAITING_FILE,
 };
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
+
+/// Read one `FileScanTask` as an Arrow record-batch stream. Wraps the task
+/// in a one-element stream and calls `ArrowReader::read`, mirroring
+/// `incremental_pipeline::read_one_append_file`.
+fn read_one_full_scan_file(
+    reader: ArrowReader,
+    task: FileScanTask,
+) -> iceberg::Result<iceberg::scan::ArrowRecordBatchStream> {
+    let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
+    reader.read(task_stream)
+}
 
 /// Full-scan entry point — wraps `create_nested_pipeline` with a closure
 /// that builds an `ArrowReaderBuilder`-based per-file batch stream.
 pub async fn create_full_scan_pipeline(
     tasks: Vec<FileScanTask>,
     file_io: FileIO,
-    batch_size: Option<usize>,
+    batch_size: usize,
     prefetch_depth: usize,
 ) -> IcebergFileScanStream {
     let source = futures::stream::iter(tasks.into_iter().map(Ok::<_, iceberg::Error>));
@@ -40,16 +52,9 @@ pub async fn create_full_scan_pipeline(
         move |task: FileScanTask| {
             let filename = task.data_file_path().to_string();
             let record_count = task.record_count.unwrap_or(0) as i64;
-            let file_io = file_io.clone();
+            let reader = build_reader(file_io.clone(), batch_size);
             spawn_file_task(filename, record_count, move || {
-                let mut builder =
-                    ArrowReaderBuilder::new(file_io).with_data_file_concurrency_limit(1);
-                if let Some(bs) = batch_size {
-                    builder = builder.with_batch_size(bs);
-                }
-                let reader = builder.build();
-                let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
-                reader.read(task_stream).map_err(unexpected)
+                read_one_full_scan_file(reader, task).map_err(unexpected)
             })
         },
         prefetch_depth,
@@ -63,16 +68,17 @@ pub async fn create_full_scan_pipeline(
 /// applies unchanged.
 ///
 /// The flat path bypasses `iceberg_next_file_scan`, which is the FFI
-/// handoff that promotes `slot_sem` from UNATTACHED_SLOTS to ATTACHED_SLOTS
-/// (see `IcebergFileScanResponse::set_payload` in `table.rs`). Without an
-/// explicit promotion here every flat-path producer would stay capped at
-/// UNATTACHED_SLOTS — correct but slow. Since the flat path always drains
-/// each file immediately (i.e. each is "attached" by construction),
+/// handoff that promotes `slot_sem` from `MAX_PREFETCH_BUFFERS_OF_WAITING_FILE`
+/// to `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE` (see
+/// `IcebergFileScanResponse::set_payload` in `table.rs`). Without an explicit
+/// promotion here every flat-path producer would stay capped at the
+/// waiting-file budget — correct but slow. Since the flat path always
+/// drains each file immediately (i.e. each is active by construction),
 /// promote inline.
 pub async fn create_pipeline(
     tasks: Vec<FileScanTask>,
     file_io: FileIO,
-    batch_size: Option<usize>,
+    batch_size: usize,
     prefetch_depth: usize,
 ) -> IcebergArrowStream {
     let nested = create_full_scan_pipeline(tasks, file_io, batch_size, prefetch_depth).await;
@@ -80,7 +86,8 @@ pub async fn create_pipeline(
         .stream
         .into_inner()
         .map_ok(|fs| {
-            fs.slot_sem.add_permits(ATTACHED_SLOTS - UNATTACHED_SLOTS);
+            fs.slot_sem
+                .add_permits(MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE - MAX_PREFETCH_BUFFERS_OF_WAITING_FILE);
             fs.stream.stream.into_inner()
         })
         .try_flatten()
@@ -174,7 +181,7 @@ mod tests {
         // Exercises: create_full_scan_pipeline → spawn_file_task → process_file
         //   (reader setup, fetch/decode, serialize IPC, semaphore acquire)
         //   → make_file_stream (semaphore release)
-        let nested = create_full_scan_pipeline(vec![task], file_io, None, 1).await;
+        let nested = create_full_scan_pipeline(vec![task], file_io, 1024, 1).await;
 
         // ── 6. Drain outer FileScanStream ──────────────────────────────────
         let mut outer = nested.stream.lock().await;
@@ -306,11 +313,11 @@ mod tests {
         }
 
         // Run the flat pipeline. batch_size=1 forces 3 batches per file so
-        // each unattached producer parks on slot_sem.acquire() after batch 1;
+        // each waiting-file producer parks on slot_sem.acquire() after batch 1;
         // the test then verifies that the inline `slot_sem.add_permits`
         // promotion in `create_pipeline` lets all 30 rows drain. Without it
         // each producer would stall after one batch and the test would hang.
-        let flat = create_pipeline(tasks, file_io, Some(1), 2).await;
+        let flat = create_pipeline(tasks, file_io, 1, 2).await;
 
         // Drain all batches and verify total row count + per-batch payload.
         let mut stream = flat.stream.lock().await;
@@ -347,9 +354,10 @@ mod tests {
         // To force producers to *stay alive concurrently* (and not silently
         // pass via fast complete-and-exit timing), we use multi-batch files:
         // batch_size=1 turns each 3-row file into 3 batches, so after batch 1
-        // each unattached producer parks on `slot_sem.acquire()` (UNATTACHED_SLOTS=1).
-        // We pull the first FileScan to attach it but never drain its inner
-        // stream, so the attached file's producer also stays alive. With all
+        // each waiting-file producer parks on `slot_sem.acquire()`
+        // (MAX_PREFETCH_BUFFERS_OF_WAITING_FILE=1).
+        // We pull the first FileScan to activate it but never drain its inner
+        // stream, so the active file's producer also stays alive. With all
         // producers parked, the peak reflects the actual structural cap.
         use arrow_array::{Int32Array, RecordBatch};
         use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
@@ -420,17 +428,20 @@ mod tests {
 
         let prefetch_depth = 2;
         // batch_size=1 → 3 batches/file → producers actually park on slot_sem
-        // (UNATTACHED_SLOTS=1) after batch 1 instead of finishing instantly.
-        let nested = create_full_scan_pipeline(tasks, file_io, Some(1), prefetch_depth).await;
+        // (MAX_PREFETCH_BUFFERS_OF_WAITING_FILE=1) after batch 1 instead of
+        // finishing instantly.
+        let nested = create_full_scan_pipeline(tasks, file_io, 1, prefetch_depth).await;
 
         // Pull the first FileScan (the "+1"). Don't drain its inner stream —
-        // its producer stays alive parked on slot_sem after one ATTACHED_SLOTS
-        // batch (8 batches > 3-row file, but the consumer never recv()s, so the
-        // producer stays alive until the file's batches all queue or ATTACHED_SLOTS
-        // is hit; for our 3-batch file it queues all then hits batch_stream.next()
-        // returning None and exits — which is acceptable: peak is observed during
-        // the stable window before that producer exits). Subsequent files'
-        // producers stay parked at UNATTACHED_SLOTS=1 → 0 after batch 1.
+        // its producer stays alive parked on slot_sem after one
+        // MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE batch (8 batches > 3-row file,
+        // but the consumer never recv()s, so the producer stays alive until
+        // the file's batches all queue or MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
+        // is hit; for our 3-batch file it queues all then hits
+        // batch_stream.next() returning None and exits — which is acceptable:
+        // peak is observed during the stable window before that producer
+        // exits). Subsequent files' producers stay parked at
+        // MAX_PREFETCH_BUFFERS_OF_WAITING_FILE=1 → 0 after batch 1.
         let mut outer = nested.stream.lock().await;
         let _first_file = outer.next().await.unwrap().unwrap();
 
@@ -456,7 +467,7 @@ mod tests {
         let peak = STATS.peak_concurrency.load(Ordering::Relaxed);
         assert!(
             peak >= 1,
-            "expected at least 1 process_file alive (the attached file)"
+            "expected at least 1 process_file alive (the active file)"
         );
         assert!(
             peak <= prefetch_depth + 1,
