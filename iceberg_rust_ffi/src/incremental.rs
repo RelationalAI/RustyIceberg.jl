@@ -25,6 +25,9 @@ pub struct IcebergIncrementalScan {
     pub serialization_concurrency: usize,
     // Present for macro compatibility with IcebergScan; unused for incremental.
     pub file_io: Option<iceberg::io::FileIO>,
+    /// Set by Julia via `iceberg_incremental_scan_with_batch_size`. Required:
+    /// the FFI stream op errors out if this is still `None` at stream-creation
+    /// time. Forwarded to the per-file `ArrowReaderBuilder` inside the pipeline.
     pub batch_size: Option<usize>,
     pub file_concurrency: usize,
     pub file_prefetch_depth: usize,

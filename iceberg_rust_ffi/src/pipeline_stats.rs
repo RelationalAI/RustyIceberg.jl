@@ -54,7 +54,7 @@ pub(crate) struct PipelineStats {
     pub serialize_ns: AtomicU64,
     /// Time a producer (`serialize_and_forward_batches`) is suspended on per-file
     /// backpressure: any of (a) `byte_sem.acquire_many` (100 MB cap),
-    /// (b) `slot_sem.acquire` (UNATTACHED/ATTACHED batch-slot cap), or
+    /// (b) `slot_sem.acquire` (WAITING/ACTIVE batch-slot cap), or
     /// (c) `tx.send` (per-file mpsc full). All three stall the same producer
     /// for the same reason ("consumer hasn't drained enough"), so they're
     /// combined.

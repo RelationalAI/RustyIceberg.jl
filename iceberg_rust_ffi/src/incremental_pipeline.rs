@@ -5,9 +5,10 @@
 //! and is shared verbatim with the full-scan entry point. The only
 //! incremental-specific bits in this file are:
 //!
-//!   * `read_one_append_file` — the per-task closure that builds an Arrow
-//!     batch stream via iceberg-rs's `StreamsInto` machinery (vs. full-scan's
-//!     `ArrowReaderBuilder::new(...).read(stream::once(task))`).
+//!   * `read_one_append_file` — per-task helper that builds an Arrow batch
+//!     stream via iceberg-rs's `StreamsInto` machinery. The full-scan
+//!     equivalent is `full_pipeline::read_one_full_scan_file`, which calls
+//!     `ArrowReader::read` directly.
 //!   * `create_incremental_nested_pipeline` — wraps the shared helper for
 //!     the append source and pairs it with a (flat) delete stream.
 //!

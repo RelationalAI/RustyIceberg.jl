@@ -9,28 +9,42 @@ reviewing — not a change log.
 
 Two FFI-facing pipelines — **full-scan** (`full_pipeline.rs`) and
 **incremental-append** (`incremental_pipeline.rs`) — sit on top of one shared
-per-file machine in `nested_pipeline.rs`. They differ in exactly two places:
+per-file machine in `nested_pipeline.rs`. Each pipeline adapts its
+planner stream into a stream of `FileToScan` handoff values and hands
+that to the shared orchestrator. A `FileToScan` carries the three things
+the orchestrator needs to spawn a per-file task: `filename`,
+`record_count`, and a deferred `build_batch_stream` closure that produces
+a `Stream<Item = iceberg::Result<RecordBatch>>` when polled.
 
-1. The **source `Stream<Item = T>`** of per-file tasks
-   (`FileScanTask` for full / `AppendedFileScanTask` for incremental).
-2. The **`build_batch_stream` closure**, run on the spawned per-file task,
-   which produces a `Stream<Item = iceberg::Result<RecordBatch>>` from `T`.
+The two pipelines therefore differ in exactly two places:
+
+1. The **source `Stream<Item = FileToScan<S>>`** they construct from their
+   planner output (`FileScanTask` for full / `AppendedFileScanTask` for
+   incremental).
+2. The **`build_batch_stream` body** inside each `FileToScan`
+   (`read_one_full_scan_file` for full / `read_one_append_file` for
+   incremental).
 
 Everything else — orchestration, prefetch bound, byte/slot semaphores,
 serialize spawn, cancellation, stats accounting — is one implementation in
 the shared file. The orchestrator is `futures::stream::Stream::buffered`;
 there is no more `FuturesUnordered` loop, no separate
 `run_nested_pipeline` / `run_incremental_nested` / `run_flat`, no
-`data_file_concurrency_limit` knob. `prefetch_depth` is the single
+`data_file_concurrency_limit` knob (the FFI setter survives as a
+validation-only stub for ABI compat). `prefetch_depth` is the single
 concurrency knob, and the cap on alive `process_file` tasks is exactly
 `prefetch_depth + (files handed out but not drained)`.
+
+`batch_size` is required: the FFI stream ops error out (rather than
+silently using the parquet crate's internal default) if Julia hasn't
+called `with_batch_size!` before scanning.
 
 ## File layout
 
 | File | Role |
 |---|---|
-| `src/nested_pipeline.rs` | Shared core: `create_nested_pipeline<T, Src, F>`, `spawn_file_task<S, BSF>`, `process_file`, `drain_batch_stream`, `make_file_stream`, `BufferedBatch`, `FileScan`, constants (`UNATTACHED_SLOTS=1`, `ATTACHED_SLOTS=8`), and orchestration tests (with a stub `start_one` closure). |
-| `src/full_pipeline.rs` | Full-scan entries: `create_full_scan_pipeline` (nested FFI) and `create_pipeline` (legacy flat-FFI wrapper = nested + `try_flatten` + inline `slot_sem` promotion). Real-parquet end-to-end tests live here. |
+| `src/nested_pipeline.rs` | Shared core: `create_nested_pipeline<S, Src>`, `spawn_file_task<S, BSF>`, `process_file`, `serialize_and_forward_batches`, `make_file_stream`, `build_reader`, `BufferedBatch`, `FileScan`, the `FileToScan<S>` handoff struct, constants (`MAX_PREFETCH_BUFFERS_OF_WAITING_FILE=1`, `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE=8`), and orchestration tests (which feed `FileToScan` values with an empty batch-stream builder). |
+| `src/full_pipeline.rs` | Full-scan entries: `create_full_scan_pipeline` (nested FFI) and `create_pipeline` (legacy flat-FFI wrapper = nested + `try_flatten` + inline `slot_sem` promotion). Per-file helper `read_one_full_scan_file`. Real-parquet end-to-end tests live here. |
 | `src/incremental_pipeline.rs` | Incremental-append entry: `create_incremental_nested_pipeline`. Pulls the same shared helpers, adds `read_one_append_file` + delete-stream glue. Real-parquet tests live here. |
 
 `src/pipeline_stats.rs` hosts the global `STATS` counters used by both
@@ -104,30 +118,37 @@ manifest planning.
    │  create_full_scan_pipeline │    │ create_incremental_nested_ │
    │  create_pipeline (flat)    │    │ pipeline                   │
    │                            │    │                            │
-   │  passes 2 closures:        │    │  passes 2 closures:        │
-   │    source = iter(Vec<      │    │    source = append stream  │
-   │             FileScanTask>) │    │             from iceberg-rs│
-   │    build_batch =           │    │    build_batch =           │
-   │      ArrowReader.read(task)│    │      read_one_append_file  │
+   │  .map_ok the planner       │    │  .map_ok the planner       │
+   │  stream into FileToScan:   │    │  stream into FileToScan:   │
+   │    FileScanTaskStream      │    │    BoxStream of            │
+   │      from plan_files()     │    │      AppendedFileScanTask  │
+   │    build_batch_stream =    │    │    build_batch_stream =    │
+   │      read_one_full_scan_   │    │      read_one_append_file  │
+   │      file(reader, task)    │    │      (reader, task)        │
    └─────────────┬──────────────┘    └─────────────┬──────────────┘
+                 │                                 │
+                 │   Stream<Item = iceberg::Result<FileToScan<S>>>
                  │                                 │
                  └────────────────┬────────────────┘
                                   ▼
    ┌─────────────────────────────────────────────────────────────┐
    │                  SHARED CORE (nested_pipeline.rs)           │
    │                                                             │
-   │   create_nested_pipeline<T, Src, F>(source, start_one,      │
-   │                                     prefetch_depth)         │
+   │   create_nested_pipeline<S, Src>(source, prefetch_depth)    │
    │     │                                                       │
-   │     │  source.map(|res| async { res.map(start_one) })       │
-   │     │        .buffered(prefetch_depth)                      │
+   │     │  source.map(|res| async move {                        │
+   │     │      res.map(|f| spawn_file_task(                     │
+   │     │          f.filename, f.record_count,                  │
+   │     │          f.build_batch_stream))                       │
+   │     │  }).buffered(prefetch_depth)                          │
    │     ▼                                                       │
    │   spawn_file_task<S, BSF>(filename, rc, build_batch_stream) │
    │     │                                                       │
    │     ▼                                                       │
-   │   process_file<S, BSF>(build_batch_stream, sems, tx)        │
+   │   process_file<S, BSF>(build_batch_stream, sems,            │
+   │                        byte_budget, tx)                     │
    │     ├─ reader setup, decode, serialize, send                │
-   │     └─ drain_batch_stream + make_file_stream                │
+   │     └─ serialize_and_forward_batches + make_file_stream     │
    │                                                             │
    │   Stats: written once → both pipelines populated correctly  │
    └─────────────────────────────────────────────────────────────┘
@@ -138,16 +159,19 @@ manifest planning.
          alive process_file tasks ≤ prefetch_depth + (files held by FFI)
 
    Truly shared (one impl, called by both):
-     • create_nested_pipeline<T,Src,F>   (orchestrator, generic)
+     • create_nested_pipeline<S,Src>     (orchestrator, generic)
+     • FileToScan<S>                     (planner→orchestrator handoff)
      • spawn_file_task<S,BSF>            (per-file setup + spawn)
      • process_file<S,BSF>               (decode + serialize + send loop)
-     • drain_batch_stream                (consumer-side drain)
+     • serialize_and_forward_batches     (phases 2-4 of the file pipeline)
      • make_file_stream                  (receiver → Stream adapter)
+     • build_reader                      (ArrowReader with batch_size,
+                                          per-file concurrency = 1)
      • Stats accounting                  (one set of writes → both pipelines)
 
-   Per-pipeline (necessarily different — 2 closures per pipeline):
-     • source stream: `iter(Vec<…>)`           vs incremental scan stream
-     • build_batch_stream closure: ArrowReader vs read_one_append_file
+   Per-pipeline (necessarily different — one .map_ok adapter per pipeline):
+     • planner stream:    FileScanTaskStream    vs incremental append stream
+     • per-file reader:   read_one_full_scan_file vs read_one_append_file
 ```
 
 ## What is *shared* vs *merely similar in shape*
@@ -160,19 +184,29 @@ entry points).
 
 Now genuinely *shared* (one body, called by both):
 
-* `create_nested_pipeline<T, Src, F>` — the orchestrator. Generic over the
-  task type and the source stream.
+* `create_nested_pipeline<S, Src>` — the orchestrator. Generic over the
+  per-file batch-stream type `S` and the source stream `Src`.
+* `FileToScan<S>` — the planner-to-orchestrator handoff struct. Carries
+  `filename`, `record_count`, and a deferred `build_batch_stream:
+  Box<dyn FnOnce() -> iceberg::Result<S> + Send>`.
 * `spawn_file_task<S, BSF>` — per-file setup + `tokio::spawn(process_file)`.
   Generic over the batch-stream type and the build closure.
 * `process_file<S, BSF>` and `process_file_inner<S, BSF>` — the per-file
   decode + serialize + send loop, including the timed call to
-  `build_batch_stream()` for reader setup.
-* `drain_batch_stream` — the consumer-side semaphore-aware drain.
+  `build_batch_stream()` for reader setup. Take a `byte_budget` parameter
+  so the per-batch byte cost can be clamped to the semaphore size (see
+  the "Backpressure clamp" subsection below).
+* `serialize_and_forward_batches` — RecordBatch → Arrow-IPC → mpsc, with
+  byte/slot semaphore acquires and `tokio::select!`-based cancellation
+  on `tx.closed()`.
 * `make_file_stream` — receiver → `Stream<ArrowBatch>` adapter with
   per-batch permit release.
+* `build_reader` — `ArrowReaderBuilder` with the configured `batch_size`
+  and per-file concurrency pinned to 1.
 * `BufferedBatch`, `FileScan` — the in-flight types.
-* `UNATTACHED_SLOTS` / `ATTACHED_SLOTS` — the two-tier slot cap, including
-  the FFI handoff promotion at `IcebergFileScanResponse::set_payload`.
+* `MAX_PREFETCH_BUFFERS_OF_WAITING_FILE` / `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE`
+  — the two-tier slot cap, including the FFI handoff promotion at
+  `IcebergFileScanResponse::set_payload`.
 * `MAX_BUFFERED_BYTES_PER_TASK` (in `pipeline_stats.rs`) — the byte_sem cap.
 * Stats counters: every `STATS.*` field is written from the shared code, so
   the incremental pipeline now correctly populates `reader_setup_ns`,
@@ -180,13 +214,14 @@ Now genuinely *shared* (one body, called by both):
   were silently zero on the incremental path because the parallel
   implementation didn't update them.)
 
-Per-pipeline (not shared, by necessity). Each entry point supplies
-exactly two things to `create_nested_pipeline`:
+Per-pipeline (not shared, by necessity). Each entry point `.map_ok`s its
+planner stream into `Stream<Item = iceberg::Result<FileToScan<S>>>` and
+hands that to `create_nested_pipeline`:
 
 | Spot | Full-scan | Incremental-append |
 |---|---|---|
-| **Source `Stream<T>`** | `iter(Vec<FileScanTask>).map(Ok)` | iceberg-rs incremental scan stream of `AppendedFileScanTask` |
-| **`build_batch_stream` closure** | `ArrowReaderBuilder…build().read(once(task))` | `read_one_append_file(reader, task)` |
+| **Planner stream** | `FileScanTaskStream` from `scan.plan_files()` | `BoxStream<AppendedFileScanTask>` from iceberg-rs incremental scan |
+| **Per-file reader call** | `read_one_full_scan_file(reader, task)` (= `ArrowReader::read(once(task))`) | `read_one_append_file(reader, task)` (= `StreamsInto::stream((once(task), empty()), reader)`) |
 
 Everything else — orchestration, prefetch bound, semaphores, serialize
 spawn, cancellation, stats — is one body in `nested_pipeline.rs`. The
@@ -214,11 +249,34 @@ and not yet drained. With one serial consumer, `M = 1` and the cap is
 pins this down). Julia's `ICEBERG_FILE_TASK_GROUP` uses `M = nthreads()`.
 
 Memory per file is capped at ~100 MB by `byte_sem`. Slot count per file is
-capped at `UNATTACHED_SLOTS = 1` while waiting in the outer buffer (only
-one batch ahead before consumer attach), promoted to `ATTACHED_SLOTS = 8`
-once the FFI consumer has called `iceberg_next_file_scan`. The promotion
-prevents serialized bytes from accumulating in front of files that may
-never get drained (e.g. cancelled scans, slow consumers).
+capped at `MAX_PREFETCH_BUFFERS_OF_WAITING_FILE = 1` while waiting in the
+outer buffer (only one batch ahead before the FFI consumer picks the file
+up), promoted to `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE = 8` once the FFI
+consumer has called `iceberg_next_file_scan`. The promotion prevents
+serialized bytes from accumulating in front of files that may never get
+drained (e.g. cancelled scans, slow consumers).
+
+### Backpressure clamp for oversized batches
+
+The byte semaphore has `MAX_BUFFERED_BYTES_PER_TASK` permits. A single
+serialized batch larger than that would deadlock `byte_sem.acquire_many`,
+since the requested permit count can never be reached. To prevent that,
+`serialize_and_forward_batches` clamps the per-batch backpressure cost
+once at the `BufferedBatch` construction site:
+
+```rust
+let clamped_byte_len = serialized.length.min(byte_budget);
+```
+
+The clamp lives on the `BufferedBatch.clamped_byte_len` field, so the
+`byte_sem.acquire_many(clamped_byte_len)` on the producer side and the
+matching `byte_sem.add_permits(buf.clamped_byte_len)` on the consumer
+side stay automatically symmetric. Real in-flight RAM accounting
+(`STATS.bytes_produced`, `STATS.buffered_bytes` via `track_buffer_add` /
+`track_buffer_release`) uses the unclamped `serialized.length` /
+`buf.batch.length` — these counters measure actual bytes, not semaphore
+permits. As a side benefit the clamp also prevents the
+`byte_len as u32` cast from wrapping at ≥ 4 GiB batches.
 
 ## What the old `data_file_concurrency_limit` knob actually did
 
@@ -298,8 +356,9 @@ locks it in.
 
 Stats on this branch are written from a single set of call sites
 (`nested_pipeline.rs::process_file`, `process_file_inner`,
-`drain_batch_stream`, `make_file_stream`, plus the orchestrator's outer
-unfold), and that single set of writes feeds both pipelines correctly.
+`serialize_and_forward_batches`, `make_file_stream`, plus the
+orchestrator's outer unfold), and that single set of writes feeds both
+pipelines correctly.
 Compared to master, two classes of bugs are fixed:
 
 ### (1) Incremental path was missing most stats
@@ -326,6 +385,14 @@ consequences in the master code:
 On this branch all of these counters are written once, in the shared
 `process_file` / `make_file_stream` paths, so the incremental pipeline
 gets the same numbers as the full-scan pipeline.
+
+Note that the byte-throughput counters (`bytes_produced`,
+`buffered_bytes` / `peak_buffered_bytes` via `track_buffer_add` /
+`track_buffer_release`) deliberately use the *unclamped* serialized
+batch size, not `clamped_byte_len`. The clamp from the "Backpressure
+clamp" subsection above only governs semaphore permits; STATS counters
+report real in-flight RAM. See `make_file_stream` for the symmetric
+unclamped read of `buf.batch.length` on the consumer side.
 
 ### (2) Wall-clock metric was inconsistent / misleading
 
@@ -412,15 +479,27 @@ states). The FFI setters
 validation-only stubs: they check the pointer and return `Ok` without
 modifying state. Julia callers calling them are unaffected.
 
+**Behaviour change**: `batch_size` is now required at scan-start time.
+`IcebergScan.batch_size` / `IcebergIncrementalScan.batch_size` are still
+typed `Option<usize>` and still initialize to `None`, but the FFI stream
+ops (`iceberg_arrow_stream`, `iceberg_file_scan_stream`,
+`iceberg_incremental_file_scan_stream`) now error out with `batch_size
+not set; call iceberg_*_with_batch_size before scan` if Julia hasn't
+called the setter. Previously `None` silently fell through to the
+parquet crate's internal default. The Julia bindings' `with_batch_size!`
+docstrings have been updated to mark it required.
+
 ## Tests
 
 Three test "tiers":
 
 1. **Pipeline-level orchestration tests** (`nested_pipeline.rs::tests`):
-   feed `create_nested_pipeline` a synthetic source and a stub `start_one`
-   closure that returns an already-closed `FileScan`. Verify
+   feed `create_nested_pipeline` a synthetic source of `FileToScan` values
+   whose `build_batch_stream` returns an empty Arrow stream. Verify
    `Stream::buffered` shape, error propagation, source order, drop-safety,
-   and `drain_batch_stream` cancellation. No parquet I/O.
+   `serialize_and_forward_batches` cancellation, and the
+   oversized-batch backpressure clamp
+   (`oversized_batch_does_not_deadlock_byte_sem`). No parquet I/O.
 2. **Real-parquet end-to-end tests** (`full_pipeline.rs::tests` and
    `incremental_pipeline.rs::tests`): generate in-memory parquet files,
    run them through `create_full_scan_pipeline` /
@@ -452,9 +531,13 @@ These are not done on this branch; flagging them for future work.
   flat wrapper would simplify `full_pipeline.rs` by deleting
   `create_pipeline` and the inline `slot_sem` promotion. Blocked on
   confirming no out-of-tree consumers.
-* **Hoist `MAX_BUFFERED_BYTES_PER_TASK` and the slot constants to FFI-
-  tunable knobs.** Currently hardcoded; some Julia workloads (very wide
-  schemas, small batch sizes) might benefit from a different mix.
+* **Expose `byte_budget` and the slot constants as FFI-tunable knobs.**
+  `byte_budget` is already a parameter on `serialize_and_forward_batches`
+  / `process_file` / `process_file_inner` (so the oversized-batch
+  regression test can use a tiny budget), but `spawn_file_task` still
+  hardcodes it to `MAX_BUFFERED_BYTES_PER_TASK`. The slot constants are
+  still compile-time. Some Julia workloads (very wide schemas, small
+  batch sizes) might benefit from a different mix.
 * **Per-pipeline stats namespaces.** Right now `STATS` is process-global
   and reset inside `create_nested_pipeline`. If two scans run concurrently
   in the same process the counters interleave. Currently irrelevant

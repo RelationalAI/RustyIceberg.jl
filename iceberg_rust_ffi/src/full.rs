@@ -33,8 +33,9 @@ pub struct IcebergScan {
     /// Cloned from the Table at construction time. Passed to the pipeline so
     /// each per-file ArrowReader can open its own parquet file.
     pub file_io: FileIO,
-    /// Captured when Julia calls with_batch_size. Forwarded to each per-file
-    /// ArrowReaderBuilder inside the pipeline.
+    /// Set by Julia via `iceberg_scan_with_batch_size`. Required: the FFI
+    /// stream ops error out if this is still `None` at stream-creation time.
+    /// Forwarded to each per-file `ArrowReaderBuilder` inside the pipeline.
     pub batch_size: Option<usize>,
     /// Dead field kept for FFI ABI compatibility and shape-symmetry with
     /// `IncrementalScan` (whose `file_concurrency` is likewise dead — both
@@ -137,10 +138,10 @@ impl_scan_builder_method!(
 // Instead of calling iceberg-rs's `scan.to_arrow()` (which uses
 // `try_for_each_concurrent` internally and interleaves batches across
 // files in arbitrary order), we:
-//   1. Call `scan.plan_files()` to get an ordered list of FileScanTasks.
-//   2. Feed them into our own file-parallel pipeline
-//      (nested_pipeline.rs) which processes N files concurrently
-//      but yields batches in strict file-then-row order.
+//   1. Call `scan.plan_files()` to get an ordered stream of FileScanTasks.
+//   2. Feed that stream straight into our own file-parallel pipeline
+//      (nested_pipeline.rs), which processes N files concurrently but
+//      yields batches in strict file-then-row order.
 
 /// Resolve the pipeline tuning parameters from a configured scan.
 /// Returns `(prefetch_depth, file_io, batch_size)`. A stored

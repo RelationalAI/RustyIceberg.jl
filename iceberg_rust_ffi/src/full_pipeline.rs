@@ -87,8 +87,9 @@ pub async fn create_pipeline(
         .stream
         .into_inner()
         .map_ok(|fs| {
-            fs.slot_sem
-                .add_permits(MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE - MAX_PREFETCH_BUFFERS_OF_WAITING_FILE);
+            fs.slot_sem.add_permits(
+                MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE - MAX_PREFETCH_BUFFERS_OF_WAITING_FILE,
+            );
             fs.stream.stream.into_inner()
         })
         .try_flatten()

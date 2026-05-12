@@ -73,6 +73,7 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
 use crate::pipeline_stats::{MAX_BUFFERED_BYTES_PER_TASK, STATS};
 use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
+use crate::unexpected;
 
 /// Build an `ArrowReader` from a `FileIO` and batch size, with per-file
 /// concurrency pinned to 1 (each reader handles one file). Shared by the
@@ -83,7 +84,6 @@ pub(crate) fn build_reader(file_io: FileIO, batch_size: usize) -> ArrowReader {
         .with_batch_size(batch_size)
         .build()
 }
-use crate::unexpected;
 
 /// Time an async expression and record its duration into a STATS field.
 ///
@@ -259,11 +259,9 @@ where
 ///
 /// `build_batch_stream` is invoked once on the spawned task and is the
 /// only per-pipeline difference between full and incremental:
-///   * full (`full_pipeline.rs`) passes an
-///     `ArrowReaderBuilder::new(...).build().read(stream::once(task))`
-///     closure.
-///   * incremental (`incremental_pipeline.rs`) passes a
-///     `read_one_append_file(reader, task)` closure.
+///   * full (`full_pipeline.rs`) wraps `read_one_full_scan_file(reader, task)`.
+///   * incremental (`incremental_pipeline.rs`) wraps
+///     `read_one_append_file(reader, task)`.
 ///
 /// The reader-setup time is timed centrally inside `process_file`.
 pub(crate) fn spawn_file_task<S, BSF>(
