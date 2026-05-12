@@ -44,8 +44,12 @@ mod writer_columns;
 // Profiling stats for the file-parallel pipeline
 mod pipeline_stats;
 
-// Ordered file-parallel pipeline
-mod ordered_file_pipeline;
+// Ordered file-parallel pipeline (shared helpers)
+mod nested_pipeline;
+
+// Full-scan pipeline entry points (composes `nested_pipeline` helpers
+// with an `ArrowReaderBuilder`-based per-file batch stream).
+mod full_pipeline;
 
 // Per-file nested pipeline for incremental scans
 mod incremental_pipeline;
