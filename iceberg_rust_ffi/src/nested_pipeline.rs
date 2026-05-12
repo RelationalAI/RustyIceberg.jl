@@ -391,6 +391,13 @@ pub(crate) async fn serialize_and_forward_batches(
         // Dispatched to Tokio's blocking thread pool so Tokio worker
         // threads stay free to make progress on async work while the CPU-
         // heavy IPC serialization runs on a dedicated blocking thread.
+        //
+        // We deliberately use Tokio's `spawn_blocking` rather than a bounded
+        // rayon pool (the previous `SERIALIZE_POOL`). Tokio's blocking pool
+        // is unbounded and elastic — it keeps recently-used threads warm for
+        // re-use and tears them down when idle — so a Rust prefetcher
+        // running here does not block Julia worker threads that are busy
+        // writing into raicode leaves.
         let serialized = timed!(
             serialize_ns,
             tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch))

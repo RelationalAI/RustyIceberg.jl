@@ -198,7 +198,10 @@ Now genuinely *shared* (one body, called by both):
   the "Backpressure clamp" subsection below).
 * `serialize_and_forward_batches` — RecordBatch → Arrow-IPC → mpsc, with
   byte/slot semaphore acquires and `tokio::select!`-based cancellation
-  on `tx.closed()`.
+  on `tx.closed()`. The CPU-heavy IPC encode runs on Tokio's blocking
+  pool via `spawn_blocking` (not a bounded rayon pool): Tokio's pool is
+  unbounded + elastic, so Rust prefetcher threads here don't block Julia
+  workers writing into raicode leaves.
 * `make_file_stream` — receiver → `Stream<ArrowBatch>` adapter with
   per-batch permit release.
 * `build_reader` — `ArrowReaderBuilder` with the configured `batch_size`
