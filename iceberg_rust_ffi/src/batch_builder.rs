@@ -22,7 +22,7 @@ use arrow_array::{
 use arrow_buffer::{BooleanBuffer, Buffer, MutableBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 
-use crate::writer::{submit_batch, IcebergDataFileWriter};
+use crate::writer::{submit_batch, IcebergDataFileWriter, GLOBAL_ENCODE_POOL};
 use crate::writer_columns::{
     SliceRef, COLUMN_TYPE_BOOLEAN, COLUMN_TYPE_DATE, COLUMN_TYPE_DECIMAL_INT128,
     COLUMN_TYPE_DECIMAL_INT32, COLUMN_TYPE_DECIMAL_INT64, COLUMN_TYPE_FLOAT32, COLUMN_TYPE_FLOAT64,
@@ -181,6 +181,7 @@ impl ColumnBatchBuilder {
     pub(crate) fn write_and_reset(
         &mut self,
         writer_ref: &IcebergDataFileWriter,
+        pool: &crate::writer::GlobalWorkerPool,
     ) -> Result<(), anyhow::Error> {
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.columns.len());
         for (i, state) in self.columns.iter_mut().enumerate() {
@@ -189,7 +190,7 @@ impl ColumnBatchBuilder {
         }
         let batch = arrow_array::RecordBatch::try_new(self.arrow_schema.clone(), arrays)
             .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))?;
-        submit_batch(writer_ref, batch)
+        submit_batch(writer_ref, pool, batch)
     }
 }
 
@@ -677,10 +678,17 @@ pub extern "C" fn iceberg_batch_builder_write(
     }
     let writer_ref = unsafe { &*writer };
     let builder_ref = unsafe { &mut *builder };
-    match builder_ref.write_and_reset(writer_ref) {
+    let pool = match GLOBAL_ENCODE_POOL.get() {
+        Some(p) => p,
+        None => {
+            eprintln!("[iceberg] encode pool not initialized");
+            return -1;
+        }
+    };
+    match builder_ref.write_and_reset(writer_ref, pool) {
         Ok(()) => 0,
         Err(e) => {
-            crate::writer::store_writer_error(writer_ref, e);
+            crate::writer::store_writer_error_pub(writer_ref, e);
             -1
         }
     }
