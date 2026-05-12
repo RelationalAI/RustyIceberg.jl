@@ -17,6 +17,7 @@ tbl = read_table_data(table)
 """
 function read_table_data(table)
     scan = RustyIceberg.new_scan(table)
+    RustyIceberg.with_batch_size!(scan, UInt(1024))
     stream = RustyIceberg.scan!(scan)
 
     all_batches = Arrow.Table[]

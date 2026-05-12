@@ -575,6 +575,8 @@ end
         @test scan != C_NULL
         println("✅ Scan created successfully on loaded table")
 
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
+
         # Select specific columns to verify table structure
         println("Selecting specific columns from customer table...")
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
@@ -662,6 +664,8 @@ end
         @test scan != C_NULL
         println("✅ Scan created successfully on loaded table")
 
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
+
         # Select specific columns
         println("Selecting specific columns from customer table...")
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
@@ -739,6 +743,7 @@ end
             try
                 table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer"; load_credentials=false)
                 scan = RustyIceberg.new_scan(table)
+                RustyIceberg.with_batch_size!(scan, UInt(1024))
                 RustyIceberg.select_columns!(scan, ["c_custkey"])
                 stream = RustyIceberg.scan!(scan)
                 RustyIceberg.next_batch(stream)
@@ -808,6 +813,8 @@ end
             scan = RustyIceberg.new_scan(table)
             @test scan != C_NULL
             println("✅ Scan created successfully on loaded table")
+
+            RustyIceberg.with_batch_size!(scan, UInt(1024))
 
             # Select specific columns
             println("Selecting specific columns from customer table...")
