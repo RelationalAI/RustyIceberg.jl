@@ -183,7 +183,11 @@ pub(crate) fn submit_batch(
 ) -> Result<(), anyhow::Error> {
     let enc = match GLOBAL_ENCODE_STATE.get() {
         Some(s) => s,
-        None => return Err(anyhow::anyhow!("encode state not initialized; call iceberg_writer_new first")),
+        None => {
+            return Err(anyhow::anyhow!(
+                "encode state not initialized; call iceberg_writer_new first"
+            ))
+        }
     };
     let state = writer_ref.writer_state.clone();
     let semaphore = enc.semaphore.clone();
@@ -196,10 +200,14 @@ pub(crate) fn submit_batch(
             Ok(p) => p,
             Err(_) => {
                 let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
-                if slot.is_none() { *slot = Some(anyhow::anyhow!("encode semaphore closed unexpectedly")); }
+                if slot.is_none() {
+                    *slot = Some(anyhow::anyhow!("encode semaphore closed unexpectedly"));
+                }
                 drop(slot);
                 let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
-                if prev == 1 { state.done_notify.notify_one(); }
+                if prev == 1 {
+                    state.done_notify.notify_one();
+                }
                 return;
             }
         };
@@ -224,10 +232,14 @@ pub(crate) fn submit_batch(
         };
         if let Some(e) = err {
             let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() { *slot = Some(e); }
+            if slot.is_none() {
+                *slot = Some(e);
+            }
         }
         let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
-        if prev == 1 { state.done_notify.notify_one(); }
+        if prev == 1 {
+            state.done_notify.notify_one();
+        }
     });
 
     Ok(())
