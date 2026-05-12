@@ -56,7 +56,7 @@
 //!
 //! # Memory bounding
 //! Each file task has its own Semaphore(MAX_BUFFERED_BYTES_PER_TASK). After
-//! serializing a batch, the task acquires byte_len permits. If the budget is
+//! serializing a batch, the task acquires clamped_byte_len permits. If the budget is
 //! exhausted, the task yields (async, not blocking) until the consumer drains
 //! batches and releases permits. This caps each file's buffered output to
 //! ~100MB independently.
@@ -104,13 +104,14 @@ macro_rules! timed {
 // Pipeline implementation
 // ===========================================================================
 
-/// A serialized Arrow IPC batch bundled with its byte size and references
-/// to the originating file task's two semaphores. The consumer releases
-/// permits after forwarding the batch to Julia, unblocking the producer:
-/// `byte_sem` adds back `byte_len` bytes; `slot_sem` adds back 1 batch slot.
+/// A serialized Arrow IPC batch bundled with the *clamped* byte size used
+/// for backpressure accounting and references to the originating file task's
+/// two semaphores. The consumer releases permits after forwarding the batch
+/// to Julia, unblocking the producer: `byte_sem` adds back `clamped_byte_len`
+/// bytes; `slot_sem` adds back 1 batch slot.
 pub(crate) struct BufferedBatch {
     pub(crate) batch: ArrowBatch,
-    pub(crate) byte_len: usize,
+    pub(crate) clamped_byte_len: usize,
     pub(crate) byte_sem: Arc<Semaphore>,
     pub(crate) slot_sem: Arc<Semaphore>,
 }
@@ -181,9 +182,14 @@ pub(crate) fn make_file_stream(
             }
             Some(item) => {
                 let result = item.map(|buf| {
-                    buf.byte_sem.add_permits(buf.byte_len);
+                    // Release `clamped_byte_len` permits back to `byte_sem`
+                    // (must match what the producer acquired) but report the
+                    // *unclamped* batch size to `track_buffer_release` —
+                    // `STATS.buffered_bytes` measures real in-flight RAM,
+                    // not semaphore permits.
+                    buf.byte_sem.add_permits(buf.clamped_byte_len);
                     buf.slot_sem.add_permits(1);
-                    STATS.track_buffer_release(buf.byte_len as u64);
+                    STATS.track_buffer_release(buf.batch.length as u64);
                     buf.batch
                 });
                 Some((result, rx))
@@ -279,6 +285,7 @@ where
     tokio::spawn(process_file(
         build_batch_stream,
         byte_sem,
+        MAX_BUFFERED_BYTES_PER_TASK,
         slot_sem.clone(),
         file_tx,
     ));
@@ -298,6 +305,7 @@ where
 async fn process_file<S, BSF>(
     build_batch_stream: BSF,
     byte_sem: Arc<Semaphore>,
+    byte_budget: usize,
     slot_sem: Arc<Semaphore>,
     tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) where
@@ -305,7 +313,8 @@ async fn process_file<S, BSF>(
     S: Stream<Item = iceberg::Result<RecordBatch>> + Unpin,
 {
     STATS.track_task_start();
-    let result = process_file_inner(build_batch_stream, &byte_sem, &slot_sem, &tx).await;
+    let result =
+        process_file_inner(build_batch_stream, &byte_sem, byte_budget, &slot_sem, &tx).await;
     if let Err(e) = result {
         let _ = tx.send(Err(e)).await;
     }
@@ -327,6 +336,7 @@ async fn process_file<S, BSF>(
 async fn process_file_inner<S, BSF>(
     build_batch_stream: BSF,
     byte_sem: &Arc<Semaphore>,
+    byte_budget: usize,
     slot_sem: &Arc<Semaphore>,
     tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) -> Result<(), iceberg::Error>
@@ -338,7 +348,7 @@ where
     let batch_stream = build_batch_stream()?;
     STATS.add_elapsed(&STATS.reader_setup_ns, setup_start);
 
-    serialize_and_forward_batches(batch_stream, byte_sem, slot_sem, tx).await
+    serialize_and_forward_batches(batch_stream, byte_sem, slot_sem, byte_budget, tx).await
 }
 
 /// Take a per-file `RecordBatch` stream and forward each batch — serialized
@@ -347,6 +357,11 @@ where
 /// Shared by both the full-scan and incremental-scan pipelines — the only
 /// difference between the two is how the input stream is obtained before
 /// calling this function.
+///
+/// `byte_budget` is the total number of permits initially in `byte_sem`. Each
+/// per-batch byte cost is clamped to this value before acquiring, so a single
+/// batch larger than the budget does not deadlock waiting for permits that
+/// will never exist.
 ///
 /// Batches within a single file are decoded strictly sequentially (one
 /// `RecordBatch` per `batch_stream.next().await`); concurrency lives at the
@@ -359,6 +374,7 @@ pub(crate) async fn serialize_and_forward_batches(
     mut batch_stream: impl Stream<Item = iceberg::Result<RecordBatch>> + Unpin,
     byte_sem: &Arc<Semaphore>,
     slot_sem: &Arc<Semaphore>,
+    byte_budget: usize,
     tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
 ) -> Result<(), iceberg::Error> {
     loop {
@@ -384,18 +400,24 @@ pub(crate) async fn serialize_and_forward_batches(
         .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
         .map_err(unexpected)?;
 
-        let byte_len = serialized.length;
         STATS.batches_produced.fetch_add(1, Ordering::Relaxed);
         STATS
             .bytes_produced
-            .fetch_add(byte_len as u64, Ordering::Relaxed);
+            .fetch_add(serialized.length as u64, Ordering::Relaxed);
+        // Clamp the per-batch cost used for backpressure to the byte budget.
+        // `acquire_many` for a >budget batch would never resolve (the
+        // semaphore only has `byte_budget` permits), and clamping also
+        // protects the `as u32` cast below from wrapping at ≥ 4 GiB.
+        // Real throughput accounting (`bytes_produced`, above) sees the
+        // unclamped value.
+        let clamped_byte_len = serialized.length.min(byte_budget);
 
         // ── Phase 4: Backpressure ───────────────────────────────────────
         // Producer is throttled by three per-file bounds, all funneling
         // into `producer_stall_ns` because they share one root cause
         // ("consumer hasn't drained enough"):
-        //   (a) byte budget — `byte_sem.acquire_many(byte_len)` blocks if
-        //       this file's outstanding buffered bytes exceed
+        //   (a) byte budget — `byte_sem.acquire_many(clamped_byte_len)`
+        //       blocks if this file's outstanding buffered bytes exceed
         //       MAX_BUFFERED_BYTES_PER_TASK (100 MB).
         //   (b) batch-slot budget — `slot_sem.acquire()` blocks if the file
         //       has hit its current batch-count cap. Needed *in addition to*
@@ -416,7 +438,7 @@ pub(crate) async fn serialize_and_forward_batches(
         // which won't happen anymore — and the spawned task would leak.
         let byte_acquire_start = Instant::now();
         let _byte_permit = tokio::select! {
-            permit = byte_sem.acquire_many(byte_len as u32) => {
+            permit = byte_sem.acquire_many(clamped_byte_len as u32) => {
                 STATS.add_elapsed(&STATS.producer_stall_ns, byte_acquire_start);
                 permit.map_err(|e| unexpected(format!("byte_sem: {e}")))?
             }
@@ -433,14 +455,17 @@ pub(crate) async fn serialize_and_forward_batches(
         };
         std::mem::forget(_slot_permit);
 
-        STATS.track_buffer_add(byte_len as u64);
+        // Track the *actual* serialized byte size as in-flight memory, not
+        // the clamped permit count. The clamp only affects what we acquire
+        // from `byte_sem`; the real allocation is `serialized.length` bytes.
+        STATS.track_buffer_add(serialized.length as u64);
 
         // Send the batch to this file's channel.
         let send_result = timed!(
             producer_stall_ns,
             tx.send(Ok(BufferedBatch {
                 batch: serialized,
-                byte_len,
+                clamped_byte_len,
                 byte_sem: byte_sem.clone(),
                 slot_sem: slot_sem.clone(),
             }))
@@ -688,8 +713,14 @@ mod tests {
         let byte_sem_for_drain = byte_sem.clone();
         let slot_sem_for_drain = slot_sem.clone();
         let drain = tokio::spawn(async move {
-            serialize_and_forward_batches(batches, &byte_sem_for_drain, &slot_sem_for_drain, &tx)
-                .await
+            serialize_and_forward_batches(
+                batches,
+                &byte_sem_for_drain,
+                &slot_sem_for_drain,
+                MAX_BUFFERED_BYTES_PER_TASK,
+                &tx,
+            )
+            .await
         });
 
         // Wait for batch 1 to reach the mpsc (proves the producer ran past
@@ -715,6 +746,81 @@ mod tests {
             .expect(
                 "serialize_and_forward_batches did not exit after consumer dropped rx (parked on slot_sem)",
             )
+            .expect("drain task panicked");
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn oversized_batch_does_not_deadlock_byte_sem() {
+        // Regression test: a single batch whose serialized size exceeds the
+        // per-task byte budget must not deadlock on `byte_sem.acquire_many`.
+        // Pre-fix, `acquire_many(byte_len)` for a >budget batch could never
+        // resolve (the semaphore only has `byte_budget` permits) and the
+        // producer hung. The clamp `clamped_byte_len = serialized.length.min(byte_budget)`
+        // makes the acquire fit, and the symmetric `add_permits` in
+        // `make_file_stream` keeps the running budget consistent.
+        //
+        // We use a tiny byte_budget (smaller than the IPC overhead of a
+        // 3-row batch, ~~ a few hundred bytes) so we don't have to allocate
+        // anything large in CI.
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .map_err(|e| unexpected(e.to_string()));
+        let batches = futures::stream::iter(vec![batch]);
+
+        let byte_budget = 8usize; // far smaller than the IPC-serialized 3-row batch
+        let byte_sem = Arc::new(Semaphore::new(byte_budget));
+        let slot_sem = Arc::new(Semaphore::new(1));
+        let (tx, mut rx) = mpsc::channel::<Result<BufferedBatch, iceberg::Error>>(8);
+
+        let byte_sem_for_drain = byte_sem.clone();
+        let slot_sem_for_drain = slot_sem.clone();
+        let drain = tokio::spawn(async move {
+            serialize_and_forward_batches(
+                batches,
+                &byte_sem_for_drain,
+                &slot_sem_for_drain,
+                byte_budget,
+                &tx,
+            )
+            .await
+        });
+
+        // Pre-fix this would hang forever inside `byte_sem.acquire_many`.
+        let batch = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("producer hung on byte_sem.acquire_many for oversized batch")
+            .expect("mpsc closed unexpectedly")
+            .expect("batch was an Err");
+        assert_eq!(
+            batch.clamped_byte_len, byte_budget,
+            "byte_len should be clamped to the budget"
+        );
+
+        // Releasing permits via the consumer path returns exactly the clamped
+        // amount; the byte_sem must end up back at full capacity.
+        batch.byte_sem.add_permits(batch.clamped_byte_len);
+        assert_eq!(byte_sem.available_permits(), byte_budget);
+
+        // Free the IPC payload allocated by serialize_record_batch.
+        unsafe { drop(Box::from_raw(batch.batch.rust_ptr as *mut Vec<u8>)) };
+
+        // Drain finishes cleanly once the stream is exhausted.
+        drop(rx);
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), drain)
+            .await
+            .expect("drain did not exit")
             .expect("drain task panicked");
         assert!(result.is_ok());
     }
