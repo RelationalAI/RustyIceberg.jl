@@ -1,6 +1,6 @@
 //! Incremental-append entry point on top of the shared `nested_pipeline`
 //! helpers. The per-file machinery (`create_nested_pipeline`,
-//! `spawn_file_task`, `process_file`, `drain_batch_stream`,
+//! `spawn_file_task`, `process_file`, `serialize_and_forward_batches`,
 //! `make_file_stream`, `BufferedBatch`, `FileScan`) lives in `nested_pipeline`
 //! and is shared verbatim with the full-scan entry point. The only
 //! incremental-specific bits in this file are:
@@ -15,13 +15,13 @@
 //!   - append stream: one `FileScan` per parquet file, in manifest order
 //!   - delete stream: flat Arrow stream of delete records
 
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use iceberg::arrow::{ArrowReader, StreamsInto, UnzippedIncrementalBatchRecordStream};
 use iceberg::io::FileIO;
 use iceberg::scan::incremental::{AppendedFileScanTask, DeleteScanTask};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::nested_pipeline::{build_reader, create_nested_pipeline, spawn_file_task};
+use crate::nested_pipeline::{build_reader, create_nested_pipeline, FileToScan};
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
@@ -63,20 +63,20 @@ pub async fn create_incremental_nested_pipeline(
 ) -> anyhow::Result<(IcebergFileScanStream, IcebergArrowStream)> {
     let reader = build_reader(file_io.clone(), batch_size);
 
-    let append_stream = create_nested_pipeline(
-        append_tasks,
-        move |task: AppendedFileScanTask| {
-            let filename = task.base.data_file_path.clone();
-            let record_count = task.base.record_count.unwrap_or(0) as i64;
-            let reader = reader.clone();
-            spawn_file_task(filename, record_count, move || {
+    let files = append_tasks.map_ok(move |task: AppendedFileScanTask| {
+        let filename = task.base.data_file_path.clone();
+        let record_count = task.base.record_count.unwrap_or(0) as i64;
+        let reader = reader.clone();
+        FileToScan {
+            filename,
+            record_count,
+            build_batch_stream: Box::new(move || {
                 read_one_append_file(reader, task)
                     .map_err(|e| unexpected(format!("reader setup: {e}")))
-            })
-        },
-        prefetch_depth,
-    )
-    .await;
+            }),
+        }
+    });
+    let append_stream = create_nested_pipeline(files, prefetch_depth).await;
 
     // Delete stream: StreamsInto with empty append stream routes all delete
     // tasks through the iceberg reader machinery.

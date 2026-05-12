@@ -2,7 +2,7 @@
 //!
 //! Mirrors `incremental_pipeline.rs` for the full-scan path. The per-file
 //! machinery (`create_nested_pipeline`, `spawn_file_task`, `process_file`,
-//! `drain_batch_stream`, `make_file_stream`, `BufferedBatch`, `FileScan`)
+//! `serialize_and_forward_batches`, `make_file_stream`, `BufferedBatch`, `FileScan`)
 //! lives in `nested_pipeline` and is shared verbatim with the
 //! incremental-append entry point. The only full-scan-specific bits in
 //! this file are:
@@ -17,11 +17,11 @@
 use futures::{StreamExt, TryStreamExt};
 use iceberg::arrow::ArrowReader;
 use iceberg::io::FileIO;
-use iceberg::scan::FileScanTask;
+use iceberg::scan::{FileScanTask, FileScanTaskStream};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::nested_pipeline::{
-    build_reader, create_nested_pipeline, spawn_file_task, MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE,
+    build_reader, create_nested_pipeline, FileToScan, MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE,
     MAX_PREFETCH_BUFFERS_OF_WAITING_FILE,
 };
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
@@ -39,27 +39,28 @@ fn read_one_full_scan_file(
 }
 
 /// Full-scan entry point — wraps `create_nested_pipeline` with a closure
-/// that builds an `ArrowReaderBuilder`-based per-file batch stream.
+/// that builds an `ArrowReaderBuilder`-based per-file batch stream. Takes
+/// the planner's `FileScanTaskStream` directly so the caller doesn't have
+/// to `try_collect` it into a `Vec` first.
 pub async fn create_full_scan_pipeline(
-    tasks: Vec<FileScanTask>,
+    tasks: FileScanTaskStream,
     file_io: FileIO,
     batch_size: usize,
     prefetch_depth: usize,
 ) -> IcebergFileScanStream {
-    let source = futures::stream::iter(tasks.into_iter().map(Ok::<_, iceberg::Error>));
-    create_nested_pipeline(
-        source,
-        move |task: FileScanTask| {
-            let filename = task.data_file_path().to_string();
-            let record_count = task.record_count.unwrap_or(0) as i64;
-            let reader = build_reader(file_io.clone(), batch_size);
-            spawn_file_task(filename, record_count, move || {
+    let files = tasks.map_ok(move |task: FileScanTask| {
+        let filename = task.data_file_path().to_string();
+        let record_count = task.record_count.unwrap_or(0) as i64;
+        let reader = build_reader(file_io.clone(), batch_size);
+        FileToScan {
+            filename,
+            record_count,
+            build_batch_stream: Box::new(move || {
                 read_one_full_scan_file(reader, task).map_err(unexpected)
-            })
-        },
-        prefetch_depth,
-    )
-    .await
+            }),
+        }
+    });
+    create_nested_pipeline(files, prefetch_depth).await
 }
 
 /// Build the flat (concatenated) per-batch stream used by the legacy
@@ -76,7 +77,7 @@ pub async fn create_full_scan_pipeline(
 /// drains each file immediately (i.e. each is active by construction),
 /// promote inline.
 pub async fn create_pipeline(
-    tasks: Vec<FileScanTask>,
+    tasks: FileScanTaskStream,
     file_io: FileIO,
     batch_size: usize,
     prefetch_depth: usize,
@@ -181,7 +182,8 @@ mod tests {
         // Exercises: create_full_scan_pipeline → spawn_file_task → process_file
         //   (reader setup, fetch/decode, serialize IPC, semaphore acquire)
         //   → make_file_stream (semaphore release)
-        let nested = create_full_scan_pipeline(vec![task], file_io, 1024, 1).await;
+        let tasks = Box::pin(futures::stream::iter(vec![Ok::<_, iceberg::Error>(task)]));
+        let nested = create_full_scan_pipeline(tasks, file_io, 1024, 1).await;
 
         // ── 6. Drain outer FileScanStream ──────────────────────────────────
         let mut outer = nested.stream.lock().await;
@@ -317,6 +319,9 @@ mod tests {
         // the test then verifies that the inline `slot_sem.add_permits`
         // promotion in `create_pipeline` lets all 30 rows drain. Without it
         // each producer would stall after one batch and the test would hang.
+        let tasks = Box::pin(futures::stream::iter(
+            tasks.into_iter().map(Ok::<_, iceberg::Error>),
+        ));
         let flat = create_pipeline(tasks, file_io, 1, 2).await;
 
         // Drain all batches and verify total row count + per-batch payload.
@@ -430,6 +435,9 @@ mod tests {
         // batch_size=1 → 3 batches/file → producers actually park on slot_sem
         // (MAX_PREFETCH_BUFFERS_OF_WAITING_FILE=1) after batch 1 instead of
         // finishing instantly.
+        let tasks = Box::pin(futures::stream::iter(
+            tasks.into_iter().map(Ok::<_, iceberg::Error>),
+        ));
         let nested = create_full_scan_pipeline(tasks, file_io, 1, prefetch_depth).await;
 
         // Pull the first FileScan (the "+1"). Don't drain its inner stream —

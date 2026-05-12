@@ -343,7 +343,6 @@ export_runtime_op!(
 
         let (append_tasks, delete_tasks) = scan_ref.plan_files().await?;
 
-        // `STATS.reset()` is called inside `create_nested_pipeline`.
         let (append_stream, delete_stream) =
             crate::incremental_pipeline::create_incremental_nested_pipeline(
                 append_tasks,

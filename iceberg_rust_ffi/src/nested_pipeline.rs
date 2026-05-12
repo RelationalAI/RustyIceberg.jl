@@ -28,7 +28,7 @@
 //!      handoff in `IcebergFileScanResponse::set_payload`).
 //!
 //! This file hosts only the shared helpers (`create_nested_pipeline`,
-//! `spawn_file_task`, `process_file`, `drain_batch_stream`,
+//! `spawn_file_task`, `process_file`, `serialize_and_forward_batches`,
 //! `make_file_stream`, `BufferedBatch`, `FileScan`). The per-pipeline
 //! entry points live in sibling files:
 //!
@@ -141,6 +141,18 @@ pub struct FileScan {
     pub(crate) slot_sem: Arc<Semaphore>,
 }
 
+/// Handoff shape between a per-pipeline planner adapter and the orchestrator.
+/// Carries the three pieces `spawn_file_task` needs: the filename to surface
+/// at the FFI, the record-count hint, and the deferred batch-stream builder
+/// (called on the spawned `process_file` task). Generic over `S` because the
+/// full-scan and incremental-append pipelines return different concrete
+/// `Stream<Item = iceberg::Result<RecordBatch>>` types.
+pub(crate) struct FileToScan<S> {
+    pub(crate) filename: String,
+    pub(crate) record_count: i64,
+    pub(crate) build_batch_stream: Box<dyn FnOnce() -> iceberg::Result<S> + Send>,
+}
+
 /// Convert a per-file mpsc receiver into an `IcebergArrowStream`. On each
 /// batch pull it releases the originating producer's `byte_sem` and
 /// `slot_sem` permits (unblocking the producer) and updates the
@@ -185,22 +197,21 @@ pub(crate) fn make_file_stream(
 }
 
 /// Build a nested per-file pipeline as a `Stream<FileScan>` driven by
-/// `Stream::buffered(prefetch_depth)` over a synchronous start-file-task
-/// factory. Used by both the full-scan and the incremental-append entry
-/// points; the only difference between the two is what `start_one` does to
-/// build each per-file batch stream.
+/// `Stream::buffered(prefetch_depth)` over a stream of `FileToScan` handoff
+/// values. Used by both the full-scan and the incremental-append entry
+/// points; the only difference between the two is how their planner stream
+/// is adapted into `FileToScan` (and what concrete batch-stream type `S`
+/// the `build_batch_stream` closure returns).
 ///
 /// See the module-level "Concurrency invariant" doc for the bound on alive
 /// `process_file` tasks.
-pub(crate) async fn create_nested_pipeline<T, Src, F>(
+pub(crate) async fn create_nested_pipeline<S, Src>(
     source: Src,
-    start_one: F,
     prefetch_depth: usize,
 ) -> IcebergFileScanStream
 where
-    T: Send + 'static,
-    Src: Stream<Item = iceberg::Result<T>> + Send + 'static,
-    F: Fn(T) -> FileScan + Clone + Send + 'static,
+    S: Stream<Item = iceberg::Result<RecordBatch>> + Send + Unpin + 'static,
+    Src: Stream<Item = iceberg::Result<FileToScan<S>>> + Send + 'static,
 {
     let prefetch_depth = prefetch_depth.max(1);
 
@@ -208,14 +219,14 @@ where
     // inside `reset()` so wall-time accounting starts here.
     STATS.reset();
 
-    // Each inner future does the sync spawn *when polled*, so `buffered`'s
+    // Each inner future does the sync `spawn_file_task` (which itself
+    // `tokio::spawn`s the `process_file` task) *when polled*, so `buffered`'s
     // cap (prefetch_depth) actually bounds how many `process_file` tasks are
     // kicked off ahead of the consumer. Doing the spawn in `.map` directly
     // would fire it as soon as the source is polled, bypassing the bound.
     let buffered = source
-        .map(move |res| {
-            let start_one = start_one.clone();
-            async move { res.map(start_one) }
+        .map(|res| async move {
+            res.map(|f| spawn_file_task(f.filename, f.record_count, f.build_batch_stream))
         })
         .buffered(prefetch_depth);
 
@@ -327,18 +338,24 @@ where
     let batch_stream = build_batch_stream()?;
     STATS.add_elapsed(&STATS.reader_setup_ns, setup_start);
 
-    drain_batch_stream(batch_stream, byte_sem, slot_sem, tx).await
+    serialize_and_forward_batches(batch_stream, byte_sem, slot_sem, tx).await
 }
 
-/// Drain a batch stream through phases 2-4 of the file pipeline, recording
-/// timing and throughput into STATS. Shared by both the full-scan and
-/// incremental-scan pipelines — the only difference between the two is how
-/// the stream is obtained before calling this function.
+/// Take a per-file `RecordBatch` stream and forward each batch — serialized
+/// as Arrow IPC — into the file's mpsc, throttled by `byte_sem` / `slot_sem`.
+/// Phases 2-4 of the file pipeline; recording timing and throughput into STATS.
+/// Shared by both the full-scan and incremental-scan pipelines — the only
+/// difference between the two is how the input stream is obtained before
+/// calling this function.
+///
+/// Batches within a single file are decoded strictly sequentially (one
+/// `RecordBatch` per `batch_stream.next().await`); concurrency lives at the
+/// file level via `Stream::buffered(prefetch_depth)` in `create_nested_pipeline`.
 ///
 ///   2. Fetch + decode — timed; each `.next()` does I/O + decompression
 ///   3. Serialize      — timed; dispatched via tokio::task::spawn_blocking
 ///   4. Backpressure   — timed; semaphore blocks if producer is too far ahead
-pub(crate) async fn drain_batch_stream(
+pub(crate) async fn serialize_and_forward_batches(
     mut batch_stream: impl Stream<Item = iceberg::Result<RecordBatch>> + Unpin,
     byte_sem: &Arc<Semaphore>,
     slot_sem: &Arc<Semaphore>,
@@ -380,19 +397,23 @@ pub(crate) async fn drain_batch_stream(
         //   (a) byte budget — `byte_sem.acquire_many(byte_len)` blocks if
         //       this file's outstanding buffered bytes exceed
         //       MAX_BUFFERED_BYTES_PER_TASK (100 MB).
-        //   (b) batch-slot budget — `slot_sem.acquire()` blocks if the
-        //       file has hit its current cap (MAX_PREFETCH_BUFFERS_OF_WAITING_FILE
-        //       while waiting for Julia to pick it up; MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
-        //       once it's active).
+        //   (b) batch-slot budget — `slot_sem.acquire()` blocks if the file
+        //       has hit its current batch-count cap. Needed *in addition to*
+        //       the byte budget so a still-waiting file (Julia hasn't picked
+        //       it up yet) doesn't fetch too far into the future (we want to
+        //       prioritize prefetching of buffers on active files!):
+        //       cap is MAX_PREFETCH_BUFFERS_OF_WAITING_FILE while waiting,
+        //       MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE once active.
         //   (c) channel-capacity safety — `tx.send(...)` blocks if the
         //       mpsc is full. With slot_sem ≤ MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
         //       = mpsc capacity, this is a redundant safety net.
         //
-        // Each acquire races against `tx.closed()` so that if the consumer
-        // drops the receiver, parked producers wake immediately and exit
-        // cleanly. Without this, a waiting-file producer parked on
-        // `slot_sem.acquire()` would never be woken (its permits are only
-        // released by consumer `recv()`) and the spawned task would leak.
+        // Each `.acquire()` is wrapped in a `tokio::select!` with `tx.closed()`,
+        // so a producer parked on a semaphore wakes immediately when the
+        // consumer drops the receiver and exits cleanly. Without this, a
+        // waiting-file producer parked on `slot_sem.acquire()` would hang
+        // forever — its permits are only released by consumer `recv()`,
+        // which won't happen anymore — and the spawned task would leak.
         let byte_acquire_start = Instant::now();
         let _byte_permit = tokio::select! {
             permit = byte_sem.acquire_many(byte_len as u32) => {
@@ -444,31 +465,29 @@ pub(crate) static PIPELINE_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::TryStreamExt;
 
-    // ── Orchestration tests (stub spawn factory — no real I/O) ──────────
+    // ── Orchestration tests (empty-batch-stream builder — no real I/O) ──
     //
     // These tests exercise `create_nested_pipeline`'s plumbing
-    // (`Stream::buffered` semantics, error propagation, source order)
-    // by feeding a synthetic source and a `start_one` closure that
-    // builds an empty `FileScan` synchronously. No real parquet is
-    // opened; no `process_file` task does I/O.
-    //
-    // Naming kept close to the pre-refactor orchestrator tests; the
-    // assertions match the new `Stream::buffered` shape (which preserves
-    // source order by construction and propagates `Err` items at the
-    // position they arrive in the source).
+    // (`Stream::buffered` semantics, error propagation, source order) by
+    // feeding a synthetic source of `FileToScan` values whose
+    // `build_batch_stream` returns an empty Arrow stream. Each spawned
+    // `process_file` task drops its `tx` immediately, so the per-file
+    // inner stream closes without any I/O — what we're checking is the
+    // outer-stream plumbing.
 
-    /// Build an empty `FileScan` whose inner stream is already closed
-    /// (the producer-side `tx` is dropped immediately). Useful for
-    /// exercising the outer-stream plumbing without any I/O.
-    fn fake_filescan(filename: String, record_count: i64) -> FileScan {
-        let (_, rx) = mpsc::channel::<Result<BufferedBatch, iceberg::Error>>(1);
-        let slot_sem = Arc::new(Semaphore::new(MAX_PREFETCH_BUFFERS_OF_WAITING_FILE));
-        FileScan {
+    /// Build a `FileToScan` whose batch-stream builder yields an empty
+    /// stream — `process_file` drops its `tx` immediately, closing the
+    /// per-file inner stream without any real I/O.
+    fn fake_file_to_scan(
+        filename: String,
+        record_count: i64,
+    ) -> FileToScan<futures::stream::Empty<iceberg::Result<RecordBatch>>> {
+        FileToScan {
             filename,
             record_count,
-            stream: make_file_stream(rx),
-            slot_sem,
+            build_batch_stream: Box::new(|| Ok(futures::stream::empty())),
         }
     }
 
@@ -482,13 +501,9 @@ mod tests {
         prefetch_depth: usize,
     ) -> Vec<iceberg::Result<(String, i64)>> {
         let _guard = PIPELINE_TEST_LOCK.lock().await;
-        let source = futures::stream::iter(items);
-        let nested = create_nested_pipeline(
-            source,
-            |(name, rc): (String, i64)| fake_filescan(name, rc),
-            prefetch_depth,
-        )
-        .await;
+        let source = futures::stream::iter(items)
+            .map_ok(|(name, rc): (String, i64)| fake_file_to_scan(name, rc));
+        let nested = create_nested_pipeline(source, prefetch_depth).await;
         let mut out = vec![];
         let mut stream = nested.stream.lock().await;
         while let Some(item) = stream.next().await {
@@ -625,18 +640,14 @@ mod tests {
         let items: Vec<iceberg::Result<(String, i64)>> = (0..20)
             .map(|i| Ok((format!("f{i}.parquet"), i as i64)))
             .collect();
-        let source = futures::stream::iter(items);
-        let nested = create_nested_pipeline(
-            source,
-            |(name, rc): (String, i64)| fake_filescan(name, rc),
-            4,
-        )
-        .await;
+        let source = futures::stream::iter(items)
+            .map_ok(|(name, rc): (String, i64)| fake_file_to_scan(name, rc));
+        let nested = create_nested_pipeline(source, 4).await;
         drop(nested);
     }
 
     #[tokio::test]
-    async fn drain_batch_stream_wakes_when_consumer_drops_receiver() {
+    async fn serialize_and_forward_batches_wakes_when_consumer_drops_receiver() {
         // A producer parked on `slot_sem.acquire()` must wake when the
         // consumer drops the receiver, otherwise the spawned task leaks.
         //
@@ -677,7 +688,8 @@ mod tests {
         let byte_sem_for_drain = byte_sem.clone();
         let slot_sem_for_drain = slot_sem.clone();
         let drain = tokio::spawn(async move {
-            drain_batch_stream(batches, &byte_sem_for_drain, &slot_sem_for_drain, &tx).await
+            serialize_and_forward_batches(batches, &byte_sem_for_drain, &slot_sem_for_drain, &tx)
+                .await
         });
 
         // Wait for batch 1 to reach the mpsc (proves the producer ran past
@@ -694,14 +706,14 @@ mod tests {
         );
 
         // Drop rx → tx.closed() fires → the cancellation arm in
-        // drain_batch_stream wakes the parked producer.
+        // serialize_and_forward_batches wakes the parked producer.
         drop(rx);
 
         // Without the cancellation fix, this would never complete.
         let result = tokio::time::timeout(std::time::Duration::from_millis(500), drain)
             .await
             .expect(
-                "drain_batch_stream did not exit after consumer dropped rx (parked on slot_sem)",
+                "serialize_and_forward_batches did not exit after consumer dropped rx (parked on slot_sem)",
             )
             .expect("drain task panicked");
         assert!(result.is_ok());

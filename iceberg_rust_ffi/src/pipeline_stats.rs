@@ -52,7 +52,7 @@ pub(crate) struct PipelineStats {
     /// Time in spawn_blocking(serialize_record_batch) — writes RecordBatch
     /// to Arrow IPC wire format for transfer to Julia.
     pub serialize_ns: AtomicU64,
-    /// Time a producer (`drain_batch_stream`) is suspended on per-file
+    /// Time a producer (`serialize_and_forward_batches`) is suspended on per-file
     /// backpressure: any of (a) `byte_sem.acquire_many` (100 MB cap),
     /// (b) `slot_sem.acquire` (UNATTACHED/ATTACHED batch-slot cap), or
     /// (c) `tx.send` (per-file mpsc full). All three stall the same producer

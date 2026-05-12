@@ -178,13 +178,11 @@ export_runtime_op!(
     async {
         let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
 
-        // Collect the ordered file task list from iceberg-rs.
-        use futures::TryStreamExt;
-        let tasks: Vec<iceberg::scan::FileScanTask> =
-            scan_ref.plan_files().await?.try_collect().await?;
-
-        // Hand off to the file-parallel pipeline. `STATS.reset()` is called
-        // inside `create_nested_pipeline`, which this composes with.
+        // Hand off to the file-parallel pipeline. We pass the planner's
+        // task stream directly — no `try_collect` into a `Vec`, since the
+        // nested pipeline already drives `plan_files()` through
+        // `Stream::buffered(prefetch_depth)`.
+        let tasks = scan_ref.plan_files().await?;
         let stream = crate::full_pipeline::create_pipeline(
             tasks, file_io, batch_size, prefetch_depth,
         )
@@ -223,11 +221,8 @@ export_runtime_op!(
     async {
         let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
 
-        use futures::TryStreamExt;
-        let tasks: Vec<iceberg::scan::FileScanTask> =
-            scan_ref.plan_files().await?.try_collect().await?;
-
-        // `STATS.reset()` is called inside `create_nested_pipeline`.
+        // Pass the planner's task stream directly into the pipeline.
+        let tasks = scan_ref.plan_files().await?;
         let stream = crate::full_pipeline::create_full_scan_pipeline(
             tasks, file_io, batch_size, prefetch_depth,
         )
