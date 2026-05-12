@@ -1,14 +1,11 @@
 /// Writer support for iceberg_rust_ffi
 ///
-/// Encoding is handled by a global pool of N=available_parallelism OS threads shared
-/// across all writers. Per-writer ordering is guaranteed by the per-writer
-/// `Arc<Mutex<ConcreteDataFileWriter>>` inside WriterState: only one pool thread encodes
-/// a given writer at a time, and the FIFO global queue ensures batches are submitted
-/// in order.
-use std::any::Any;
+/// Encoding uses Tokio's blocking thread pool via `spawn_blocking`. A global `Semaphore`
+/// with N=available_parallelism permits bounds concurrent Parquet+ZSTD encodes. Per-writer
+/// ordering is guaranteed by the per-writer `Arc<Mutex<ConcreteDataFileWriter>>` inside
+/// WriterState: only one blocking task encodes a given writer at a time.
 use std::ffi::{c_char, c_void};
 use std::io::Cursor;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -105,149 +102,41 @@ use object_store_ffi::{
 type ConcreteDataFileWriter =
     DataFileWriter<ParquetWriterBuilder, DefaultLocationGenerator, DefaultFileNameGenerator>;
 
-/// Encode task submitted to the global worker pool.
-pub(crate) struct EncodeTask {
-    batch: RecordBatch,
-    state: Arc<WriterState>,
-}
-
-// Safety: RecordBatch is Send; WriterState fields are Send.
-unsafe impl Send for EncodeTask {}
-
 /// Shared mutable state for one IcebergDataFileWriter.
-/// Owned by the IcebergDataFileWriter and shared with pool workers via Arc.
 pub(crate) struct WriterState {
-    /// The underlying Parquet writer. Protected by a Mutex so pool workers can access it
-    /// concurrently (though at most one worker encodes a given writer at a time due to the
-    /// bounded per-writer channel). Set to None when the writer is closed or freed.
+    /// The underlying Parquet writer. Protected by a Mutex so at most one blocking task
+    /// encodes a given writer at a time. Set to None when the writer is closed or freed.
     writer: Mutex<Option<ConcreteDataFileWriter>>,
-    /// Number of encode tasks submitted to the pool but not yet completed.
+    /// Number of encode tasks submitted but not yet completed.
     pending: AtomicUsize,
-    /// Notified when `pending` drops to zero, so iceberg_writer_close can wait efficiently.
+    /// Notified when `pending` drops to zero so iceberg_writer_close can wait efficiently.
     done_notify: tokio::sync::Notify,
-    /// First encode error encountered by a pool worker, if any.
+    /// First encode error encountered by any task for this writer, if any.
     error: Mutex<Option<anyhow::Error>>,
 }
 
-// Safety: ConcreteDataFileWriter is Send (verified by its use in spawn_blocking previously).
+// Safety: ConcreteDataFileWriter is Send.
 unsafe impl Send for WriterState {}
 unsafe impl Sync for WriterState {}
 
-/// Global pool of N=available_parallelism encode worker threads shared across all writers.
-pub(crate) struct GlobalWorkerPool {
-    pub(crate) task_tx: tokio::sync::mpsc::Sender<EncodeTask>,
-}
-
-pub(crate) static GLOBAL_ENCODE_POOL: OnceLock<GlobalWorkerPool> = OnceLock::new();
-
-/// Formats a Rust panic payload into an anyhow error, preserving the message where possible.
-fn format_panic_error(panic: Box<dyn Any + Send>) -> anyhow::Error {
-    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-        format!("encode worker panicked: {}", s)
-    } else if let Some(s) = panic.downcast_ref::<String>() {
-        format!("encode worker panicked: {}", s)
-    } else {
-        "encode worker panicked (no string payload)".to_string()
-    };
-    anyhow::anyhow!(msg)
-}
-
-/// Body of each encode worker thread: receives tasks from the shared channel and encodes them.
-fn encode_worker_loop(
-    task_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<EncodeTask>>>,
+/// Global encode state: semaphore + Tokio handle.
+/// Captured at first writer creation (inside the Tokio runtime) so submit_batch can
+/// spawn tasks even when called from Julia's sync (non-Tokio) context.
+struct GlobalEncodeState {
+    semaphore: Arc<tokio::sync::Semaphore>,
     handle: tokio::runtime::Handle,
-) {
-    loop {
-        // Acquire the shared receiver lock, then wait for a task.
-        // The lock is released as soon as recv() returns, so workers are not serialized
-        // during encoding — only during task pickup.
-        let task = {
-            let mut rx = handle.block_on(task_rx.lock());
-            match handle.block_on(rx.recv()) {
-                Some(t) => t,
-                None => break, // sender dropped → pool shutting down
-            }
-        };
-
-        // Clone state before moving task into the closure so we can always decrement
-        // pending even if the closure panics.
-        let state = task.state.clone();
-        let handle_enc = handle.clone();
-        let encode_result = catch_unwind(AssertUnwindSafe(move || {
-            let mut guard = task.state.writer.lock().unwrap_or_else(|e| e.into_inner());
-            match guard.as_mut() {
-                Some(w) => handle_enc
-                    .block_on(w.write(task.batch))
-                    .map_err(|e| anyhow::anyhow!("write batch: {}", e)),
-                None => Err(anyhow::anyhow!("writer already closed")),
-            }
-        }));
-
-        let err = match encode_result {
-            Ok(Ok(())) => None,
-            Ok(Err(e)) => Some(e),
-            Err(panic) => Some(format_panic_error(panic)),
-        };
-        if let Some(e) = err {
-            let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() {
-                *slot = Some(e);
-            }
-        }
-
-        // Always decrement pending; notify close() if this was the last task.
-        let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
-        if prev == 1 {
-            state.done_notify.notify_one();
-        }
-    }
 }
 
-/// Desired encode worker count. 0 means "use available_parallelism".
-/// Must be set before the first iceberg_writer_new call.
-static ENCODE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_ENCODE_STATE: OnceLock<GlobalEncodeState> = OnceLock::new();
 
-/// Set the number of encode worker threads in the global pool.
-/// Must be called before any writer is created. Returns 0 on success, 1 if the pool is
-/// already initialized (call ignored).
-#[no_mangle]
-pub extern "C" fn iceberg_set_encode_workers(n: i32) -> i32 {
-    if GLOBAL_ENCODE_POOL.get().is_some() {
-        return 1;
-    }
-    if n > 0 {
-        ENCODE_WORKERS.store(n as usize, Ordering::Relaxed);
-    }
-    0
-}
-
-/// Initialize the global encode pool on first call.
 /// Must be called from within a Tokio runtime (iceberg_writer_new satisfies this).
-fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
-    GLOBAL_ENCODE_POOL.get_or_init(|| {
-        let configured = ENCODE_WORKERS.load(Ordering::Relaxed);
-        let n = if configured > 0 {
-            configured
-        } else {
-            // available_parallelism() only fails on unusual platforms (embedded, some sandboxes).
-            // On Linux/macOS/Windows it always succeeds, so the unwrap never fires in practice.
-            thread::available_parallelism().unwrap().get()
-        };
-        let handle = tokio::runtime::Handle::current();
-        // Buffer 2× workers — drain tasks are rarely blocked on submit.
-        let (task_tx, task_rx) = tokio::sync::mpsc::channel::<EncodeTask>(n * 2);
-        let task_rx = Arc::new(tokio::sync::Mutex::new(task_rx));
-
-        for i in 0..n {
-            let task_rx = task_rx.clone();
-            let handle = handle.clone();
-            thread::Builder::new()
-                .name(format!("iceberg-encode-{}", i))
-                .spawn(move || encode_worker_loop(task_rx, handle))
-                .expect("failed to spawn iceberg encode worker");
+fn get_or_init_encode_state() -> &'static GlobalEncodeState {
+    GLOBAL_ENCODE_STATE.get_or_init(|| {
+        let n = thread::available_parallelism().unwrap().get();
+        GlobalEncodeState {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(n)),
+            handle: tokio::runtime::Handle::current(),
         }
-
-        GlobalWorkerPool { task_tx }
     })
 }
 
@@ -273,7 +162,7 @@ pub type IcebergDataFileWriterResponse = IcebergBoxedResponse<IcebergDataFileWri
 pub type IcebergWriterCloseResponse = IcebergBoxedResponse<IcebergDataFiles>;
 
 /// Store an error in the writer state (first error wins).
-fn store_writer_error(writer_ref: &IcebergDataFileWriter, e: anyhow::Error) {
+pub(crate) fn store_writer_error(writer_ref: &IcebergDataFileWriter, e: anyhow::Error) {
     let mut slot = writer_ref
         .writer_state
         .error
@@ -284,49 +173,68 @@ fn store_writer_error(writer_ref: &IcebergDataFileWriter, e: anyhow::Error) {
     }
 }
 
-/// Store an error in the writer state (public for batch_builder module).
-pub(crate) fn store_writer_error_pub(writer_ref: &IcebergDataFileWriter, e: anyhow::Error) {
-    store_writer_error(writer_ref, e);
-}
-
-/// Submit a `RecordBatch` to the global encode pool.
+/// Submit a `RecordBatch` for async Parquet encoding via `spawn_blocking`.
 ///
-/// Increments the writer's pending count before sending and rolls it back on channel failure.
+/// A semaphore permit is acquired before the blocking task runs, bounding concurrent
+/// encodes to N. The caller returns immediately; errors are surfaced at close time.
 pub(crate) fn submit_batch(
     writer_ref: &IcebergDataFileWriter,
-    pool: &GlobalWorkerPool,
     batch: RecordBatch,
 ) -> Result<(), anyhow::Error> {
-    writer_ref
-        .writer_state
-        .pending
-        .fetch_add(1, Ordering::AcqRel);
-    let task = EncodeTask {
-        batch,
-        state: writer_ref.writer_state.clone(),
+    let enc = match GLOBAL_ENCODE_STATE.get() {
+        Some(s) => s,
+        None => return Err(anyhow::anyhow!("encode state not initialized; call iceberg_writer_new first")),
     };
-    match pool.task_tx.blocking_send(task) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let prev = writer_ref
-                .writer_state
-                .pending
-                .fetch_sub(1, Ordering::AcqRel);
-            if prev == 1 {
-                writer_ref.writer_state.done_notify.notify_one();
+    let state = writer_ref.writer_state.clone();
+    let semaphore = enc.semaphore.clone();
+    let handle = enc.handle.clone();
+    state.pending.fetch_add(1, Ordering::AcqRel);
+
+    handle.clone().spawn(async move {
+        // Acquire a permit before spawning — this is the backpressure mechanism.
+        let permit = match semaphore.acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
+                if slot.is_none() { *slot = Some(anyhow::anyhow!("encode semaphore closed unexpectedly")); }
+                drop(slot);
+                let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
+                if prev == 1 { state.done_notify.notify_one(); }
+                return;
             }
-            Err(anyhow::anyhow!("encode pool channel closed unexpectedly"))
+        };
+
+        let state2 = state.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit; // released when blocking work completes
+            let mut guard = state2.writer.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                Some(w) => handle
+                    .block_on(w.write(batch))
+                    .map_err(|e| anyhow::anyhow!("write batch: {}", e)),
+                None => Err(anyhow::anyhow!("writer already closed")),
+            }
+        })
+        .await;
+
+        let err = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(join_err) => Some(anyhow::anyhow!("encode task failed: {}", join_err)),
+        };
+        if let Some(e) = err {
+            let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() { *slot = Some(e); }
         }
-    }
+        let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 { state.done_notify.notify_one(); }
+    });
+
+    Ok(())
 }
 
-/// Validates column count, converts each `ColumnDescriptor` into a single-slice `SliceRef`,
-/// routes through `ColumnBatchBuilder`, and submits the resulting `RecordBatch` to the
-/// encode pool.  Using the builder here keeps all type-conversion and null-bit logic in one
-/// place (`batch_builder.rs`) instead of duplicating it.
 unsafe fn write_columns_inner(
     writer_ref: &IcebergDataFileWriter,
-    pool: &GlobalWorkerPool,
     arrow_schema: ArrowSchemaRef,
     col_descs: &[ColumnDescriptor],
 ) -> Result<(), anyhow::Error> {
@@ -351,7 +259,7 @@ unsafe fn write_columns_inner(
         })
         .collect();
     unsafe { builder.append_slice(&slices) }?;
-    builder.write_and_reset(writer_ref, pool)
+    builder.write_and_reset(writer_ref)
 }
 
 /// Synchronous write of flat column data: copies each column from Julia memory into
@@ -370,16 +278,9 @@ pub extern "C" fn iceberg_writer_write_columns(
         return -1;
     }
     let writer_ref = unsafe { &*writer };
-    let pool = match GLOBAL_ENCODE_POOL.get() {
-        Some(p) => p,
-        None => {
-            eprintln!("[iceberg] encode pool not initialized; call iceberg_writer_new first");
-            return -1;
-        }
-    };
     let arrow_schema = writer_ref.arrow_schema.clone();
     let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
-    if let Err(e) = unsafe { write_columns_inner(writer_ref, pool, arrow_schema, col_descs) } {
+    if let Err(e) = unsafe { write_columns_inner(writer_ref, arrow_schema, col_descs) } {
         store_writer_error(writer_ref, e);
         return -1;
     }
@@ -470,8 +371,8 @@ export_runtime_op!(
                 .map_err(|e| anyhow::anyhow!("Failed to convert schema to Arrow: {}", e))?
         );
 
-        // Initialize global pool (no-op if already running).
-        get_or_init_encode_pool();
+        // Initialize global encode state (no-op if already done).
+        get_or_init_encode_state();
 
         let writer_state = Arc::new(WriterState {
             writer: Mutex::new(Some(concrete_writer)),
@@ -506,15 +407,6 @@ pub extern "C" fn iceberg_writer_write(
     }
 
     let writer_ref = unsafe { &*writer };
-
-    let pool = match GLOBAL_ENCODE_POOL.get() {
-        Some(p) => p,
-        None => {
-            eprintln!("[iceberg:sync] encode pool not initialized; call iceberg_writer_new first");
-            return -1;
-        }
-    };
-
     let ipc_bytes = unsafe { std::slice::from_raw_parts(arrow_ipc_data, arrow_ipc_len).to_vec() };
 
     let cursor = Cursor::new(ipc_bytes);
@@ -534,7 +426,7 @@ pub extern "C" fn iceberg_writer_write(
                 return -1;
             }
         };
-        if let Err(e) = submit_batch(writer_ref, pool, batch) {
+        if let Err(e) = submit_batch(writer_ref, batch) {
             store_writer_error(writer_ref, e);
             return -1;
         }
