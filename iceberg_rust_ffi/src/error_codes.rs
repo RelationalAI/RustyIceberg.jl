@@ -229,19 +229,11 @@ fn classify_message(detail: &str) -> (u32, String) {
         || lower.contains("timed out")
         || lower.contains("network error")
     {
-        return (IO_NETWORK, format!("Network error: {}", truncate(detail, 120)));
+        return (IO_NETWORK, "Network error".into());
     }
     if lower.contains("s3error") || (lower.contains("s3") && lower.contains("error")) {
-        return (IO_S3, format!("S3 error: {}", truncate(detail, 120)));
+        return (IO_S3, "S3 error".into());
     }
 
     (INTERNAL, "Internal error (please report this as a bug)".into())
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
 }
