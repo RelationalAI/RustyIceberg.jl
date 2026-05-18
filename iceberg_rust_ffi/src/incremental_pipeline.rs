@@ -1,28 +1,28 @@
-//! Per-file nested pipeline for incremental append tasks.
+//! Incremental-append entry point on top of the shared `nested_pipeline`
+//! helpers. The per-file machinery (`create_nested_pipeline`,
+//! `spawn_file_task`, `process_file`, `serialize_and_forward_batches`,
+//! `make_file_stream`, `BufferedBatch`, `FileScan`) lives in `nested_pipeline`
+//! and is shared verbatim with the full-scan entry point. The only
+//! incremental-specific bits in this file are:
 //!
-//! Mirrors `ordered_file_pipeline` but consumes a streaming
-//! `BoxStream<AppendedFileScanTask>` (from `plan_files()`) instead of a
-//! pre-collected `Vec<FileScanTask>`, and uses the `StreamsInto` machinery to
-//! open each append file individually.
+//!   * `read_one_append_file` — per-task helper that builds an Arrow batch
+//!     stream via iceberg-rs's `StreamsInto` machinery. The full-scan
+//!     equivalent is `full_pipeline::read_one_full_scan_file`, which calls
+//!     `ArrowReader::read` directly.
+//!   * `create_incremental_nested_pipeline` — wraps the shared helper for
+//!     the append source and pairs it with a (flat) delete stream.
 //!
 //! Returns `(IcebergFileScanStream, IcebergArrowStream)`:
 //!   - append stream: one `FileScan` per parquet file, in manifest order
 //!   - delete stream: flat Arrow stream of delete records
 
-use std::sync::Arc;
-
-use futures::StreamExt;
-use iceberg::arrow::{
-    ArrowReader, ArrowReaderBuilder, StreamsInto, UnzippedIncrementalBatchRecordStream,
-};
+use futures::{StreamExt, TryStreamExt};
+use iceberg::arrow::{ArrowReader, StreamsInto, UnzippedIncrementalBatchRecordStream};
 use iceberg::io::FileIO;
 use iceberg::scan::incremental::{AppendedFileScanTask, DeleteScanTask};
-use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
+use tokio::sync::Mutex as AsyncMutex;
 
-use crate::ordered_file_pipeline::{
-    drain_batch_stream, run_nested_pipeline, BufferedBatch, FileScan,
-};
-use crate::pipeline_stats::MAX_BUFFERED_BYTES_PER_TASK;
+use crate::nested_pipeline::{build_reader, create_nested_pipeline, FileToScan};
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
@@ -43,117 +43,41 @@ fn read_one_append_file(
     Ok(arrow_stream)
 }
 
-/// Build an `ArrowReader` from a `FileIO` and optional batch size, with
-/// per-file concurrency pinned to 1 (each reader handles one file).
-fn build_reader(file_io: FileIO, batch_size: Option<usize>) -> ArrowReader {
-    let mut b = ArrowReaderBuilder::new(file_io).with_data_file_concurrency_limit(1);
-    if let Some(bs) = batch_size {
-        b = b.with_batch_size(bs);
-    }
-    b.build()
-}
-
-/// Resolve and read a single append file into the per-file channel.
-/// Dropping `tx` signals the consumer that this file is done.
-async fn process_incremental_file(
-    task: AppendedFileScanTask,
-    reader: ArrowReader,
-    semaphore: Arc<Semaphore>,
-    tx: mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
-) {
-    let result = process_incremental_file_inner(task, reader, &semaphore, &tx).await;
-    if let Err(e) = result {
-        let _ = tx.send(Err(e)).await;
-    }
-}
-
-async fn process_incremental_file_inner(
-    task: AppendedFileScanTask,
-    reader: ArrowReader,
-    semaphore: &Arc<Semaphore>,
-    tx: &mpsc::Sender<Result<BufferedBatch, iceberg::Error>>,
-) -> Result<(), iceberg::Error> {
-    let batch_stream =
-        read_one_append_file(reader, task).map_err(|e| unexpected(format!("reader setup: {e}")))?;
-    drain_batch_stream(batch_stream, semaphore, tx).await
-}
-
-/// Spawn one file task. Returns a future that resolves immediately to
-/// `(filename, record_count, file_rx)` so `FuturesUnordered` can poll it
-/// alongside other tasks while the actual I/O runs in the background.
-fn spawn_incremental_file_task(
-    task: AppendedFileScanTask,
-    reader: ArrowReader,
-) -> impl std::future::Future<
-    Output = Result<
-        (
-            String,
-            i64,
-            mpsc::Receiver<Result<BufferedBatch, iceberg::Error>>,
-        ),
-        iceberg::Error,
-    >,
-> {
-    let filename = task.base.data_file_path.clone();
-    let record_count = task.base.record_count.unwrap_or(0) as i64;
-    let sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
-    let (file_tx, file_rx) = mpsc::channel(8);
-    tokio::spawn(process_incremental_file(task, reader, sem, file_tx));
-    async move { Ok((filename, record_count, file_rx)) }
-}
-
-/// Keep `concurrency` append file tasks in flight, yielding each as a
-/// `FileScan` to `tx` in manifest order. Delegates to the shared
-/// `run_nested_pipeline` orchestrator.
-async fn run_incremental_nested(
-    append_tasks: futures::stream::BoxStream<'static, iceberg::Result<AppendedFileScanTask>>,
-    reader: ArrowReader,
-    concurrency: usize,
-    tx: mpsc::Sender<Result<FileScan, iceberg::Error>>,
-) {
-    run_nested_pipeline(
-        append_tasks,
-        concurrency,
-        tx,
-        move |task| spawn_incremental_file_task(task, reader.clone()),
-        |_| {},
-    )
-    .await;
-}
-
 /// Build the nested incremental pipeline.
 ///
 /// Returns `(append_stream, delete_stream)`:
 /// - `append_stream`: `IcebergFileScanStream` — one `FileScan` per appended
 ///   parquet file, in manifest order, with a prefetched inner batch stream.
-/// - `delete_stream`: flat `IcebergArrowStream` of delete records.
+///   Built via the shared `create_nested_pipeline` helper using
+///   `read_one_append_file` as the per-task batch-stream builder.
+/// - `delete_stream`: flat `IcebergArrowStream` of delete records. Unaffected
+///   by the nested-pipeline plumbing — kept as a flat stream because
+///   position-delete records are already keyed by `(file_path, pos)` and
+///   don't need file-level grouping.
 pub async fn create_incremental_nested_pipeline(
     append_tasks: futures::stream::BoxStream<'static, iceberg::Result<AppendedFileScanTask>>,
     delete_tasks: futures::stream::BoxStream<'static, iceberg::Result<DeleteScanTask>>,
     file_io: FileIO,
-    batch_size: Option<usize>,
-    concurrency: usize,
+    batch_size: usize,
     prefetch_depth: usize,
     serialization_concurrency: usize,
 ) -> anyhow::Result<(IcebergFileScanStream, IcebergArrowStream)> {
     let reader = build_reader(file_io.clone(), batch_size);
 
-    let (tx, rx) = mpsc::channel::<Result<FileScan, iceberg::Error>>(prefetch_depth);
-    tokio::spawn(run_incremental_nested(
-        append_tasks,
-        reader,
-        concurrency,
-        tx,
-    ));
-
-    let append_stream = IcebergFileScanStream {
-        stream: AsyncMutex::new(
-            futures::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|item| (item, rx))
-            })
-            .boxed(),
-        ),
-    };
+    let files = append_tasks.map_ok(move |task: AppendedFileScanTask| {
+        let filename = task.base.data_file_path.clone();
+        let record_count = task.base.record_count.unwrap_or(0) as i64;
+        let reader = reader.clone();
+        FileToScan {
+            filename,
+            record_count,
+            build_batch_stream: Box::new(move || {
+                read_one_append_file(reader, task)
+                    .map_err(|e| unexpected(format!("reader setup: {e}")))
+            }),
+        }
+    });
+    let append_stream = create_nested_pipeline(files, prefetch_depth).await;
 
     // Delete stream: StreamsInto with empty append stream routes all delete
     // tasks through the iceberg reader machinery.
@@ -198,6 +122,7 @@ mod tests {
     use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
     use super::*;
+    use crate::nested_pipeline::PIPELINE_TEST_LOCK;
 
     // ── Shared setup helpers ──────────────────────────────────────────────
 
@@ -286,14 +211,14 @@ mod tests {
 
     #[tokio::test]
     async fn empty_streams_succeed() {
+        let _guard = PIPELINE_TEST_LOCK.lock().await;
         // Baseline: both append and delete streams empty → pipeline returns Ok
         // with two empty streams; no I/O or background tasks are spawned.
         let result = create_incremental_nested_pipeline(
             futures::stream::empty::<iceberg::Result<AppendedFileScanTask>>().boxed(),
             futures::stream::empty::<iceberg::Result<DeleteScanTask>>().boxed(),
             FileIO::new_with_memory(),
-            None,
-            1,
+            1024,
             1,
             1,
         )
@@ -303,15 +228,16 @@ mod tests {
 
     /// Full end-to-end test for the append path.
     ///
-    /// Exercises: `run_incremental_nested` → `spawn_incremental_file_task` →
-    /// `process_incremental_file_inner` → `read_one_append_file` (wraps the
-    /// task in a one-element stream and calls the `StreamsInto` machinery) →
-    /// Arrow IPC serialization (spawn_blocking) → semaphore backpressure →
-    /// `make_file_stream` semaphore release.
+    /// Exercises: `create_incremental_nested_pipeline` → `create_nested_pipeline`
+    /// → `spawn_file_task` → `process_file` → `read_one_append_file` (wraps
+    /// the task in a one-element stream and calls the `StreamsInto`
+    /// machinery) → Arrow IPC serialization (spawn_blocking) → semaphore
+    /// backpressure → `make_file_stream` (semaphore release).
     ///
     /// The delete stream is verified to be empty (no deletes were provided).
     #[tokio::test]
     async fn append_stream_reads_parquet_file() {
+        let _guard = PIPELINE_TEST_LOCK.lock().await;
         let (file_io, path, file_size, schema) = write_test_parquet().await;
         let task = make_append_task(path, file_size, schema);
 
@@ -319,8 +245,7 @@ mod tests {
             futures::stream::once(async { Ok(task) }).boxed(),
             futures::stream::empty::<iceberg::Result<DeleteScanTask>>().boxed(),
             file_io,
-            None,
-            1,
+            1024,
             1,
             1,
         )
@@ -370,6 +295,7 @@ mod tests {
     /// The append stream is verified to be empty (no appended files were provided).
     #[tokio::test]
     async fn delete_stream_yields_deleted_file_positions() {
+        let _guard = PIPELINE_TEST_LOCK.lock().await;
         let (_, _, _, schema) = write_test_parquet().await;
 
         let delete_task = DeleteScanTask::DeletedFile(DeletedFileScanTask {
@@ -392,8 +318,7 @@ mod tests {
             futures::stream::empty::<iceberg::Result<AppendedFileScanTask>>().boxed(),
             futures::stream::once(async { Ok(delete_task) }).boxed(),
             FileIO::new_with_memory(),
-            None,
-            1,
+            1024,
             1,
             1,
         )
