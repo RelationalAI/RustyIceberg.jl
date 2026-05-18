@@ -56,6 +56,10 @@ mod response;
 // Utility module for FFI parsing
 mod util;
 
+// Stable error codes and classifier
+mod error_codes;
+pub use error_codes::{classify, classified_error, ClassifiedError};
+
 // Re-export types and functions from submodules
 pub use catalog::{IcebergBoolResponse, IcebergCatalog, IcebergCatalogResponse};
 pub use full::IcebergScan;

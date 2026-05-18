@@ -4,6 +4,7 @@
 /// enabling Julia to create transactions, add data files via FastAppendAction,
 /// and commit changes to Iceberg tables.
 use crate::catalog::IcebergCatalog;
+use crate::error_codes::{classified_error, classify_iceberg, STATE_RESOURCE_FREED, STATE_TRANSACTION_CONSUMED};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
 use iceberg::spec::DataFile;
@@ -216,7 +217,9 @@ pub extern "C" fn iceberg_fast_append_action_apply(
     let tx = match tx_ref.take() {
         Some(t) => t,
         None => {
-            set_error("Transaction already consumed", error_message_out);
+            set_error(&format!("{}\t{}\tTransaction already consumed",
+                crate::error_codes::STATE_TRANSACTION_CONSUMED,
+                "Transaction has already been committed or rolled back"), error_message_out);
             return 1;
         }
     };
@@ -273,10 +276,10 @@ export_runtime_op!(
     crate::IcebergTableResponse,
     || {
         if transaction.is_null() {
-            return Err(anyhow::anyhow!("Null transaction pointer provided"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null transaction pointer provided"));
         }
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         // Get references
@@ -289,16 +292,13 @@ export_runtime_op!(
     async {
         let (tx_ref, catalog_ref) = result_tuple;
 
-        // Take the transaction
         let tx = tx_ref.take()
-            .ok_or_else(|| anyhow::anyhow!("Transaction already consumed"))?;
+            .ok_or_else(|| classified_error(STATE_TRANSACTION_CONSUMED, "Transaction has already been committed or rolled back", "Transaction already consumed"))?;
 
-        // Get the catalog reference
         let catalog = catalog_ref.get_catalog()
-            .ok_or_else(|| anyhow::anyhow!("Catalog not initialized"))?;
+            .ok_or_else(|| classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Catalog not initialized"))?;
 
-        // Commit the transaction
-        let updated_table = tx.commit(catalog).await?;
+        let updated_table = tx.commit(catalog).await.map_err(classify_iceberg)?;
 
         Ok::<IcebergTable, anyhow::Error>(IcebergTable { table: updated_table })
     },

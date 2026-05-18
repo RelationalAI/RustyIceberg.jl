@@ -1,3 +1,4 @@
+use crate::error_codes::{classified_error, classify, classify_iceberg, STATE_RESOURCE_FREED};
 use crate::ordered_file_pipeline::FileScan;
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
@@ -227,7 +228,7 @@ export_runtime_op!(
     IcebergFileScanResponse,
     || {
         if stream.is_null() {
-            return Err(anyhow::anyhow!("Null file scan stream pointer"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null file scan stream pointer"));
         }
         let stream_ref = unsafe { &*stream };
         Ok(stream_ref)
@@ -238,7 +239,7 @@ export_runtime_op!(
         let mut guard = stream_ref.stream.lock().await;
         match guard.next().await {
             Some(Ok(fs)) => Ok(Some(fs)),
-            Some(Err(e)) => Err(anyhow::anyhow!("Error reading file scan: {}", e)),
+            Some(Err(e)) => Err(classify(anyhow::anyhow!("Error reading file scan: {}", e))),
             None => Ok(None),
         }
     },
@@ -274,9 +275,10 @@ export_runtime_op!(
         // Create table identifier
         let table_ident = TableIdent::from_strs(["default", "table"])?;
 
-        // Load the static table
         let static_table =
-            StaticTable::from_metadata_file(&full_metadata_path, table_ident, file_io).await?;
+            StaticTable::from_metadata_file(&full_metadata_path, table_ident, file_io)
+                .await
+                .map_err(classify_iceberg)?;
 
         Ok::<IcebergTable, anyhow::Error>(IcebergTable { table: static_table.into_table() })
     },
@@ -291,7 +293,7 @@ export_runtime_op!(
     IcebergBatchResponse,
     || {
         if stream.is_null() {
-            return Err(anyhow::anyhow!("Null stream pointer provided"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null stream pointer provided"));
         }
         let stream_ref = unsafe { &*stream };
         Ok(stream_ref)
@@ -310,7 +312,7 @@ export_runtime_op!(
                 tracing::debug!("End of stream reached");
                 Ok(None)
             }
-            Err(e) => Err(anyhow::anyhow!("Error reading batch: {}", e)),
+            Err(e) => Err(classify(anyhow::anyhow!("Error reading batch: {}", e))),
         }
     },
     stream: *mut IcebergArrowStream

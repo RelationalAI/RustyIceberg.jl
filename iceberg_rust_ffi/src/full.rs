@@ -1,6 +1,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
+use crate::error_codes::{classified_error, classify, classify_iceberg, STATE_RESOURCE_FREED};
 use crate::scan_common::*;
 use crate::{
     IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanStream,
@@ -169,12 +170,12 @@ export_runtime_op!(
     IcebergArrowStreamResponse,
     || {
         if scan.is_null() {
-            return Err(anyhow::anyhow!("Null scan pointer provided"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &mut *scan };
         let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
-            return Err(anyhow::anyhow!("Scan not initialized"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Scan not initialized"));
         }
         let (concurrency, prefetch_depth, file_io, batch_size) =
             resolve_pipeline_params(scan_ptr);
@@ -184,16 +185,15 @@ export_runtime_op!(
     async {
         let (scan_ref, concurrency, prefetch_depth, file_io, batch_size) = result_tuple;
 
-        // Collect the ordered file task list from iceberg-rs.
         use futures::TryStreamExt;
-        let tasks: Vec<iceberg::scan::FileScanTask> =
-            scan_ref.plan_files().await?.try_collect().await?;
+        let tasks: Vec<iceberg::scan::FileScanTask> = scan_ref
+            .plan_files().await.map_err(classify_iceberg)?
+            .try_collect().await.map_err(classify_iceberg)?;
 
-        // Hand off to the file-parallel pipeline.
         let stream = crate::ordered_file_pipeline::create_pipeline(
             tasks, file_io, batch_size, concurrency, prefetch_depth,
         )
-        .await?;
+        .await.map_err(classify)?;
 
         Ok::<IcebergArrowStream, anyhow::Error>(stream)
     },
@@ -203,23 +203,18 @@ export_runtime_op!(
 impl_scan_free!(iceberg_scan_free, IcebergScan);
 
 // ── Nested stream creation ───────────────────────────────────────────────
-//
-// Returns an IcebergFileScanStream whose items are per-file (filename,
-// record_count, inner-batch-stream) tuples, yielded in strict file order.
-// The flat iceberg_arrow_stream is implemented as a flattening wrapper over
-// this same nested pipeline.
 
 export_runtime_op!(
     iceberg_file_scan_stream,
     IcebergFileScanStreamResponse,
     || {
         if scan.is_null() {
-            return Err(anyhow::anyhow!("Null scan pointer provided"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &mut *scan };
         let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
-            return Err(anyhow::anyhow!("Scan not initialized"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Scan not initialized"));
         }
         let (concurrency, prefetch_depth, file_io, batch_size) =
             resolve_pipeline_params(scan_ptr);
@@ -230,13 +225,14 @@ export_runtime_op!(
         let (scan_ref, concurrency, prefetch_depth, file_io, batch_size) = result_tuple;
 
         use futures::TryStreamExt;
-        let tasks: Vec<iceberg::scan::FileScanTask> =
-            scan_ref.plan_files().await?.try_collect().await?;
+        let tasks: Vec<iceberg::scan::FileScanTask> = scan_ref
+            .plan_files().await.map_err(classify_iceberg)?
+            .try_collect().await.map_err(classify_iceberg)?;
 
         let stream = crate::ordered_file_pipeline::create_nested_pipeline(
             tasks, file_io, batch_size, concurrency, prefetch_depth,
         )
-        .await?;
+        .await.map_err(classify)?;
 
         Ok::<IcebergFileScanStream, anyhow::Error>(stream)
     },

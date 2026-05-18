@@ -104,7 +104,7 @@ function select_columns!(scan::IncrementalScan, column_names::Vector{String})
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to select columns for incremental scan", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_select_columns returned $result"))
     end
     return nothing
 end
@@ -121,7 +121,7 @@ function with_manifest_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set manifest file concurrency limit for incremental scan", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_manifest_file_concurrency_limit returned $result"))
     end
     return nothing
 end
@@ -138,7 +138,7 @@ function with_data_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set data file concurrency limit for incremental scan", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_data_file_concurrency_limit returned $result"))
     end
     return nothing
 end
@@ -155,7 +155,7 @@ function with_manifest_entry_concurrency_limit!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set manifest entry concurrency limit for incremental scan", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_manifest_entry_concurrency_limit returned $result"))
     end
     return nothing
 end
@@ -172,7 +172,7 @@ function with_batch_size!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set batch size for incremental scan", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_batch_size returned $result"))
     end
     return nothing
 end
@@ -198,7 +198,7 @@ function with_file_column!(scan::IncrementalScan)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to add file column to incremental scan", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_file_column returned $result"))
     end
     return nothing
 end
@@ -229,7 +229,7 @@ function with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set serialization concurrency limit for incremental scan", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_serialization_concurrency_limit returned $result"))
     end
     return nothing
 end
@@ -246,7 +246,7 @@ function with_file_prefetch_depth!(scan::IncrementalScan, n::UInt)
         n::Csize_t
     )::Cint
     if result != 0
-        throw(IcebergException("Failed to set file prefetch depth", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_scan_with_file_prefetch_depth returned $result"))
     end
     return nothing
 end
@@ -272,7 +272,7 @@ function with_pos_column!(scan::IncrementalScan)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to add pos column to incremental scan", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_pos_column returned $result"))
     end
     return nothing
 end
@@ -288,7 +288,7 @@ function build!(scan::IncrementalScan)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to build incremental scan", result))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_build returned $result"))
     end
     return nothing
 end

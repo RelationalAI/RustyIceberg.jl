@@ -10,7 +10,14 @@ using iceberg_rust_ffi_jll
 
 export Table, Scan, IncrementalScan, ArrowBatch, StaticConfig, ArrowStream
 export init_runtime
-export IcebergException
+export IcebergException, IcebergError
+export NOT_FOUND_METADATA, NOT_FOUND_DATA_FILE, NOT_FOUND_TABLE, NOT_FOUND_NAMESPACE, NOT_FOUND_SNAPSHOT
+export AUTH_FAILED, AUTH_TOKEN_EXPIRED, AUTH_INSUFFICIENT
+export DATA_METADATA_INVALID, DATA_FILE_CORRUPT, DATA_SCHEMA_MISMATCH, DATA_TYPE_MISMATCH
+export CATALOG_TABLE_EXISTS, CATALOG_NAMESPACE_EXISTS, CATALOG_NAMESPACE_NOT_EMPTY, CATALOG_REST_ONLY, CATALOG_COMMIT_CONFLICT
+export STATE_RESOURCE_FREED, STATE_TRANSACTION_CONSUMED, STATE_WRITER_CLOSED
+export IO_NETWORK, IO_S3, IO_LOCAL
+export INTERNAL
 export new_incremental_scan, free_incremental_scan!
 export scan_incremental_nested!, nested_incremental_arrow_stream
 export table_open, free_table, new_scan, free_scan!
@@ -137,25 +144,40 @@ function init_runtime(
         fn_ptr = @cfunction(notify_result_iceberg, Cint, (Ptr{Nothing},))
         res = @ccall rust_lib.iceberg_init_runtime(config::StaticConfig, panic_fn_ptr::Ptr{Nothing}, fn_ptr::Ptr{Nothing})::Cint
         if res != 0
-            throw(IcebergException("Failed to initialize Iceberg runtime.", res))
+            throw(IcebergException(INTERNAL, "Failed to initialize Iceberg runtime", "iceberg_init_runtime returned $res"))
         end
         _ICEBERG_STARTED[] = true
     end
     return nothing
 end
 
-function response_error_to_string(response, operation)
-    err = string("failed to process ", operation, " with error: ", unsafe_string(response.error_message))
-    @ccall rust_lib.iceberg_destroy_cstring(response.error_message::Ptr{Cchar})::Cint
-    return err
+# Parse a Rust error_message (may be in "CODE\tUSER_MSG\tDETAIL" format) and throw.
+# Falls back to INTERNAL if the message is not in classified format.
+function parse_and_throw(raw_ptr::Ptr{Cchar}, operation::String)
+    raw = unsafe_string(raw_ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(raw_ptr::Ptr{Cchar})::Cint
+    parts = split(raw, '\t'; limit=3)
+    if length(parts) == 3
+        code_int = tryparse(UInt32, parts[1])
+        if !isnothing(code_int)
+            try
+                throw(IcebergException(IcebergError(code_int), String(parts[2]), String(parts[3])))
+            catch e
+                e isa IcebergException && rethrow()
+                # code_int not a valid IcebergError variant — fall through
+            end
+        end
+    end
+    detail = string("failed to process ", operation, " with error: ", raw)
+    throw(IcebergException(INTERNAL, "Internal error (please report this as a bug)", detail))
 end
 
-macro throw_on_error(response, operation, exception)
-    throw_on_error(response, operation, exception)
-end
-
-function throw_on_error(response, operation, exception)
-    return :( $(esc(:($response.result != 0))) ? throw($exception($response_error_to_string($(esc(response)), $operation))) : $(nothing) )
+macro throw_on_error(response, operation, _exception)
+    quote
+        if $(esc(response)).result != 0
+            parse_and_throw($(esc(response)).error_message, $operation)
+        end
+    end
 end
 
 function ensure_wait(event::Base.Event)
@@ -335,21 +357,58 @@ include("transaction.jl")
 include("writer.jl")
 
 """
-    IcebergException <: Exception
+    IcebergError
 
-Exception type for Iceberg operations.
-
-# Fields
-- `msg::String`: Error message describing what went wrong
-- `code::Union{Int,Nothing}`: Optional error code from the FFI layer
+Stable semantic error codes returned in `IcebergException`.
 """
-struct IcebergException <: Exception
-    msg::String
-    code::Union{Int,Nothing}
+@enum IcebergError::UInt32 begin
+    NOT_FOUND_METADATA       = 101
+    NOT_FOUND_DATA_FILE      = 102
+    NOT_FOUND_TABLE          = 103
+    NOT_FOUND_NAMESPACE      = 104
+    NOT_FOUND_SNAPSHOT       = 105
+    AUTH_FAILED              = 201
+    AUTH_TOKEN_EXPIRED       = 202
+    AUTH_INSUFFICIENT        = 203
+    DATA_METADATA_INVALID    = 301
+    DATA_FILE_CORRUPT        = 302
+    DATA_SCHEMA_MISMATCH     = 303
+    DATA_TYPE_MISMATCH       = 304
+    CATALOG_TABLE_EXISTS     = 401
+    CATALOG_NAMESPACE_EXISTS = 402
+    CATALOG_NAMESPACE_NOT_EMPTY = 403
+    CATALOG_REST_ONLY        = 404
+    CATALOG_COMMIT_CONFLICT  = 405
+    STATE_RESOURCE_FREED     = 501
+    STATE_TRANSACTION_CONSUMED = 502
+    STATE_WRITER_CLOSED      = 503
+    IO_NETWORK               = 601
+    IO_S3                    = 602
+    IO_LOCAL                 = 603
+    INTERNAL                 = 900
 end
 
-function IcebergException(msg::String)
-    return IcebergException(msg, nothing)
+"""
+    IcebergException <: Exception
+
+Exception thrown by all Iceberg operations.
+
+# Fields
+- `code::IcebergError`: Stable semantic error code for programmatic branching.
+- `msg::String`: Short, user-displayable message.
+- `detail::String`: Full technical detail from the Rust layer (suitable for logs).
+"""
+struct IcebergException <: Exception
+    code::IcebergError
+    msg::String
+    detail::String
+end
+
+function Base.showerror(io::IO, e::IcebergException)
+    print(io, "IcebergException(", e.code, "): ", e.msg)
+    if !isempty(e.detail) && e.detail != e.msg
+        print(io, "\n  Detail: ", e.detail)
+    end
 end
 
 # High-level functions using the async API pattern from RustyObjectStore.jl
@@ -435,7 +494,7 @@ Get the storage location of an Iceberg table.
 function table_location(table::Table)
     ptr = @ccall rust_lib.iceberg_table_location(table::Table)::Ptr{Cchar}
     if ptr == C_NULL
-        throw(IcebergException("Failed to get table location"))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_location returned null"))
     end
     result = unsafe_string(ptr)
     @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
@@ -450,7 +509,7 @@ Get the UUID of an Iceberg table.
 function table_uuid(table::Table)
     ptr = @ccall rust_lib.iceberg_table_uuid(table::Table)::Ptr{Cchar}
     if ptr == C_NULL
-        throw(IcebergException("Failed to get table UUID"))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_uuid returned null"))
     end
     result = unsafe_string(ptr)
     @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
@@ -465,7 +524,7 @@ Get the format version of an Iceberg table (1, 2, or 3).
 function table_format_version(table::Table)
     version = @ccall rust_lib.iceberg_table_format_version(table::Table)::Int64
     if version == 0
-        throw(IcebergException("Failed to get table format version"))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_format_version returned 0"))
     end
     return version
 end
@@ -478,7 +537,7 @@ Get the last sequence number of an Iceberg table.
 function table_last_sequence_number(table::Table)
     seq_num = @ccall rust_lib.iceberg_table_last_sequence_number(table::Table)::Int64
     if seq_num == -1
-        throw(IcebergException("Failed to get table last sequence number"))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_last_sequence_number returned -1"))
     end
     return seq_num
 end
@@ -491,7 +550,7 @@ Get the last updated timestamp of an Iceberg table in milliseconds since epoch.
 function table_last_updated_ms(table::Table)
     timestamp = @ccall rust_lib.iceberg_table_last_updated_ms(table::Table)::Int64
     if timestamp == -1
-        throw(IcebergException("Failed to get table last updated timestamp"))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_last_updated_ms returned -1"))
     end
     return timestamp
 end
@@ -519,7 +578,7 @@ and other metadata in the Iceberg schema format.
 function table_schema(table::Table)
     ptr = @ccall rust_lib.iceberg_table_schema(table::Table)::Ptr{Cchar}
     if ptr == C_NULL
-        throw(IcebergException("Failed to get table schema"))
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_schema returned null"))
     end
     result = unsafe_string(ptr)
     @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint

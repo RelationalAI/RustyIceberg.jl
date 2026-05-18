@@ -1,6 +1,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
+use crate::error_codes::{classified_error, classify_iceberg, STATE_RESOURCE_FREED};
 use iceberg::scan::incremental::{IncrementalTableScan, IncrementalTableScanBuilder};
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, Context, NotifyGuard, RawResponse,
@@ -175,12 +176,12 @@ export_runtime_op!(
     IcebergUnzippedStreamsResponse,
     || {
         if scan.is_null() {
-            return Err(anyhow::anyhow!("Null scan pointer provided"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &*scan };
         let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
-            return Err(anyhow::anyhow!("Incremental scan not initialized"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Incremental scan not initialized"));
         }
 
         // Determine concurrency (0 = auto-detect)
@@ -197,7 +198,7 @@ export_runtime_op!(
         let (scan_ref, serialization_concurrency) = result_tuple;
 
         // Get unzipped streams (separate append and delete streams)
-        let (inserts_stream, deletes_stream) = scan_ref.to_unzipped_arrow().await?;
+        let (inserts_stream, deletes_stream) = scan_ref.to_unzipped_arrow().await.map_err(classify_iceberg)?;
 
         // Transform both streams with parallel serialization
         let inserts = IcebergArrowStream {
@@ -291,17 +292,17 @@ export_runtime_op!(
     IcebergIncrementalFileScanStreamResponse,
     || {
         if scan.is_null() {
-            return Err(anyhow::anyhow!("Null scan pointer provided"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &*scan };
         let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
-            return Err(anyhow::anyhow!("Incremental scan not initialized"));
+            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Incremental scan not initialized"));
         }
         let file_io = scan_ptr
             .file_io
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("FileIO not available; create scan from table"))?;
+            .ok_or_else(|| classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "FileIO not available; create scan from table"))?;
         let (concurrency, prefetch_depth, serialization_concurrency) =
             resolve_incremental_pipeline_params(scan_ptr);
         let batch_size = scan_ptr.batch_size;
@@ -320,7 +321,7 @@ export_runtime_op!(
         let (scan_ref, concurrency, prefetch_depth, serialization_concurrency, batch_size, file_io) =
             result_tuple;
 
-        let (append_tasks, delete_tasks) = scan_ref.plan_files().await?;
+        let (append_tasks, delete_tasks) = scan_ref.plan_files().await.map_err(classify_iceberg)?;
 
         let (append_stream, delete_stream) =
             crate::incremental_pipeline::create_incremental_nested_pipeline(
