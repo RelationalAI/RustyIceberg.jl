@@ -1149,8 +1149,8 @@ end
     println("\n✅ write_columns decimal nullable tests completed!")
 end
 
-@testset "Writer write_columns (GatheredBatch) API" begin
-    println("Testing write_columns with GatheredBatch (gathered-column) API...")
+@testset "Writer ColumnBatchBuilder — multi-slice coalescing" begin
+    println("Testing ColumnBatchBuilder with multiple slices per column...")
 
     catalog_uri = get_catalog_uri()
     props = get_catalog_properties()
@@ -1165,7 +1165,7 @@ end
         catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
         @test catalog !== nothing
 
-        test_namespace = ["test_gathered_$(round(Int, time() * 1000))"]
+        test_namespace = ["test_builder_multi_$(round(Int, time() * 1000))"]
         RustyIceberg.create_namespace(catalog, test_namespace)
 
         # Schema: id (non-nullable long), score (nullable double), tag (nullable string)
@@ -1175,60 +1175,56 @@ end
             Field(Int32(3), "tag",   IcebergString(); required=false),
         ])
 
-        table_name = "gathered_test_$(round(Int, time() * 1000))"
+        table_name = "builder_multi_$(round(Int, time() * 1000))"
         table = RustyIceberg.create_table(catalog, test_namespace, table_name, schema)
         @test table != C_NULL
         println("✅ Table created")
 
-        # --- Data layout (4 rows) ---
-        # id:    [1, 2, 3, 4]  — non-nullable, single sequential slice
-        # score: [1.1, null, 3.3, null]  — nullable; two sequential slices, each with validity
-        # tag:   ["alpha", null, "gamma", null]  — nullable string via add_string_slice!
+        # Write 4 rows across 3 separate append_slice! calls.
+        # id:    [1, 2, 3, 4]  — non-nullable; 3 slices of lengths 1, 2, 1
+        # score: [1.1, null, 3.3, null]  — nullable; 3 slices with validity
+        # tag:   ["alpha", null, "gamma", null]  — nullable string; 3 slices
+        #
+        # Slices are deliberately mis-aligned in terms of source array sizes to exercise
+        # the multi-slice accumulation path. Slice 2 for score uses a scattered sel_ptr.
+
+        col_types = RustyIceberg.ColumnType[
+            RustyIceberg.COLUMN_TYPE_INT64,
+            RustyIceberg.COLUMN_TYPE_FLOAT64,
+            RustyIceberg.COLUMN_TYPE_STRING,
+        ]
 
         data_files = RustyIceberg.with_data_file_writer(table) do writer
-            batch = RustyIceberg.GatheredBatch()
+            builder = RustyIceberg.ColumnBatchBuilder(writer, col_types)
 
-            # id: single sequential slice, no nulls
-            id_data = Int64[1, 2, 3, 4]
-            id_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_INT64)
-            RustyIceberg.add_slice!(id_col, id_data)
-            push!(batch, id_col)
-            println("✅ id column built (sequential, non-nullable)")
+            # --- Slice 1: row 0 ---
+            sb1 = RustyIceberg.SliceBatch()
+            push!(sb1, Int64[1])
+            push!(sb1, Float64[1.1]; validity=BitVector([true]))
+            push!(sb1, ["alpha"])
+            RustyIceberg.append_slice!(builder, sb1)
+            println("✅ Slice 1 appended")
 
-            # score: two sequential slices, each with validity masks
-            # Slice 1 — src = [1.1, 9.9], validity = [true, false] → rows 0 (1.1) and 1 (null)
-            # Slice 2 — src = [3.3, 8.8] via selection [1] + identity [8.8] (just sequential here)
-            # Use scattered access for slice 2: src=[99.9, 3.3, 88.8], sel=[2] → picks 3.3
-            score_src1 = Float64[1.1, 9.9]
-            score_valid1 = BitVector([true, false])
+            # --- Slice 2: rows 1-2 (score uses a scattered selection) ---
+            # score_src: [99.9, 3.3, 88.8], sel=[2,1] → values [3.3, 99.9], valid=[true,false]
+            sb2 = RustyIceberg.SliceBatch()
+            push!(sb2, Int64[2, 3])
+            push!(sb2, Float64[99.9, 3.3, 88.8];
+                sel=Int64[2, 1], validity=BitVector([true, false]))
+            push!(sb2, ["", "gamma"]; validity=BitVector([false, true]))
+            RustyIceberg.append_slice!(builder, sb2)
+            println("✅ Slice 2 appended (scattered score, nullable strings)")
 
-            score_src2 = Float64[99.9, 3.3, 88.8]
-            score_sel2 = Int64[2]       # picks index 2 → 3.3 (1-based)
-            score_valid2 = BitVector([true])
+            # --- Slice 3: row 3 ---
+            sb3 = RustyIceberg.SliceBatch()
+            push!(sb3, Int64[4])
+            push!(sb3, Float64[0.0]; validity=BitVector([false]))
+            push!(sb3, [""]; validity=BitVector([false]))
+            RustyIceberg.append_slice!(builder, sb3)
+            println("✅ Slice 3 appended")
 
-            score_src3 = Float64[7.7, 8.8]
-            score_valid3 = BitVector([false])  # null for row 3
-
-            score_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_FLOAT64; nullable=true)
-            RustyIceberg.add_slice!(score_col, score_src1; validity=score_valid1)
-            RustyIceberg.add_slice!(score_col, score_src2; sel=score_sel2, validity=score_valid2)
-            RustyIceberg.add_slice!(score_col, score_src3; sel=Int64[1], validity=score_valid3)
-            push!(batch, score_col)
-            println("✅ score column built (scattered + nullable)")
-
-            # tag: string column via the high-level add_string_slice! overload
-            # Row 0: "alpha", row 1: null, row 2: "gamma", row 3: null
-            tag_col = RustyIceberg.GatheredColumn(RustyIceberg.COLUMN_TYPE_STRING; nullable=true)
-            RustyIceberg.add_string_slice!(
-                tag_col,
-                ["alpha", "", "gamma", ""];
-                validity=BitVector([true, false, true, false])
-            )
-            push!(batch, tag_col)
-            println("✅ tag column built (string via add_string_slice!)")
-
-            RustyIceberg.write_columns(writer, batch)
-            println("✅ Batch written via write_columns (GatheredBatch)")
+            RustyIceberg.write_columns(writer, builder)
+            println("✅ Builder flushed via write_columns")
         end
         @test data_files !== nothing && data_files.ptr != C_NULL
         println("✅ Writer closed")
@@ -1247,22 +1243,20 @@ end
         println("✅ Read $(length(tbl.id)) rows")
 
         perm = sortperm(tbl.id)
-        sorted_ids   = tbl.id[perm]
+        sorted_ids    = tbl.id[perm]
         sorted_scores = tbl.score[perm]
-        sorted_tags  = tbl.tag[perm]
+        sorted_tags   = tbl.tag[perm]
 
-        # Verify id column (non-nullable, sequential)
         @test sorted_ids == Int64[1, 2, 3, 4]
         println("✅ id values correct")
 
-        # Verify score column (nullable, scattered slices)
+        # sel=[2,1] on [99.9, 3.3, 88.8] → row0=src[2]=3.3 (valid), row1=src[1]=99.9 (null)
         @test !ismissing(sorted_scores[1]) && sorted_scores[1] ≈ 1.1
-        @test ismissing(sorted_scores[2])
-        @test !ismissing(sorted_scores[3]) && sorted_scores[3] ≈ 3.3
+        @test !ismissing(sorted_scores[2]) && sorted_scores[2] ≈ 3.3
+        @test ismissing(sorted_scores[3])
         @test ismissing(sorted_scores[4])
-        println("✅ score values correct (including nulls)")
+        println("✅ score values correct (including nulls and scattered access)")
 
-        # Verify tag column (nullable string)
         @test !ismissing(sorted_tags[1]) && sorted_tags[1] == "alpha"
         @test ismissing(sorted_tags[2])
         @test !ismissing(sorted_tags[3]) && sorted_tags[3] == "gamma"
@@ -1289,7 +1283,202 @@ end
         end
     end
 
-    println("\n✅ write_columns (GatheredBatch) API tests completed!")
+    println("\n✅ ColumnBatchBuilder multi-slice tests completed!")
+end
+
+@testset "Writer ColumnBatchBuilder — reuse across windows" begin
+    println("Testing ColumnBatchBuilder reuse: two write_columns calls on one builder...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+
+        test_namespace = ["test_builder_reuse_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+
+        schema = Schema([
+            Field(Int32(1), "id",    IcebergLong();   required=true),
+            Field(Int32(2), "value", IcebergDouble(); required=false),
+        ])
+
+        table_name = "builder_reuse_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(catalog, test_namespace, table_name, schema)
+        @test table != C_NULL
+        println("✅ Table created")
+
+        col_types = RustyIceberg.ColumnType[
+            RustyIceberg.COLUMN_TYPE_INT64,
+            RustyIceberg.COLUMN_TYPE_FLOAT64,
+        ]
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            builder = RustyIceberg.ColumnBatchBuilder(writer, col_types)
+
+            # Window 1: rows [1, 2]
+            sb1 = RustyIceberg.SliceBatch()
+            push!(sb1, Int64[1, 2])
+            push!(sb1, Float64[10.0, 20.0])
+            RustyIceberg.append_slice!(builder, sb1)
+            RustyIceberg.write_columns(writer, builder)   # flushes window 1, resets builder
+            println("✅ Window 1 written")
+
+            # Window 2: rows [3, 4, 5] — builder reused in-place
+            sb2 = RustyIceberg.SliceBatch()
+            push!(sb2, Int64[3, 4, 5])
+            push!(sb2, Float64[30.0, 40.0, 50.0])
+            RustyIceberg.append_slice!(builder, sb2)
+            RustyIceberg.write_columns(writer, builder)   # flushes window 2
+            println("✅ Window 2 written")
+        end
+        @test data_files !== nothing && data_files.ptr != C_NULL
+        println("✅ Writer closed")
+
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+        println("✅ Transaction committed")
+
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
+        @test length(tbl.id) == 5
+        println("✅ Read $(length(tbl.id)) rows")
+
+        perm = sortperm(tbl.id)
+        @test tbl.id[perm]    == Int64[1, 2, 3, 4, 5]
+        @test tbl.value[perm] == Float64[10.0, 20.0, 30.0, 40.0, 50.0]
+        println("✅ Data from both windows correct")
+
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+        end
+    end
+
+    println("\n✅ ColumnBatchBuilder reuse tests completed!")
+end
+
+@testset "Writer ColumnBatchBuilder — date and timestamp epoch conversion" begin
+    println("Testing ColumnBatchBuilder date/timestamp epoch conversion...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+
+        test_namespace = ["test_builder_dates_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+
+        schema = Schema([
+            Field(Int32(1), "id",         IcebergLong();      required=true),
+            Field(Int32(2), "event_date", IcebergDate();      required=true),
+            Field(Int32(3), "event_ts",   IcebergTimestamp(); required=true),
+        ])
+
+        table_name = "builder_dates_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(catalog, test_namespace, table_name, schema)
+        @test table != C_NULL
+        println("✅ Table created")
+
+        # 2024-01-01 in Julia Date internal representation (Rata Die days, 1-based)
+        # Dates.value(Date(2024,1,1)) = 738886
+        # Expected Iceberg Date32 (days since 1970-01-01) = 738886 - 719163 = 19723
+        # Expected Iceberg timestamp (μs since 1970-01-01) = 19723 * 86400 * 1_000_000 = 1_704_067_200_000_000
+        julia_date_val = Dates.value(Dates.Date(2024, 1, 1))   # 738886
+        julia_ts_val   = Dates.value(Dates.DateTime(2024, 1, 1, 0, 0, 0))  # ms since year 1
+
+        col_types = RustyIceberg.ColumnType[
+            RustyIceberg.COLUMN_TYPE_INT64,
+            RustyIceberg.COLUMN_TYPE_JULIA_DATE,
+            RustyIceberg.COLUMN_TYPE_JULIA_TIMESTAMP,
+        ]
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            builder = RustyIceberg.ColumnBatchBuilder(writer, col_types)
+
+            sb = RustyIceberg.SliceBatch()
+            push!(sb, Int64[1])
+            push!(sb, Int64[julia_date_val])
+            push!(sb, Int64[julia_ts_val])
+            RustyIceberg.append_slice!(builder, sb)
+            RustyIceberg.write_columns(writer, builder)
+            println("✅ Date/timestamp slice written")
+        end
+        @test data_files !== nothing && data_files.ptr != C_NULL
+
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
+        @test length(tbl.id) == 1
+
+        # Arrow.jl returns Arrow.Date / Arrow.Timestamp wrappers with a raw integer in .x.
+        # Check the raw values directly to verify the Julia→Unix epoch offset is correct.
+        @test tbl.event_date[1].x == Int32(19723)     # 2024-01-01 = day 19723 since 1970-01-01
+        println("✅ event_date.x = $(tbl.event_date[1].x) (expected 19723)")
+
+        @test tbl.event_ts[1].x == Int64(1_704_067_200_000_000)  # 2024-01-01T00:00:00 in μs
+        println("✅ event_ts.x = $(tbl.event_ts[1].x) (expected 1_704_067_200_000_000)")
+
+        RustyIceberg.free_table(updated_table)
+
+    finally
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+        end
+    end
+
+    println("\n✅ ColumnBatchBuilder date/timestamp tests completed!")
 end
 
 @testset "Writer WriterConfig parquet properties" begin
