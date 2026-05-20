@@ -18,8 +18,11 @@ Compression codec for Parquet files.
 - `UNCOMPRESSED`: No compression
 - `SNAPPY`: Snappy compression (fast, moderate compression)
 - `GZIP`: Gzip compression (slower, better compression)
-- `LZ4`: LZ4 compression (very fast, lower compression)
+- `LZ4`: LZ4 compression, legacy Hadoop-framed variant (deprecated in the parquet spec; kept for
+  backward compatibility — prefer `LZ4_RAW`)
 - `ZSTD`: Zstandard compression (good balance of speed and compression)
+- `LZ4_RAW`: LZ4 compression, raw blocks with no framing overhead (modern parquet variant; faster
+  than `LZ4`)
 """
 @enum CompressionCodec begin
     UNCOMPRESSED = 0
@@ -27,6 +30,7 @@ Compression codec for Parquet files.
     GZIP = 2
     LZ4 = 3
     ZSTD = 4
+    LZ4_RAW = 5
 end
 
 """

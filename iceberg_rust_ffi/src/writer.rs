@@ -35,6 +35,7 @@ const COMPRESSION_SNAPPY: i32 = 1;
 const COMPRESSION_GZIP: i32 = 2;
 const COMPRESSION_LZ4: i32 = 3;
 const COMPRESSION_ZSTD: i32 = 4;
+const COMPRESSION_LZ4_RAW: i32 = 5;
 
 fn compression_from_code(code: i32) -> Compression {
     match code {
@@ -43,6 +44,7 @@ fn compression_from_code(code: i32) -> Compression {
         COMPRESSION_GZIP => Compression::GZIP(Default::default()),
         COMPRESSION_LZ4 => Compression::LZ4,
         COMPRESSION_ZSTD => Compression::ZSTD(Default::default()),
+        COMPRESSION_LZ4_RAW => Compression::LZ4_RAW,
         _ => Compression::SNAPPY,
     }
 }
