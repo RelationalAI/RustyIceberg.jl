@@ -207,7 +207,6 @@ pub struct IcebergCatalog {
 unsafe impl Send for IcebergCatalog {}
 unsafe impl Sync for IcebergCatalog {}
 
-
 impl IcebergCatalog {
     /// Create and initialize a REST catalog with optional authenticator
     pub async fn create_rest(
