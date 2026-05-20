@@ -148,7 +148,6 @@ impl RawResponse for IcebergFileScanResponse {
 }
 
 /// Synchronous operations for table and batch management
-
 /// Free a table
 #[no_mangle]
 pub extern "C" fn iceberg_table_free(table: *mut IcebergTable) {
