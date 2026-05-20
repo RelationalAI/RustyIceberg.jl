@@ -34,3 +34,31 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
         working-directory: iceberg_rust_ffi
+
+  rust-clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./iceberg_rust_ffi
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: iceberg_rust_ffi
+
+  rust-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./iceberg_rust_ffi
+      - name: Run Rust unit tests
+        # --no-default-features skips the `julia` feature, which declares
+        # extern "C" Julia symbols that require the Julia runtime to link.
+        run: cargo test --no-default-features
+        working-directory: iceberg_rust_ffi
