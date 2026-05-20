@@ -1,15 +1,16 @@
 /// Writer support for iceberg_rust_ffi
 ///
 /// Encoding is handled by a global pool of N=available_parallelism OS threads shared
-/// across all writers. Per-writer ordering is guaranteed by the per-writer
-/// `Arc<Mutex<ConcreteDataFileWriter>>` inside WriterState: only one pool thread encodes
-/// a given writer at a time, and the FIFO global queue ensures batches are submitted
-/// in order.
+/// across all writers. Each writer owns its own FIFO queue of pending batches; workers
+/// scan the set of active writers and claim one (via the per-writer `busy` flag) before
+/// draining its queue. This avoids the head-of-line blocking that the old single-MPMC
+/// design suffered when many workers happened to pull tasks for the same writer.
 use std::any::Any;
+use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
@@ -105,23 +106,44 @@ use object_store_ffi::{
 type ConcreteDataFileWriter =
     DataFileWriter<ParquetWriterBuilder, DefaultLocationGenerator, DefaultFileNameGenerator>;
 
-/// Encode task submitted to the global worker pool.
-pub(crate) struct EncodeTask {
-    batch: RecordBatch,
-    state: Arc<WriterState>,
-}
-
-// Safety: RecordBatch is Send; WriterState fields are Send.
-unsafe impl Send for EncodeTask {}
-
 /// Shared mutable state for one IcebergDataFileWriter.
 /// Owned by the IcebergDataFileWriter and shared with pool workers via Arc.
+///
+/// # Invariants
+///
+/// 1. **Per-writer FIFO ordering.** Batches for a given writer are encoded in submission
+///    order. Pushes go to the back of `pending_queue`; pops come from the front; and
+///    `busy` ensures at most one worker drains the queue at a time — so the encode order
+///    is identical to the push order.
+/// 2. **Single-claim.** A worker may only encode for this writer while it has won the
+///    `busy.compare_exchange(false → true)`. The claimed worker drains the queue to
+///    empty (or until the writer reports an error) before releasing `busy`.
+/// 3. **Stranded-task mitigation.** After releasing `busy`, the worker re-checks
+///    `queue_len`; if non-zero (a producer pushed a batch between the worker's last
+///    pop and the release), it notifies the global pool again. This prevents the
+///    classic missed-notification race where a notification is consumed by a worker
+///    that arrived between the producer's push and the queue's becoming non-empty.
 pub(crate) struct WriterState {
-    /// The underlying Parquet writer. Protected by a Mutex so pool workers can access it
-    /// concurrently (though at most one worker encodes a given writer at a time due to the
-    /// bounded per-writer channel). Set to None when the writer is closed or freed.
+    /// The underlying Parquet writer. Protected by a Mutex so pool workers can access it.
+    /// Only the worker that holds the `busy` claim ever locks this — so there's no real
+    /// contention here; the Mutex is preserved purely to coordinate with
+    /// `iceberg_writer_free`, which may take the writer out from under in-flight work.
+    /// Set to None when the writer is closed or freed.
     writer: Mutex<Option<ConcreteDataFileWriter>>,
-    /// Number of encode tasks submitted to the pool but not yet completed.
+    /// FIFO queue of batches awaiting encode for this writer.
+    pending_queue: Mutex<VecDeque<RecordBatch>>,
+    /// Snapshot of `pending_queue.len()` exposed as an atomic so workers can skip writers
+    /// with no work without taking the queue lock. Kept in sync with the queue under the
+    /// queue lock by `submit_batch` (increments before notifying) and by workers (decrement
+    /// after popping).
+    queue_len: AtomicUsize,
+    /// Set to true by the worker currently encoding for this writer. Other workers skip
+    /// this writer while `busy` is true, even if `queue_len > 0`.
+    busy: AtomicBool,
+    /// True once this writer has been registered in `GlobalWorkerPool::active_writers`.
+    /// First submitter wins the CAS and performs the registration.
+    registered: AtomicBool,
+    /// Number of encode tasks submitted but not yet completed. Includes queued + in-flight.
     pending: AtomicUsize,
     /// Notified when `pending` drops to zero, so iceberg_writer_close can wait efficiently.
     done_notify: tokio::sync::Notify,
@@ -133,12 +155,80 @@ pub(crate) struct WriterState {
 unsafe impl Send for WriterState {}
 unsafe impl Sync for WriterState {}
 
+impl WriterState {
+    fn new(writer: ConcreteDataFileWriter) -> Self {
+        WriterState {
+            writer: Mutex::new(Some(writer)),
+            pending_queue: Mutex::new(VecDeque::new()),
+            queue_len: AtomicUsize::new(0),
+            busy: AtomicBool::new(false),
+            registered: AtomicBool::new(false),
+            pending: AtomicUsize::new(0),
+            done_notify: tokio::sync::Notify::new(),
+            error: Mutex::new(None),
+        }
+    }
+}
+
 /// Global pool of N=available_parallelism encode worker threads shared across all writers.
+///
+/// Replaces the previous single-MPMC channel design. Each writer owns its own queue;
+/// workers scan the active-writer list looking for a writer that (a) has queued work and
+/// (b) is not currently claimed by another worker. The first such writer is claimed
+/// (`busy = true`), drained, then released.
+///
+/// # Wakeup discipline
+///
+/// `wake` is a single shared `Notify` for the whole pool. Both producers (`submit_batch`)
+/// and workers (after releasing a writer that still has work) call `wake.notify_one()`.
+/// To avoid stranded tasks when multiple producers fire concurrently and only one permit
+/// can be stored, a worker that successfully claims a writer cascades the wakeup by
+/// calling `wake.notify_one()` before draining — so if more writers have work, another
+/// worker is roused to look.
 pub(crate) struct GlobalWorkerPool {
-    pub(crate) task_tx: tokio::sync::mpsc::Sender<EncodeTask>,
+    /// Currently-registered writers. Workers iterate this on each pass looking for work.
+    /// Locked only briefly to snapshot the list (Arc clones); never held during encode.
+    active_writers: Mutex<Vec<Arc<WriterState>>>,
+    /// Wakeup channel for idle workers. Producers and finishing workers notify; idle
+    /// workers wait. See struct doc for the cascade discipline that prevents lost wakeups.
+    wake: tokio::sync::Notify,
+    /// Rotating start offset for the per-pass scan, so workers don't all collide on
+    /// writer 0 when several writers have work.
+    scan_offset: AtomicUsize,
 }
 
 pub(crate) static GLOBAL_ENCODE_POOL: OnceLock<GlobalWorkerPool> = OnceLock::new();
+
+impl GlobalWorkerPool {
+    /// Add a writer to the active set. Idempotent via the `registered` CAS on WriterState.
+    fn register(&self, state: &Arc<WriterState>) {
+        if state
+            .registered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let mut guard = self.active_writers.lock().unwrap_or_else(|e| e.into_inner());
+            guard.push(state.clone());
+        }
+    }
+
+    /// Remove a writer from the active set. Called on free; idempotent.
+    fn unregister(&self, state: &WriterState) {
+        if !state.registered.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let mut guard = self.active_writers.lock().unwrap_or_else(|e| e.into_inner());
+        let target = state as *const WriterState;
+        guard.retain(|s| Arc::as_ptr(s) != target);
+    }
+
+    /// Snapshot the active-writers list. Returns Arc clones so subsequent encoding does
+    /// not hold the list lock.
+    fn snapshot(&self) -> Vec<Arc<WriterState>> {
+        let guard = self.active_writers.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clone()
+    }
+}
 
 /// Formats a Rust panic payload into an anyhow error, preserving the message where possible.
 fn format_panic_error(panic: Box<dyn Any + Send>) -> anyhow::Error {
@@ -152,54 +242,168 @@ fn format_panic_error(panic: Box<dyn Any + Send>) -> anyhow::Error {
     anyhow::anyhow!(msg)
 }
 
-/// Body of each encode worker thread: receives tasks from the shared channel and encodes them.
-fn encode_worker_loop(
-    task_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<EncodeTask>>>,
-    handle: tokio::runtime::Handle,
+/// Try to claim a writer with pending work. Returns the claimed writer (busy=true) or
+/// None if no writer has work available right now.
+///
+/// Scans the active-writers snapshot starting at a rotating offset so workers don't all
+/// race for writer 0.
+fn try_claim_writer(pool: &GlobalWorkerPool) -> Option<Arc<WriterState>> {
+    let writers = pool.snapshot();
+    if writers.is_empty() {
+        return None;
+    }
+    let n = writers.len();
+    let start = pool.scan_offset.fetch_add(1, Ordering::Relaxed) % n;
+    for i in 0..n {
+        let w = &writers[(start + i) % n];
+        if w.queue_len.load(Ordering::Acquire) == 0 {
+            continue;
+        }
+        if w
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            // Re-check after winning the claim: another worker may have drained the
+            // queue between our queue_len load and our CAS. If so, release and skip.
+            if w.queue_len.load(Ordering::Acquire) == 0 {
+                w.busy.store(false, Ordering::Release);
+                continue;
+            }
+            return Some(w.clone());
+        }
+    }
+    None
+}
+
+/// Encode a single batch for the given (already-claimed) writer. Stores any encode error
+/// in `state.error` (first-writer-wins) and always decrements `pending` exactly once.
+fn encode_one_batch(
+    state: &Arc<WriterState>,
+    batch: RecordBatch,
+    handle: &tokio::runtime::Handle,
 ) {
+    // Test hook: bypass the real Parquet write so we can exercise the dispatch logic in
+    // isolation. Enabled only when a test installs a positive delay via `test_hooks`.
+    #[cfg(test)]
+    {
+        let delay_ms = test_hooks::DELAY_MS.load(Ordering::Relaxed);
+        if delay_ms > 0 {
+            test_hooks::run_hook(state, &batch);
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
+            if prev == 1 {
+                state.done_notify.notify_one();
+            }
+            return;
+        }
+    }
+
+    let state_for_panic = state.clone();
+    let handle_enc = handle.clone();
+    let state_for_encode = state.clone();
+    let encode_result = catch_unwind(AssertUnwindSafe(move || {
+        let mut guard = state_for_encode
+            .writer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            Some(w) => handle_enc
+                .block_on(w.write(batch))
+                .map_err(|e| anyhow::anyhow!("write batch: {}", e)),
+            None => Err(anyhow::anyhow!("writer already closed")),
+        }
+    }));
+
+    let err = match encode_result {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e),
+        Err(panic) => Some(format_panic_error(panic)),
+    };
+    if let Some(e) = err {
+        let mut slot = state_for_panic
+            .error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(e);
+        }
+    }
+
+    let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
+    if prev == 1 {
+        state.done_notify.notify_one();
+    }
+}
+
+/// Drain the claimed writer's queue while we hold `busy`. Pops one batch at a time and
+/// encodes it. The `busy` flag ensures FIFO per-writer ordering: while we hold it, no
+/// other worker can interleave a pop on this writer's queue.
+fn drain_claimed_writer(state: &Arc<WriterState>, handle: &tokio::runtime::Handle) {
     loop {
-        // Acquire the shared receiver lock, then wait for a task.
-        // The lock is released as soon as recv() returns, so workers are not serialized
-        // during encoding — only during task pickup.
-        let task = {
-            let mut rx = handle.block_on(task_rx.lock());
-            match handle.block_on(rx.recv()) {
-                Some(t) => t,
-                None => break, // sender dropped → pool shutting down
+        let batch = {
+            let mut q = state
+                .pending_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match q.pop_front() {
+                Some(b) => {
+                    state.queue_len.fetch_sub(1, Ordering::AcqRel);
+                    b
+                }
+                None => break,
             }
         };
+        encode_one_batch(state, batch, handle);
+    }
+}
 
-        // Clone state before moving task into the closure so we can always decrement
-        // pending even if the closure panics.
-        let state = task.state.clone();
-        let handle_enc = handle.clone();
-        let encode_result = catch_unwind(AssertUnwindSafe(move || {
-            let mut guard = task.state.writer.lock().unwrap_or_else(|e| e.into_inner());
-            match guard.as_mut() {
-                Some(w) => handle_enc
-                    .block_on(w.write(task.batch))
-                    .map_err(|e| anyhow::anyhow!("write batch: {}", e)),
-                None => Err(anyhow::anyhow!("writer already closed")),
-            }
-        }));
+/// Worker thread body: scan for a writer with work, claim it, drain its queue, release,
+/// re-check (stranded-task mitigation), and either continue or wait for a wake-up.
+///
+/// The wake-up protocol uses a single shared `Notify` with a cascade discipline. See the
+/// docs on `GlobalWorkerPool` for the full picture; the key races are:
+///
+/// - **Producer notification lost.** Tokio's `Notify` stores at most one permit, so if
+///   two producers fire `notify_one()` while all workers are sleeping, only one worker
+///   wakes. To prevent the second producer's work from being stranded, the woken worker
+///   calls `wake.notify_one()` *before* it starts draining — cascading the wakeup so
+///   another worker checks the remaining writers.
+/// - **Push between last-pop and busy-release.** A producer pushes a batch after the
+///   drain loop sees an empty queue but before this worker clears `busy`. The producer's
+///   `notify_one()` may have been consumed by some other worker that ran an empty scan
+///   and went back to sleep. Mitigation: after clearing `busy`, this worker re-reads
+///   `queue_len`; if non-zero, it notifies again so someone re-claims the writer.
+fn encode_worker_loop(pool: &'static GlobalWorkerPool, handle: tokio::runtime::Handle) {
+    loop {
+        // Pre-register interest in the next wake-up. `enable()` guarantees that any
+        // `notify_one()` issued from this point on will wake the future even if it
+        // hasn't been polled yet — so the check-then-wait below is race-free.
+        let notified = pool.wake.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
 
-        let err = match encode_result {
-            Ok(Ok(())) => None,
-            Ok(Err(e)) => Some(e),
-            Err(panic) => Some(format_panic_error(panic)),
-        };
-        if let Some(e) = err {
-            let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.is_none() {
-                *slot = Some(e);
+        if let Some(state) = try_claim_writer(pool) {
+            // Cascade: another writer may also have work. Wake a peer to look in
+            // parallel before we commit to draining this one.
+            pool.wake.notify_one();
+
+            drain_claimed_writer(&state, &handle);
+
+            // Release the claim. After this point another worker is free to claim
+            // the writer.
+            state.busy.store(false, Ordering::Release);
+
+            // Stranded-task mitigation: a producer may have pushed between our last
+            // pop and our release. If so, ensure a worker is woken to handle it.
+            if state.queue_len.load(Ordering::Acquire) > 0 {
+                pool.wake.notify_one();
             }
+            continue;
         }
 
-        // Always decrement pending; notify close() if this was the last task.
-        let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
-        if prev == 1 {
-            state.done_notify.notify_one();
-        }
+        // Nothing to claim — go to sleep until notified.
+        handle.block_on(notified);
     }
 }
 
@@ -224,7 +428,8 @@ pub extern "C" fn iceberg_set_encode_workers(n: i32) -> i32 {
 /// Initialize the global encode pool on first call.
 /// Must be called from within a Tokio runtime (iceberg_writer_new satisfies this).
 fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
-    GLOBAL_ENCODE_POOL.get_or_init(|| {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
         let configured = ENCODE_WORKERS.load(Ordering::Relaxed);
         let n = if configured > 0 {
             configured
@@ -234,21 +439,31 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
             thread::available_parallelism().unwrap().get()
         };
         let handle = tokio::runtime::Handle::current();
-        // Buffer 2× workers — drain tasks are rarely blocked on submit.
-        let (task_tx, task_rx) = tokio::sync::mpsc::channel::<EncodeTask>(n * 2);
-        let task_rx = Arc::new(tokio::sync::Mutex::new(task_rx));
+
+        // Install the pool first so workers can reference it as `&'static`.
+        GLOBAL_ENCODE_POOL
+            .set(GlobalWorkerPool {
+                active_writers: Mutex::new(Vec::new()),
+                wake: tokio::sync::Notify::new(),
+                scan_offset: AtomicUsize::new(0),
+            })
+            .ok()
+            .expect("encode pool initialized twice");
+        let pool_ref: &'static GlobalWorkerPool = GLOBAL_ENCODE_POOL
+            .get()
+            .expect("pool was just installed");
 
         for i in 0..n {
-            let task_rx = task_rx.clone();
             let handle = handle.clone();
             thread::Builder::new()
                 .name(format!("iceberg-encode-{}", i))
-                .spawn(move || encode_worker_loop(task_rx, handle))
+                .spawn(move || encode_worker_loop(pool_ref, handle))
                 .expect("failed to spawn iceberg encode worker");
         }
-
-        GlobalWorkerPool { task_tx }
-    })
+    });
+    GLOBAL_ENCODE_POOL
+        .get()
+        .expect("encode pool not installed by INIT")
 }
 
 /// Opaque writer handle for FFI.
@@ -289,35 +504,40 @@ pub(crate) fn store_writer_error_pub(writer_ref: &IcebergDataFileWriter, e: anyh
     store_writer_error(writer_ref, e);
 }
 
-/// Submit a `RecordBatch` to the global encode pool.
+/// Submit a `RecordBatch` to the writer's queue. Lazily registers the writer with the
+/// global pool on first submit, then pushes onto the per-writer FIFO queue and notifies
+/// the pool that there is work available somewhere.
 ///
-/// Increments the writer's pending count before sending and rolls it back on channel failure.
+/// `pending` (queued + in-flight) is incremented under the queue lock so that
+/// `iceberg_writer_close` sees a consistent count.
 pub(crate) fn submit_batch(
     writer_ref: &IcebergDataFileWriter,
     pool: &GlobalWorkerPool,
     batch: RecordBatch,
 ) -> Result<(), anyhow::Error> {
-    writer_ref
-        .writer_state
-        .pending
-        .fetch_add(1, Ordering::AcqRel);
-    let task = EncodeTask {
-        batch,
-        state: writer_ref.writer_state.clone(),
-    };
-    match pool.task_tx.blocking_send(task) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let prev = writer_ref
-                .writer_state
-                .pending
-                .fetch_sub(1, Ordering::AcqRel);
-            if prev == 1 {
-                writer_ref.writer_state.done_notify.notify_one();
-            }
-            Err(anyhow::anyhow!("encode pool channel closed unexpectedly"))
-        }
+    // Idempotent — only the first submit pays the lock to push into active_writers.
+    pool.register(&writer_ref.writer_state);
+
+    {
+        let mut q = writer_ref
+            .writer_state
+            .pending_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        q.push_back(batch);
+        // Increment counters under the lock so queue and counters stay consistent.
+        writer_ref
+            .writer_state
+            .queue_len
+            .fetch_add(1, Ordering::AcqRel);
+        writer_ref
+            .writer_state
+            .pending
+            .fetch_add(1, Ordering::AcqRel);
     }
+
+    pool.wake.notify_one();
+    Ok(())
 }
 
 /// Validates column count, converts each `ColumnDescriptor` into a single-slice `SliceRef`,
@@ -386,12 +606,17 @@ pub extern "C" fn iceberg_writer_write_columns(
     0
 }
 
-/// Free a writer. Poisons the writer state so any in-flight pool tasks fail gracefully.
+/// Free a writer. Poisons the writer state so any in-flight pool tasks fail gracefully,
+/// and unregisters the writer from the global pool's active-writers list so workers stop
+/// scanning it.
 #[no_mangle]
 pub extern "C" fn iceberg_writer_free(writer: *mut IcebergDataFileWriter) {
     if !writer.is_null() {
         unsafe {
             let boxed = Box::from_raw(writer);
+            if let Some(pool) = GLOBAL_ENCODE_POOL.get() {
+                pool.unregister(&boxed.writer_state);
+            }
             // Poison the ConcreteDataFileWriter so any in-flight pool tasks return an error
             // rather than writing to a partially-freed writer.
             let _ = boxed.writer_state.writer.lock().unwrap().take();
@@ -473,12 +698,7 @@ export_runtime_op!(
         // Initialize global pool (no-op if already running).
         get_or_init_encode_pool();
 
-        let writer_state = Arc::new(WriterState {
-            writer: Mutex::new(Some(concrete_writer)),
-            pending: AtomicUsize::new(0),
-            done_notify: tokio::sync::Notify::new(),
-            error: Mutex::new(None),
-        });
+        let writer_state = Arc::new(WriterState::new(concrete_writer));
 
         Ok::<IcebergDataFileWriter, anyhow::Error>(IcebergDataFileWriter {
             arrow_schema,
@@ -606,3 +826,280 @@ export_runtime_op!(
     },
     writer: *mut IcebergDataFileWriter
 );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test hooks + dispatch tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Mutex;
+
+    use arrow_array::{Array, Int64Array, RecordBatch};
+
+    use super::WriterState;
+    use std::sync::Arc;
+
+    /// When non-zero, `encode_one_batch` skips the real Parquet write, sleeps this many
+    /// milliseconds, and records the completion. Used by dispatch-logic tests.
+    pub(crate) static DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+    /// Recorded `(writer_id, batch_id)` for each completed encode while `DELAY_MS > 0`.
+    /// `writer_id` is the `Arc<WriterState>` pointer cast to usize. `batch_id` is read
+    /// from the batch's first column (assumed to be an Int64Array of length 1).
+    pub(crate) static COMPLETIONS: Mutex<Vec<(usize, i64)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn run_hook(state: &Arc<WriterState>, batch: &RecordBatch) {
+        let id = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .map(|a| a.value(0))
+            .unwrap_or(-1);
+        let writer_id = Arc::as_ptr(state) as usize;
+        COMPLETIONS.lock().unwrap().push((writer_id, id));
+    }
+
+    pub(crate) fn reset() {
+        DELAY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        COMPLETIONS.lock().unwrap().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
+
+    use super::*;
+
+    /// Serializes all dispatch tests so they don't trample the shared global pool
+    /// state (`DELAY_MS`, `COMPLETIONS`, `active_writers`).
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+    /// A long-lived multi-threaded runtime that the global encode pool can pin its
+    /// `Handle` to across tests. `#[tokio::test]` builds a fresh runtime per test and
+    /// drops it at end, which would invalidate the workers' handles.
+    fn pinned_runtime() -> &'static tokio::runtime::Runtime {
+        static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap()
+        })
+    }
+
+    fn batch_with_id(id: i64) -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![id]))]).unwrap()
+    }
+
+    /// Constructs a WriterState with no underlying Parquet writer. Safe because the
+    /// test hook bypasses the real `w.write(batch)` path.
+    fn mock_writer_state() -> Arc<WriterState> {
+        Arc::new(WriterState {
+            writer: Mutex::new(None),
+            pending_queue: Mutex::new(std::collections::VecDeque::new()),
+            queue_len: std::sync::atomic::AtomicUsize::new(0),
+            busy: std::sync::atomic::AtomicBool::new(false),
+            registered: std::sync::atomic::AtomicBool::new(false),
+            pending: std::sync::atomic::AtomicUsize::new(0),
+            done_notify: tokio::sync::Notify::new(),
+            error: Mutex::new(None),
+        })
+    }
+
+    /// Push a batch onto a WriterState's queue, registering with the pool and waking it.
+    /// Mirrors `submit_batch` but takes a bare WriterState (so tests can use mock states
+    /// without going through IcebergDataFileWriter).
+    fn push(pool: &GlobalWorkerPool, state: &Arc<WriterState>, batch: RecordBatch) {
+        pool.register(state);
+        {
+            let mut q = state.pending_queue.lock().unwrap();
+            q.push_back(batch);
+            state.queue_len.fetch_add(1, Ordering::AcqRel);
+            state.pending.fetch_add(1, Ordering::AcqRel);
+        }
+        pool.wake.notify_one();
+    }
+
+    fn wait_for_pending_zero(state: &WriterState, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while state.pending.load(Ordering::Acquire) > 0 {
+            if start.elapsed() > timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
+    /// Initializes the global encode pool from inside the pinned runtime. Safe to call
+    /// many times — only the first call does any work.
+    fn ensure_pool() -> &'static GlobalWorkerPool {
+        let _g = pinned_runtime().enter();
+        get_or_init_encode_pool()
+    }
+
+    /// Detach any mock writers we registered with the pool so a subsequent test starts
+    /// from a clean active-writer list. Doesn't shut down the workers (they're shared).
+    fn cleanup_writers(pool: &GlobalWorkerPool, states: &[Arc<WriterState>]) {
+        for s in states {
+            pool.unregister(s);
+        }
+    }
+
+    /// Fairness: with 4 writers each holding 8 queued batches and N>=4 workers, the new
+    /// dispatch should drain all 4 writers in parallel rather than serializing one
+    /// writer at a time.
+    ///
+    /// We assert two properties:
+    ///   1. Per-writer FIFO: each writer's batches complete in submission order.
+    ///   2. Parallelism: within any group of 4 consecutive completions, all 4 writers
+    ///      appear — i.e., a round-robin pattern emerges naturally because each writer
+    ///      is being drained by its own worker, all sleeping for the same delay.
+    #[test]
+    fn fairness_drains_writers_in_parallel() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        let pool = ensure_pool();
+
+        test_hooks::reset();
+        test_hooks::DELAY_MS.store(20, Ordering::Relaxed);
+
+        let writers: Vec<Arc<WriterState>> = (0..4).map(|_| mock_writer_state()).collect();
+        let writer_ids: HashMap<usize, usize> = writers
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (Arc::as_ptr(s) as usize, i))
+            .collect();
+
+        // Submit interleaved: round 0 of every writer, then round 1, etc.
+        for round in 0..8i64 {
+            for (i, w) in writers.iter().enumerate() {
+                let batch_id = (i as i64) * 100 + round;
+                push(pool, w, batch_with_id(batch_id));
+            }
+        }
+
+        for w in &writers {
+            assert!(
+                wait_for_pending_zero(w, Duration::from_secs(10)),
+                "writer did not drain in time"
+            );
+        }
+
+        let completions = test_hooks::COMPLETIONS.lock().unwrap().clone();
+        // 4 writers × 8 batches = 32 completions.
+        assert_eq!(completions.len(), 32);
+
+        // (1) FIFO per writer: filter completions by writer and check batch IDs ascend.
+        for (i, w) in writers.iter().enumerate() {
+            let id = Arc::as_ptr(w) as usize;
+            let ids: Vec<i64> = completions
+                .iter()
+                .filter(|(wid, _)| *wid == id)
+                .map(|(_, bid)| *bid)
+                .collect();
+            assert_eq!(ids.len(), 8, "writer {} missing batches", i);
+            for j in 0..8 {
+                assert_eq!(
+                    ids[j],
+                    (i as i64) * 100 + j as i64,
+                    "writer {} batch {} out of order: {:?}",
+                    i,
+                    j,
+                    ids
+                );
+            }
+        }
+
+        // (2) Parallelism: each group of 4 consecutive completions should contain 4
+        // distinct writers. With <4 workers in the pool this would fail; on any modern
+        // dev machine `available_parallelism() >= 4`.
+        for chunk in completions.chunks(4) {
+            let distinct: std::collections::HashSet<usize> = chunk
+                .iter()
+                .map(|(wid, _)| writer_ids[wid])
+                .collect();
+            assert_eq!(
+                distinct.len(),
+                4,
+                "expected 4 distinct writers per round, got {:?}",
+                chunk
+            );
+        }
+
+        cleanup_writers(pool, &writers);
+        test_hooks::reset();
+    }
+
+    /// Stranded-task race: hammer the pool with many submits across many writers and
+    /// verify that every submitted batch is eventually drained — i.e., `pending` always
+    /// converges to zero, no batch sits forever in a per-writer queue because of a
+    /// missed wake-up.
+    #[test]
+    fn no_stranded_tasks_under_load() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        let pool = ensure_pool();
+
+        test_hooks::reset();
+        // Tiny delay (1ms) so a) the test runs fast, b) producers and drains
+        // genuinely race rather than one always preceding the other.
+        test_hooks::DELAY_MS.store(1, Ordering::Relaxed);
+
+        const WRITERS: usize = 8;
+        const BATCHES_PER_WRITER: usize = 200;
+        let writers: Vec<Arc<WriterState>> = (0..WRITERS).map(|_| mock_writer_state()).collect();
+
+        // Drive submissions from several threads to maximize interleaving.
+        let mut handles = Vec::new();
+        for tid in 0..4 {
+            let writers = writers.clone();
+            let pool: &'static GlobalWorkerPool = pool;
+            handles.push(std::thread::spawn(move || {
+                for batch_idx in 0..(BATCHES_PER_WRITER / 4) {
+                    for (wi, w) in writers.iter().enumerate() {
+                        let id = (tid as i64) * 1_000_000
+                            + (wi as i64) * 10_000
+                            + batch_idx as i64;
+                        push(pool, w, batch_with_id(id));
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Wait for every writer's pending to drop to zero. If any single writer's queue
+        // is stranded, this would time out.
+        for (i, w) in writers.iter().enumerate() {
+            assert!(
+                wait_for_pending_zero(w, Duration::from_secs(30)),
+                "writer {} did not drain; pending={} queue_len={}",
+                i,
+                w.pending.load(Ordering::Acquire),
+                w.queue_len.load(Ordering::Acquire),
+            );
+            assert_eq!(w.queue_len.load(Ordering::Acquire), 0);
+        }
+
+        let total = test_hooks::COMPLETIONS.lock().unwrap().len();
+        assert_eq!(total, WRITERS * BATCHES_PER_WRITER);
+
+        cleanup_writers(pool, &writers);
+        test_hooks::reset();
+    }
+}
