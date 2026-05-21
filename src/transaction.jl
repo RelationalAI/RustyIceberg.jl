@@ -39,7 +39,11 @@ free_transaction!(tx)
 function Transaction(table::Table)
     ptr = @ccall rust_lib.iceberg_transaction_new(table::Table)::Ptr{Cvoid}
     if ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "null table pointer passed to Transaction()"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "null table pointer passed to Transaction()",
+        ))
     end
     return Transaction(ptr, table)
 end
@@ -74,10 +78,18 @@ free_transaction!(tx)
 """
 function commit(tx::Transaction, catalog::Catalog)
     if tx.ptr == C_NULL
-        throw(IcebergException(STATE_TRANSACTION_CONSUMED, "Transaction has already been committed or rolled back", "Transaction has been freed or consumed"))
+        throw(IcebergException(
+            STATE_TRANSACTION_CONSUMED,
+            "Transaction has already been committed or rolled back",
+            "Transaction has been freed or consumed",
+        ))
     end
     if catalog.ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "Catalog has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Catalog has been freed",
+        ))
     end
 
     response = TableResponse()
@@ -182,7 +194,11 @@ free_fast_append_action!(action)
 function FastAppendAction()
     ptr = @ccall rust_lib.iceberg_fast_append_action_new()::Ptr{Cvoid}
     if ptr == C_NULL
-        throw(IcebergException(INTERNAL, "Internal error (please report this as a bug)", "iceberg_fast_append_action_new returned null"))
+        throw(IcebergException(
+            INTERNAL,
+            "Internal error (please report this as a bug)",
+            "iceberg_fast_append_action_new returned null",
+        ))
     end
     return FastAppendAction(ptr)
 end
@@ -219,10 +235,18 @@ The `data_files` handle is consumed by this operation and marked as such
 """
 function add_data_files(action::FastAppendAction, data_files::DataFiles)
     if action.ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "FastAppendAction has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "FastAppendAction has been freed",
+        ))
     end
     if data_files.ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "DataFiles has been freed or consumed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "DataFiles has been freed or consumed",
+        ))
     end
 
     try
@@ -263,10 +287,18 @@ This applies all accumulated data files as a single FastAppendAction to the tran
 """
 function apply(action::FastAppendAction, tx::Transaction)
     if action.ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "FastAppendAction has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "FastAppendAction has been freed",
+        ))
     end
     if tx.ptr == C_NULL
-        throw(IcebergException(STATE_TRANSACTION_CONSUMED, "Transaction has already been committed or rolled back", "Transaction has been freed or consumed"))
+        throw(IcebergException(
+            STATE_TRANSACTION_CONSUMED,
+            "Transaction has already been committed or rolled back",
+            "Transaction has been freed or consumed",
+        ))
     end
 
     error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)

@@ -4,7 +4,9 @@
 /// enabling Julia to create transactions, add data files via FastAppendAction,
 /// and commit changes to Iceberg tables.
 use crate::catalog::IcebergCatalog;
-use crate::error_codes::{classified_error, classify_iceberg, STATE_RESOURCE_FREED, STATE_TRANSACTION_CONSUMED};
+use crate::error_codes::{
+    classified_error, classify_iceberg, STATE_RESOURCE_FREED, STATE_TRANSACTION_CONSUMED,
+};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
 use iceberg::spec::DataFile;
@@ -217,9 +219,14 @@ pub extern "C" fn iceberg_fast_append_action_apply(
     let tx = match tx_ref.take() {
         Some(t) => t,
         None => {
-            set_error(&format!("{}\t{}\tTransaction already consumed",
-                crate::error_codes::STATE_TRANSACTION_CONSUMED,
-                "Transaction has already been committed or rolled back"), error_message_out);
+            set_error(
+                &format!(
+                    "{}\t{}\tTransaction already consumed",
+                    crate::error_codes::STATE_TRANSACTION_CONSUMED,
+                    "Transaction has already been committed or rolled back"
+                ),
+                error_message_out,
+            );
             return 1;
         }
     };

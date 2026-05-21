@@ -64,8 +64,10 @@ end
     @testset "wrong S3 credentials" begin
         without_aws_env() do
             s3 = get_s3_config()
+            nation_meta = "s3://warehouse/tpch.sf01/nation/metadata/" *
+                          "00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
             @test_throws RustyIceberg.IcebergException table_open(
-                "s3://warehouse/tpch.sf01/nation/metadata/00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json";
+                nation_meta;
                 properties=Dict(
                     "s3.endpoint"          => s3["endpoint"],
                     "s3.access-key-id"     => "WRONG_ACCESS_KEY",

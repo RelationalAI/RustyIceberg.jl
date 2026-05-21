@@ -104,7 +104,11 @@ function select_columns!(scan::IncrementalScan, column_names::Vector{String})
     )::Cint
 
     if result != 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_select_columns returned $result"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_incremental_select_columns returned $result",
+        ))
     end
     return nothing
 end
@@ -121,7 +125,11 @@ function with_manifest_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_manifest_file_concurrency_limit returned $result"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_incremental_scan_with_manifest_file_concurrency_limit returned $result",
+        ))
     end
     return nothing
 end
@@ -146,7 +154,11 @@ function with_manifest_entry_concurrency_limit!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_manifest_entry_concurrency_limit returned $result"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_incremental_scan_with_manifest_entry_concurrency_limit returned $result",
+        ))
     end
     return nothing
 end
@@ -165,7 +177,11 @@ function with_batch_size!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_batch_size returned $result"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_incremental_scan_with_batch_size returned $result",
+        ))
     end
     return nothing
 end
@@ -191,7 +207,11 @@ function with_file_column!(scan::IncrementalScan)
     )::Cint
 
     if result != 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_file_column returned $result"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_incremental_scan_with_file_column returned $result",
+        ))
     end
     return nothing
 end
@@ -222,7 +242,11 @@ function with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_serialization_concurrency_limit returned $result"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_incremental_scan_with_serialization_concurrency_limit returned $result",
+        ))
     end
     return nothing
 end
@@ -239,7 +263,11 @@ function with_file_prefetch_depth!(scan::IncrementalScan, n::UInt)
         n::Csize_t
     )::Cint
     if result != 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_scan_with_file_prefetch_depth returned $result"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_with_file_prefetch_depth returned $result",
+        ))
     end
     return nothing
 end
@@ -265,7 +293,11 @@ function with_pos_column!(scan::IncrementalScan)
     )::Cint
 
     if result != 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_with_pos_column returned $result"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_incremental_scan_with_pos_column returned $result",
+        ))
     end
     return nothing
 end
@@ -281,7 +313,11 @@ function build!(scan::IncrementalScan)
     )::Cint
 
     if result != 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_incremental_scan_build returned $result"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_incremental_scan_build returned $result",
+        ))
     end
     return nothing
 end

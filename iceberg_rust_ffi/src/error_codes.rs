@@ -101,11 +101,19 @@ pub fn classify(e: anyhow::Error) -> anyhow::Error {
     if let Some(ie) = e.downcast_ref::<iceberg::Error>() {
         let detail = format!("{:#}", ie);
         let (code, user_msg) = classify_by_kind(ie.kind(), &detail);
-        return anyhow::Error::new(ClassifiedError { code, user_msg, detail });
+        return anyhow::Error::new(ClassifiedError {
+            code,
+            user_msg,
+            detail,
+        });
     }
     let detail = format!("{:#}", e);
     let (code, user_msg) = classify_message(&detail);
-    anyhow::Error::new(ClassifiedError { code, user_msg, detail })
+    anyhow::Error::new(ClassifiedError {
+        code,
+        user_msg,
+        detail,
+    })
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -131,7 +139,10 @@ fn classify_data_invalid(detail: &str) -> (u32, String) {
     if lower.contains("parquet") {
         (DATA_FILE_CORRUPT, "Corrupt or unreadable data file".into())
     } else if lower.contains("column") || lower.contains("field") {
-        (DATA_SCHEMA_MISMATCH, "Column not found in table schema".into())
+        (
+            DATA_SCHEMA_MISMATCH,
+            "Column not found in table schema".into(),
+        )
     } else {
         (DATA_METADATA_INVALID, "Invalid table metadata".into())
     }
@@ -155,7 +166,9 @@ fn classify_message(detail: &str) -> (u32, String) {
     }
 
     // ── Not found ─────────────────────────────────────────────────────────────
-    if (lower.contains("nosuchkey") || lower.contains("not found") || lower.contains("no such file"))
+    if (lower.contains("nosuchkey")
+        || lower.contains("not found")
+        || lower.contains("no such file"))
         && (lower.contains(".parquet") || lower.contains("parquet"))
     {
         return (NOT_FOUND_DATA_FILE, "Data file not found".into());
@@ -194,7 +207,10 @@ fn classify_message(detail: &str) -> (u32, String) {
 
     // ── Catalog ───────────────────────────────────────────────────────────────
     if lower.contains("rest catalog") || lower.contains("rest catalogs") {
-        return (CATALOG_REST_ONLY, "This operation requires a REST catalog".into());
+        return (
+            CATALOG_REST_ONLY,
+            "This operation requires a REST catalog".into(),
+        );
     }
     if lower.contains("namespace not empty") || lower.contains("non-empty namespace") {
         return (
@@ -213,14 +229,15 @@ fn classify_message(detail: &str) -> (u32, String) {
         return (DATA_FILE_CORRUPT, "Corrupt or unreadable data file".into());
     }
     if lower.contains("invalid")
-        && (lower.contains("metadata")
-            || lower.contains("json")
-            || lower.contains("schema"))
+        && (lower.contains("metadata") || lower.contains("json") || lower.contains("schema"))
     {
         return (DATA_METADATA_INVALID, "Invalid table metadata".into());
     }
     if lower.contains("column") && lower.contains("not found") {
-        return (DATA_SCHEMA_MISMATCH, "Column not found in table schema".into());
+        return (
+            DATA_SCHEMA_MISMATCH,
+            "Column not found in table schema".into(),
+        );
     }
 
     // ── I/O ───────────────────────────────────────────────────────────────────
@@ -235,5 +252,8 @@ fn classify_message(detail: &str) -> (u32, String) {
         return (IO_S3, "S3 error".into());
     }
 
-    (INTERNAL, "Internal error (please report this as a bug)".into())
+    (
+        INTERNAL,
+        "Internal error (please report this as a bug)".into(),
+    )
 }

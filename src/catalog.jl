@@ -230,7 +230,11 @@ function catalog_create_rest(
     # Create an empty catalog (no authenticator)
     catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
     if catalog_ptr == C_NULL
-        throw(IcebergException(INTERNAL, "Internal error (please report this as a bug)", "Failed to create empty catalog"))
+        throw(IcebergException(
+            INTERNAL,
+            "Internal error (please report this as a bug)",
+            "Failed to create empty catalog",
+        ))
     end
 
     # Enable storage credentials loader if requested
@@ -239,7 +243,11 @@ function catalog_create_rest(
             catalog_ptr::Ptr{Cvoid}
         )::Cint
         if result != 0
-            throw(IcebergException(INTERNAL, "Internal error (please report this as a bug)", "Failed to set storage credentials loader"))
+            throw(IcebergException(
+                INTERNAL,
+                "Internal error (please report this as a bug)",
+                "Failed to set storage credentials loader",
+            ))
         end
     end
 
@@ -315,7 +323,11 @@ function catalog_create_rest(
     # Step 1: Create an empty catalog
     catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
     if catalog_ptr == C_NULL
-        throw(IcebergException(INTERNAL, "Internal error (please report this as a bug)", "Failed to create empty catalog"))
+        throw(IcebergException(
+            INTERNAL,
+            "Internal error (please report this as a bug)",
+            "Failed to create empty catalog",
+        ))
     end
 
     # Step 1b: Enable storage credentials loader if requested
@@ -324,7 +336,11 @@ function catalog_create_rest(
             catalog_ptr::Ptr{Cvoid}
         )::Cint
         if result != 0
-            throw(IcebergException(INTERNAL, "Internal error (please report this as a bug)", "Failed to set storage credentials loader"))
+            throw(IcebergException(
+                INTERNAL,
+                "Internal error (please report this as a bug)",
+                "Failed to set storage credentials loader",
+            ))
         end
     end
 
@@ -345,7 +361,11 @@ function catalog_create_rest(
     )::Cint
 
     if result != 0
-        throw(IcebergException(INTERNAL, "Internal error (please report this as a bug)", "Failed to set token authenticator"))
+        throw(IcebergException(
+            INTERNAL,
+            "Internal error (please report this as a bug)",
+            "Failed to set token authenticator",
+        ))
     end
 
     # Step 6: Initialize the catalog with REST connection
@@ -422,7 +442,11 @@ function catalog_create_memory(
 )::Catalog
     catalog_ptr = @ccall rust_lib.iceberg_catalog_init()::Ptr{Cvoid}
     if catalog_ptr == C_NULL
-        throw(IcebergException(INTERNAL, "Internal error (please report this as a bug)", "Failed to create empty catalog"))
+        throw(IcebergException(
+            INTERNAL,
+            "Internal error (please report this as a bug)",
+            "Failed to create empty catalog",
+        ))
     end
 
     property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]

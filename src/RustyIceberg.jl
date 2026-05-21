@@ -11,10 +11,12 @@ using iceberg_rust_ffi_jll
 export Table, Scan, IncrementalScan, ArrowBatch, StaticConfig, ArrowStream
 export init_runtime
 export IcebergException, IcebergError
-export NOT_FOUND_METADATA, NOT_FOUND_DATA_FILE, NOT_FOUND_TABLE, NOT_FOUND_NAMESPACE, NOT_FOUND_SNAPSHOT
+export NOT_FOUND_METADATA, NOT_FOUND_DATA_FILE, NOT_FOUND_TABLE
+export NOT_FOUND_NAMESPACE, NOT_FOUND_SNAPSHOT
 export AUTH_FAILED, AUTH_TOKEN_EXPIRED, AUTH_INSUFFICIENT
 export DATA_METADATA_INVALID, DATA_FILE_CORRUPT, DATA_SCHEMA_MISMATCH, DATA_TYPE_MISMATCH
-export CATALOG_TABLE_EXISTS, CATALOG_NAMESPACE_EXISTS, CATALOG_NAMESPACE_NOT_EMPTY, CATALOG_REST_ONLY, CATALOG_COMMIT_CONFLICT
+export CATALOG_TABLE_EXISTS, CATALOG_NAMESPACE_EXISTS, CATALOG_NAMESPACE_NOT_EMPTY
+export CATALOG_REST_ONLY, CATALOG_COMMIT_CONFLICT
 export STATE_RESOURCE_FREED, STATE_TRANSACTION_CONSUMED, STATE_WRITER_CLOSED
 export IO_NETWORK, IO_S3, IO_LOCAL
 export INTERNAL
@@ -144,7 +146,11 @@ function init_runtime(
         fn_ptr = @cfunction(notify_result_iceberg, Cint, (Ptr{Nothing},))
         res = @ccall rust_lib.iceberg_init_runtime(config::StaticConfig, panic_fn_ptr::Ptr{Nothing}, fn_ptr::Ptr{Nothing})::Cint
         if res != 0
-            throw(IcebergException(INTERNAL, "Failed to initialize Iceberg runtime", "iceberg_init_runtime returned $res"))
+            throw(IcebergException(
+                INTERNAL,
+                "Failed to initialize Iceberg runtime",
+                "iceberg_init_runtime returned $res",
+            ))
         end
         _ICEBERG_STARTED[] = true
     end
@@ -494,7 +500,11 @@ Get the storage location of an Iceberg table.
 function table_location(table::Table)
     ptr = @ccall rust_lib.iceberg_table_location(table::Table)::Ptr{Cchar}
     if ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_location returned null"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_table_location returned null",
+        ))
     end
     result = unsafe_string(ptr)
     @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
@@ -509,7 +519,11 @@ Get the UUID of an Iceberg table.
 function table_uuid(table::Table)
     ptr = @ccall rust_lib.iceberg_table_uuid(table::Table)::Ptr{Cchar}
     if ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_uuid returned null"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_table_uuid returned null",
+        ))
     end
     result = unsafe_string(ptr)
     @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
@@ -524,7 +538,11 @@ Get the format version of an Iceberg table (1, 2, or 3).
 function table_format_version(table::Table)
     version = @ccall rust_lib.iceberg_table_format_version(table::Table)::Int64
     if version == 0
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_format_version returned 0"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_table_format_version returned 0",
+        ))
     end
     return version
 end
@@ -537,7 +555,11 @@ Get the last sequence number of an Iceberg table.
 function table_last_sequence_number(table::Table)
     seq_num = @ccall rust_lib.iceberg_table_last_sequence_number(table::Table)::Int64
     if seq_num == -1
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_last_sequence_number returned -1"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_table_last_sequence_number returned -1",
+        ))
     end
     return seq_num
 end
@@ -550,7 +572,11 @@ Get the last updated timestamp of an Iceberg table in milliseconds since epoch.
 function table_last_updated_ms(table::Table)
     timestamp = @ccall rust_lib.iceberg_table_last_updated_ms(table::Table)::Int64
     if timestamp == -1
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_last_updated_ms returned -1"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_table_last_updated_ms returned -1",
+        ))
     end
     return timestamp
 end
@@ -578,7 +604,11 @@ and other metadata in the Iceberg schema format.
 function table_schema(table::Table)
     ptr = @ccall rust_lib.iceberg_table_schema(table::Table)::Ptr{Cchar}
     if ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_table_schema returned null"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_table_schema returned null",
+        ))
     end
     result = unsafe_string(ptr)
     @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint

@@ -158,7 +158,11 @@ if not set.
 function set_encode_workers!(n::Int)
     n > 0 || throw(ArgumentError("n must be positive, got $n"))
     ret = @ccall rust_lib.iceberg_set_encode_workers(n::Cint)::Int32
-    ret == 0 || throw(IcebergException(INTERNAL, "Internal error (please report this as a bug)", "set_encode_workers! must be called before creating any DataFileWriter"))
+    ret == 0 || throw(IcebergException(
+        INTERNAL,
+        "Internal error (please report this as a bug)",
+        "set_encode_workers! must be called before creating any DataFileWriter",
+    ))
     return nothing
 end
 
@@ -363,7 +367,11 @@ end
 """
 function Base.write(writer::DataFileWriter, data)
     if writer.ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "Writer has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Writer has been freed",
+        ))
     end
 
     # Serialize data to Arrow IPC format with field ID metadata
@@ -403,7 +411,11 @@ write(writer, arrow_table)
 """
 function Base.write(writer::DataFileWriter, table::Arrow.Table)
     if writer.ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "Writer has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Writer has been freed",
+        ))
     end
 
     # Serialize Arrow.Table to IPC format with field ID metadata
@@ -423,7 +435,11 @@ function _write_ipc_bytes(writer::DataFileWriter, ipc_bytes::Vector{UInt8})
             length(ipc_bytes)::Csize_t,
         )::Int32
     end
-    ret == 0 || throw(IcebergException(DATA_SCHEMA_MISMATCH, "Column not found in table schema", "write failed (see writer close for details)"))
+    ret == 0 || throw(IcebergException(
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
+        "write failed (see writer close for details)",
+    ))
     return nothing
 end
 
@@ -464,7 +480,11 @@ free_writer!(writer)  # Also frees data_files
 """
 function close_writer(writer::DataFileWriter)
     if writer.ptr == C_NULL
-        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "Writer has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Writer has been freed",
+        ))
     end
 
     response = WriterCloseResponse()
@@ -836,8 +856,16 @@ write_columns(writer, [desc], (data, validity))  # Arrays preserved during call
 ```
 """
 function write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}, arrays_to_preserve)
-    writer.ptr == C_NULL && throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "Writer has been freed"))
-    isempty(columns) && throw(IcebergException(DATA_SCHEMA_MISMATCH, "Column not found in table schema", "No columns provided"))
+    writer.ptr == C_NULL && throw(IcebergException(
+        STATE_RESOURCE_FREED,
+        "Resource has been freed",
+        "Writer has been freed",
+    ))
+    isempty(columns) && throw(IcebergException(
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
+        "No columns provided",
+    ))
 
     ret = GC.@preserve columns arrays_to_preserve begin
         @ccall rust_lib.iceberg_writer_write_columns(
@@ -847,7 +875,11 @@ function write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}
         )::Int32
     end
 
-    ret == 0 || throw(IcebergException(DATA_SCHEMA_MISMATCH, "Column not found in table schema", "write_columns failed (see writer close for details)"))
+    ret == 0 || throw(IcebergException(
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
+        "write_columns failed (see writer close for details)",
+    ))
     return nothing
 end
 
@@ -1115,8 +1147,16 @@ function write_columns(
     batch::GatheredBatch,
     extra_preserve = nothing,
 )
-    isempty(batch.columns) && throw(IcebergException(DATA_SCHEMA_MISMATCH, "Column not found in table schema", "GatheredBatch has no columns"))
-    writer.ptr == C_NULL && throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "Writer has been freed"))
+    isempty(batch.columns) && throw(IcebergException(
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
+        "GatheredBatch has no columns",
+    ))
+    writer.ptr == C_NULL && throw(IcebergException(
+        STATE_RESOURCE_FREED,
+        "Resource has been freed",
+        "Writer has been freed",
+    ))
 
     all_slice_arrays = Vector{Vector{SliceRef}}(undef, length(batch.columns))
     descriptors = Vector{GatheredColumnDescriptor}(undef, length(batch.columns))
