@@ -35,6 +35,14 @@ unsafe impl Send for IcebergArrowStream {}
 
 /// Heap allocation backing one ArrowBatch.
 ///
+/// `FFI_ArrowSchema` and `FFI_ArrowArray` must live at stable heap addresses
+/// because `ArrowBatch` is passed *by value* across the FFI boundary — Julia
+/// receives a copy of the struct. Storing the FFI structs inline in `ArrowBatch`
+/// would mean each copy carries its own values, but the raw pointers in
+/// `ArrowBatch::schema` / `::array` must keep pointing at the *original*
+/// allocation. Boxing them here pins them in place; the box address never
+/// changes regardless of how `ArrowBatch` is moved or copied.
+///
 /// Dropping this calls `Drop` on both FFI structs, which invokes the arrow-rs
 /// release callbacks and frees the buffer Arcs.
 pub(crate) struct ArrowBatchInner {
