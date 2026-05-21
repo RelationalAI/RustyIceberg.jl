@@ -367,3 +367,86 @@ end
 
 end
 
+# ── Source location in detail ─────────────────────────────────────────────────
+#
+# Every classified_error() / classify() / classify_iceberg() call is annotated
+# with #[track_caller] and appends "[src/file.rs:line]" to the detail field.
+# All map_err(fn) call sites use closure form so that the closure-body location
+# (our source line) is captured rather than a location inside map_err itself.
+
+@testset "IcebergException.detail includes Rust source location" begin
+
+    loc_re = r"\[src/[\w./]+\.rs:\d+\]"
+
+    # classify_iceberg path: table_open on a non-existent local path goes through
+    # classify_iceberg() in table.rs and should produce a detail like
+    # "... [src/table.rs:291]".
+    @testset "classify_iceberg — table_open non-existent path" begin
+        exc = try
+            table_open("/no/such/path/$(rand(UInt32)).metadata.json")
+            nothing
+        catch e
+            e isa RustyIceberg.IcebergException ? e : rethrow()
+        end
+        @test !isnothing(exc)
+        @test occursin(loc_re, exc.detail)
+    end
+
+    # classify path: load_table for a table that does not exist hits
+    # classify() in catalog.rs.
+    @testset "classify — load_table non-existent table (memory catalog)" begin
+        mktempdir() do warehouse
+            cat = catalog_create_memory(warehouse)
+            try
+                create_namespace(cat, ["ns"])
+                exc = try
+                    load_table(cat, ["ns"], "nonexistent")
+                    nothing
+                catch e
+                    e isa RustyIceberg.IcebergException ? e : rethrow()
+                end
+                @test !isnothing(exc)
+                @test occursin(loc_re, exc.detail)
+            finally
+                free_catalog!(cat)
+            end
+        end
+    end
+
+    # classified_error path: the scan builder has not been built (scan.scan is None).
+    # Calling arrow_stream triggers the "Scan not initialized" guard inside
+    # export_runtime_op!, which fires classified_error() — no iceberg::Error involved.
+    @testset "classified_error — scan not built before arrow_stream" begin
+        mktempdir() do warehouse
+            cat = catalog_create_memory(warehouse)
+            tbl = C_NULL
+            scan = nothing
+            try
+                create_namespace(cat, ["ns"])
+                tbl = create_table(cat, ["ns"], "loc_scan", _err_schema())
+                scan = new_scan(tbl)
+                with_batch_size!(scan, UInt(1024))
+                # Do NOT call build!(scan) — leaves scan.scan as None on the Rust side.
+                exc = try
+                    RustyIceberg.arrow_stream(scan)  # "Scan not initialized" guard
+                    nothing
+                catch e
+                    e isa RustyIceberg.IcebergException ? e : rethrow()
+                end
+                @test !isnothing(exc)
+                @test exc.code == RustyIceberg.STATE_RESOURCE_FREED
+                @test occursin(loc_re, exc.detail)
+            finally
+                if !isnothing(scan)
+                    free_scan!(scan)
+                end
+                if tbl != C_NULL
+                    free_table(tbl)
+                end
+                free_catalog!(cat)
+            end
+        end
+    end
+
+end
+
