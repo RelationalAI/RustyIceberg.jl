@@ -148,7 +148,7 @@ impl RawResponse for IcebergFileScanResponse {
     }
 }
 
-/// Synchronous operations for table and batch management
+// Synchronous operations for table and batch management
 
 /// Free a table
 #[no_mangle]

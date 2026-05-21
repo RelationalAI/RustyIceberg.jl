@@ -1,14 +1,14 @@
-/// Stable error codes for the Iceberg FFI.
-///
-/// Errors are serialised into the `error_message` C-string using a three-part
-/// tab-separated format so no new FFI fields are needed:
-///
-///   "{code}\t{user_msg}\t{detail}"
-///
-/// Julia splits on the first two tabs, tries to parse the leading integer as
-/// an `IcebergError` enum variant, and constructs `IcebergException` from the
-/// three pieces. Any error message that does not match this pattern is treated
-/// as `INTERNAL`.
+// Stable error codes for the Iceberg FFI.
+//
+// Errors are serialised into the `error_message` C-string using a three-part
+// tab-separated format so no new FFI fields are needed:
+//
+//   "{code}\t{user_msg}\t{detail}"
+//
+// Julia splits on the first two tabs, tries to parse the leading integer as
+// an `IcebergError` enum variant, and constructs `IcebergException` from the
+// three pieces. Any error message that does not match this pattern is treated
+// as `INTERNAL`.
 
 // ── Not Found (1xx) ──────────────────────────────────────────────────────────
 pub const NOT_FOUND_METADATA: u32 = 101;
