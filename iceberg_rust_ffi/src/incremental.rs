@@ -218,7 +218,7 @@ export_runtime_op!(
         let (scan_ref, serialization_concurrency) = result_tuple;
 
         // Get unzipped streams (separate append and delete streams)
-        let (inserts_stream, deletes_stream) = scan_ref.to_unzipped_arrow().await.map_err(classify_iceberg)?;
+        let (inserts_stream, deletes_stream) = scan_ref.to_unzipped_arrow().await.map_err(|e| classify_iceberg(e))?;
 
         // Transform both streams with parallel serialization
         let inserts = IcebergArrowStream {
@@ -345,7 +345,7 @@ export_runtime_op!(
         let (scan_ref, prefetch_depth, serialization_concurrency, batch_size, file_io) =
             result_tuple;
 
-        let (append_tasks, delete_tasks) = scan_ref.plan_files().await.map_err(classify_iceberg)?;
+        let (append_tasks, delete_tasks) = scan_ref.plan_files().await.map_err(|e| classify_iceberg(e))?;
 
         let (append_stream, delete_stream) =
             crate::incremental_pipeline::create_incremental_nested_pipeline(

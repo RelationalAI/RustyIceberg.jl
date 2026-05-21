@@ -72,39 +72,64 @@ impl std::fmt::Display for ClassifiedError {
 impl std::error::Error for ClassifiedError {}
 
 /// Build a pre-classified `anyhow::Error` directly.
+///
+/// `#[track_caller]` embeds the call site (file:line) into `detail` at
+/// zero runtime cost so that `IcebergException.detail` in Julia always
+/// identifies which FFI guard fired.
+#[track_caller]
 pub fn classified_error(
     code: u32,
     user_msg: impl Into<String>,
     detail: impl Into<String>,
 ) -> anyhow::Error {
+    let loc = std::panic::Location::caller();
     anyhow::Error::new(ClassifiedError {
         code,
         user_msg: user_msg.into(),
-        detail: detail.into(),
+        detail: format!("{} [{}:{}]", detail.into(), loc.file(), loc.line()),
     })
 }
 
-/// Classify an `iceberg::Error` (convenience wrapper for callers where the
-/// error type is not already `anyhow::Error`).
+/// Classify an `iceberg::Error` directly.
+///
+/// Intentionally does NOT delegate to `classify()` so that `#[track_caller]`
+/// records the call site of *this* function rather than a line inside
+/// `classify()`. All callers must use a closure (`map_err(|e| classify_iceberg(e))`)
+/// rather than a bare function pointer so that the closure body's location is
+/// captured, not a location inside `map_err`.
+#[track_caller]
 pub fn classify_iceberg(e: iceberg::Error) -> anyhow::Error {
-    classify(e.into())
+    let loc = std::panic::Location::caller();
+    let detail = format!("{:#}", e);
+    let (code, user_msg) = classify_by_kind(e.kind(), &detail);
+    anyhow::Error::new(ClassifiedError {
+        code,
+        user_msg,
+        detail: format!("{detail} [{}:{}]", loc.file(), loc.line()),
+    })
 }
 
 /// Classify an `anyhow::Error`, returning a new `anyhow::Error` whose
 /// `Display` output is in the `"{code}\t{user_msg}\t{detail}"` format.
 ///
-/// Errors that are already `ClassifiedError` are passed through unchanged.
+/// Errors that are already `ClassifiedError` are passed through unchanged
+/// (their original call-site location is preserved).  New errors get
+/// `[file:line]` appended to `detail`. Callers must use a closure
+/// (`map_err(|e| classify(e))`) so that the closure body's location is
+/// captured by `#[track_caller]`.
+#[track_caller]
 pub fn classify(e: anyhow::Error) -> anyhow::Error {
     if e.is::<ClassifiedError>() {
         return e;
     }
+    let loc = std::panic::Location::caller();
     if let Some(ie) = e.downcast_ref::<iceberg::Error>() {
         let detail = format!("{:#}", ie);
         let (code, user_msg) = classify_by_kind(ie.kind(), &detail);
         return anyhow::Error::new(ClassifiedError {
             code,
             user_msg,
-            detail,
+            detail: format!("{detail} [{}:{}]", loc.file(), loc.line()),
         });
     }
     let detail = format!("{:#}", e);
@@ -112,7 +137,7 @@ pub fn classify(e: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(ClassifiedError {
         code,
         user_msg,
-        detail,
+        detail: format!("{detail} [{}:{}]", loc.file(), loc.line()),
     })
 }
 

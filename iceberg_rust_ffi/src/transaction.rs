@@ -305,7 +305,7 @@ export_runtime_op!(
         let catalog = catalog_ref.get_catalog()
             .ok_or_else(|| classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Catalog not initialized"))?;
 
-        let updated_table = tx.commit(catalog).await.map_err(classify_iceberg)?;
+        let updated_table = tx.commit(catalog).await.map_err(|e| classify_iceberg(e))?;
 
         Ok::<IcebergTable, anyhow::Error>(IcebergTable { table: updated_table })
     },

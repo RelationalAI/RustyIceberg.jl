@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
-use crate::error_codes::{classified_error, classify, classify_iceberg, STATE_RESOURCE_FREED};
+use crate::error_codes::{classified_error, classify_iceberg, STATE_RESOURCE_FREED};
 use crate::scan_common::*;
 use crate::{
     IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanStream,
@@ -184,7 +184,7 @@ export_runtime_op!(
         // task stream directly — no `try_collect` into a `Vec`, since the
         // nested pipeline already drives `plan_files()` through
         // `Stream::buffered(prefetch_depth)`.
-        let tasks = scan_ref.plan_files().await.map_err(classify_iceberg)?;
+        let tasks = scan_ref.plan_files().await.map_err(|e| classify_iceberg(e))?;
         let stream = crate::full_pipeline::create_pipeline(
             tasks, file_io, batch_size, prefetch_depth,
         )
@@ -224,7 +224,7 @@ export_runtime_op!(
         let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
 
         // Pass the planner's task stream directly into the pipeline.
-        let tasks = scan_ref.plan_files().await.map_err(classify_iceberg)?;
+        let tasks = scan_ref.plan_files().await.map_err(|e| classify_iceberg(e))?;
         let stream = crate::full_pipeline::create_full_scan_pipeline(
             tasks, file_io, batch_size, prefetch_depth,
         )

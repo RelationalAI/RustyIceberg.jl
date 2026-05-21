@@ -288,7 +288,7 @@ export_runtime_op!(
         let static_table =
             StaticTable::from_metadata_file(&full_metadata_path, table_ident, file_io)
                 .await
-                .map_err(classify_iceberg)?;
+                .map_err(|e| classify_iceberg(e))?;
 
         Ok::<IcebergTable, anyhow::Error>(IcebergTable { table: static_table.into_table() })
     },
