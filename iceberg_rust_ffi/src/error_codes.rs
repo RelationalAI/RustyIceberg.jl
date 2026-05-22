@@ -186,6 +186,13 @@ fn classify_message(detail: &str) -> (u32, String) {
     {
         return (AUTH_FAILED, "Authentication failed: access denied".into());
     }
+    if lower.contains("loading credential")
+        || lower.contains("loadcredential")
+        || (lower.contains("credential") && lower.contains("sign"))
+        || lower.contains("ec2 metadata")
+    {
+        return (AUTH_FAILED, "Authentication failed: could not load credentials".into());
+    }
     if lower.contains("token") && (lower.contains("expired") || lower.contains("refresh")) {
         return (AUTH_TOKEN_EXPIRED, "Token refresh failed".into());
     }
