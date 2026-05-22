@@ -30,6 +30,7 @@ function read_table_data(table)
         if batch.schema != C_NULL && batch.array != C_NULL
             imported = Arrow.from_c_data(batch.schema, batch.array)
             push!(all_dfs, DataFrame(imported))
+            Arrow.release_c_data(imported)
         end
         RustyIceberg.free_batch(batch_ptr)
         batch_ptr = RustyIceberg.next_batch(stream)

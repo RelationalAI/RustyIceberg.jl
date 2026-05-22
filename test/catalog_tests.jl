@@ -919,7 +919,9 @@ end
             inserts_count += 1
             batch = unsafe_load(batch_ptr)
             if batch.schema != C_NULL && batch.array != C_NULL
-                df = DataFrame(Arrow.from_c_data(batch.schema, batch.array))
+                imported = Arrow.from_c_data(batch.schema, batch.array)
+                df = DataFrame(imported)
+                Arrow.release_c_data(imported)
                 @test "n" in names(df)
                 total_inserts += nrow(df)
 
@@ -941,7 +943,9 @@ end
             deletes_count += 1
             batch = unsafe_load(batch_ptr)
             if batch.schema != C_NULL && batch.array != C_NULL
-                df = DataFrame(Arrow.from_c_data(batch.schema, batch.array))
+                imported = Arrow.from_c_data(batch.schema, batch.array)
+                df = DataFrame(imported)
+                Arrow.release_c_data(imported)
                 @test "file_path" in names(df) || "pos" in names(df)
                 total_deletes += nrow(df)
 

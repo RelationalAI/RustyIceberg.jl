@@ -167,7 +167,7 @@ pub(crate) fn transform_stream_with_parallel_serialization(
     stream
         .map(|batch_result| async move {
             match batch_result {
-                Ok(record_batch) => record_batch_to_c_ffi(record_batch).map_err(|e| unexpected(e)),
+                Ok(record_batch) => record_batch_to_c_ffi(record_batch).map_err(unexpected),
                 Err(e) => Err(unexpected(format!("Stream error: {e}"))),
             }
         })

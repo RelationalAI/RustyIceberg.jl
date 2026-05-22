@@ -56,6 +56,7 @@ using Arrow
                 println("   → Columns: $(names(df))")
             end
 
+            Arrow.release_c_data(arrow_table)
             RustyIceberg.free_batch(batch_ptr)
 
             # Stop after a few batches for testing to avoid long test times
@@ -105,6 +106,7 @@ using Arrow
                     @test arrow_table isa Arrow.CImportedArray
                     @test length(arrow_table) <= 8
                     push!(selected_arrow_tables, DataFrame(arrow_table))
+                    Arrow.release_c_data(arrow_table)
                     RustyIceberg.free_batch(batch_ptr)
                     batch_ptr = RustyIceberg.next_batch(stream2)
                 end
@@ -167,6 +169,7 @@ end
                 push!(rows, Tuple(row))
             end
 
+            Arrow.release_c_data(arrow_table)
             RustyIceberg.free_batch(batch_ptr)
             batch_ptr = C_NULL
         end
@@ -265,6 +268,7 @@ end
                 @test "n" in names(df)
                 append!(inserts_values, df.n)
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
             end
 
@@ -287,6 +291,7 @@ end
                     push!(deletes_values, (row.file_path, row.pos))
                 end
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
             end
 
@@ -356,6 +361,7 @@ end
                 @test names(df) == ["n"]
                 @test !isempty(df)
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream2)
             end
@@ -406,6 +412,7 @@ end
                     push!(deletes_values, (row.file_path, row.pos))
                 end
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
             end
 
@@ -434,6 +441,7 @@ end
                 @test "n" in names(df)
                 append!(inserts_values, df.n)
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
             end
 
@@ -493,6 +501,7 @@ end
                 @test names(df) == ["c_custkey", "c_name"]
                 @test !isempty(df)
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -521,6 +530,7 @@ end
                 @test names(df) == ["n"]
                 @test !isempty(df)
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
@@ -550,6 +560,7 @@ end
                 # Batch size should be respected (at most 10 rows)
                 @test length(arrow_table) <= 10
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -576,6 +587,7 @@ end
 
                 @test length(arrow_table) <= 10
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
@@ -726,6 +738,7 @@ end
                 @test length(arrow_table) <= 5
                 @test !isempty(df)
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -762,6 +775,7 @@ end
                 @test length(arrow_table) <= 5
                 @test !isempty(df)
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
@@ -806,6 +820,7 @@ end
                 @test all(startswith.(file_paths, "s3://warehouse/tpch.sf01/customer/data/data_customer-"))
                 @test eltype(file_paths) <: AbstractString
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -845,6 +860,7 @@ end
                 @test all(startswith.(file_paths, "s3://warehouse/incremental/"))
                 @test eltype(file_paths) <: AbstractString
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
@@ -887,6 +903,7 @@ end
                 @test all(startswith.(file_paths, "s3://warehouse/tpch.sf01/customer/data/data_customer-"))
                 @test eltype(file_paths) <: AbstractString
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -933,6 +950,7 @@ end
                 sorted_pos = sort(positions)
                 @test all(diff(sorted_pos) .== 1)  # Sequential with no gaps
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -977,6 +995,7 @@ end
                 append!(all_positions, positions)
                 append!(all_n_values, df.n)
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(inserts_stream)
             end
@@ -1066,6 +1085,7 @@ end
                 sorted_pos = sort(positions)
                 @test all(diff(sorted_pos) .== 1)  # Sequential with no gaps
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -1115,6 +1135,7 @@ end
                 sorted_pos = sort(positions)
                 @test all(diff(sorted_pos) .== 1)  # Sequential with no gaps
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -1162,6 +1183,7 @@ end
                 batch_count += 1
                 total_rows += nrow(df)
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -1198,6 +1220,7 @@ end
                 batch = unsafe_load(batch_ptr)
                 arrow_table = Arrow.from_c_data(batch.schema, batch.array)
                 total_rows += nrow(DataFrame(arrow_table))
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -1229,6 +1252,7 @@ end
                     batch = unsafe_load(batch_ptr)
                     arrow_table = Arrow.from_c_data(batch.schema, batch.array)
                     total_rows += nrow(DataFrame(arrow_table))
+                    Arrow.release_c_data(arrow_table)
                     RustyIceberg.free_batch(batch_ptr)
                     batch_ptr = RustyIceberg.next_batch(inner)
                 end
@@ -1279,6 +1303,7 @@ end
                 append!(custkey_values, df.c_custkey)
                 batch_count += 1
 
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream)
             end
@@ -1321,6 +1346,7 @@ end
                     batch = unsafe_load(batch_ptr)
                     arrow_table = Arrow.from_c_data(batch.schema, batch.array)
                     row_count += nrow(DataFrame(arrow_table))
+                    Arrow.release_c_data(arrow_table)
                     RustyIceberg.free_batch(batch_ptr)
                     batch_ptr = RustyIceberg.next_batch(inner)
                 end
@@ -1398,6 +1424,7 @@ end
                     batch = unsafe_load(batch_ptr)
                     arrow_table = Arrow.from_c_data(batch.schema, batch.array)
                     nested_rows += nrow(DataFrame(arrow_table))
+                    Arrow.release_c_data(arrow_table)
                     RustyIceberg.free_batch(batch_ptr)
                     batch_ptr = RustyIceberg.next_batch(inner)
                 end
@@ -1423,6 +1450,7 @@ end
                 batch = unsafe_load(batch_ptr)
                 arrow_table = Arrow.from_c_data(batch.schema, batch.array)
                 flat_rows += nrow(DataFrame(arrow_table))
+                Arrow.release_c_data(arrow_table)
                 RustyIceberg.free_batch(batch_ptr)
                 batch_ptr = RustyIceberg.next_batch(stream_f)
             end
@@ -1457,6 +1485,7 @@ end
                     for row in eachrow(df)
                         push!(rows, Tuple(row))
                     end
+                    Arrow.release_c_data(arrow_table)
                     RustyIceberg.free_batch(batch_ptr)
                     batch_ptr = RustyIceberg.next_batch(inner)
                 end
@@ -1494,6 +1523,7 @@ end
                     df = DataFrame(arrow_table)
                     @test names(df) == ["c_custkey", "c_name"]
                     @test nrow(df) <= 10
+                    Arrow.release_c_data(arrow_table)
                     RustyIceberg.free_batch(batch_ptr)
                     batch_ptr = RustyIceberg.next_batch(inner)
                 end
