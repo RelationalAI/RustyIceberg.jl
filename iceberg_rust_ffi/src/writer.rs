@@ -1,10 +1,13 @@
 /// Writer support for iceberg_rust_ffi
 ///
-/// Encoding is handled by a global pool of N=available_parallelism OS threads shared
-/// across all writers. Each writer owns its own FIFO queue of pending batches; workers
-/// scan the set of active writers and claim one (via the per-writer `busy` flag) before
-/// draining its queue. This avoids the head-of-line blocking that the old single-MPMC
-/// design suffered when many workers happened to pull tasks for the same writer.
+/// Encoding is handled by a global pool of N async worker tasks (default
+/// 2 * available_parallelism, configurable via `iceberg_set_encode_workers`) running
+/// on the tokio runtime, shared across all writers. Each writer owns its own FIFO queue
+/// of pending batches; workers scan the set of active writers and claim one (via the
+/// per-writer `busy` flag) before draining its queue. This avoids the head-of-line
+/// blocking that the old single-MPMC design suffered when many workers happened to pull
+/// tasks for the same writer. Workers `.await` the I/O inside `w.write()`, so a runtime
+/// thread parked on an S3 PUT is free to drive another writer's encode in the meantime.
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
 use std::io::Cursor;
@@ -176,7 +179,9 @@ impl WriterState {
     }
 }
 
-/// Global pool of N=available_parallelism encode worker threads shared across all writers.
+/// Global pool of N encode worker tasks shared across all writers (N defaults to
+/// 2 * available_parallelism so async workers parked on I/O don't starve cores of
+/// encode CPU work; tune via `iceberg_set_encode_workers`).
 ///
 /// Replaces the previous single-MPMC channel design. Each writer owns its own queue;
 /// workers scan the active-writer list looking for a writer that (a) has queued work and
@@ -417,11 +422,14 @@ async fn encode_worker_loop(pool: &'static GlobalWorkerPool) {
     }
 }
 
-/// Desired encode worker count. 0 means "use available_parallelism".
+/// Desired encode worker count. 0 means "use 2 * available_parallelism", which
+/// oversubscribes the core count on purpose: encode worker tasks are async, so workers
+/// parked on S3 PUTs don't cost CPU and we want enough total tasks for the runtime to
+/// keep cores busy with CPU encode while others wait on I/O.
 /// Must be set before the first iceberg_writer_new call.
 static ENCODE_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
-/// Set the number of encode worker threads in the global pool.
+/// Set the number of encode worker tasks in the global pool.
 /// Must be called before any writer is created. Returns 0 on success, 1 if the pool is
 /// already initialized (call ignored).
 #[no_mangle]
@@ -446,7 +454,9 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
         } else {
             // available_parallelism() only fails on unusual platforms (embedded, some sandboxes).
             // On Linux/macOS/Windows it always succeeds, so the unwrap never fires in practice.
-            thread::available_parallelism().unwrap().get()
+            // 2x: oversubscribe so async workers parked on I/O leave room for other workers
+            // to do encode CPU on the freed runtime threads.
+            thread::available_parallelism().unwrap().get() * 2
         };
         let handle = tokio::runtime::Handle::current();
 
@@ -480,8 +490,8 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
 /// Opaque writer handle for FFI.
 ///
 /// Writing is pipelined: Julia gathers a RecordBatch and submits it directly to the
-/// global encode pool, then returns immediately. Pool workers (N = available_parallelism)
-/// encode Parquet concurrently across all active writers.
+/// global encode pool, then returns immediately. Pool workers (async tasks; default
+/// N = 2 * available_parallelism) encode Parquet concurrently across all active writers.
 pub struct IcebergDataFileWriter {
     /// Arrow schema for this table, used by write_columns to create RecordBatches.
     pub(crate) arrow_schema: ArrowSchemaRef,
@@ -644,7 +654,8 @@ pub extern "C" fn iceberg_writer_free(writer: *mut IcebergDataFileWriter) {
 
 // Create a new DataFileWriter from a table with configuration options.
 //
-// The global encode pool (N = available_parallelism threads) is initialized on the first call.
+// The global encode pool (N async worker tasks, default 2 * available_parallelism) is
+// initialized on the first call.
 export_runtime_op!(
     iceberg_writer_new,
     IcebergDataFileWriterResponse,
