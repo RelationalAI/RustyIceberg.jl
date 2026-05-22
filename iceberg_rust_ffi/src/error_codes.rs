@@ -191,7 +191,10 @@ fn classify_message(detail: &str) -> (u32, String) {
         || (lower.contains("credential") && lower.contains("sign"))
         || lower.contains("ec2 metadata")
     {
-        return (AUTH_FAILED, "Authentication failed: could not load credentials".into());
+        return (
+            AUTH_FAILED,
+            "Authentication failed: could not load credentials".into(),
+        );
     }
     if lower.contains("token") && (lower.contains("expired") || lower.contains("refresh")) {
         return (AUTH_TOKEN_EXPIRED, "Token refresh failed".into());
