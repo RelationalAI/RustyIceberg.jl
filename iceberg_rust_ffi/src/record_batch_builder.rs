@@ -1,19 +1,19 @@
-/// Incremental column batch builder for zero-copy-from-Julia writes.
+/// Incremental Arrow `RecordBatch` builder for zero-copy-from-Julia writes.
 ///
-/// Julia calls `iceberg_batch_builder_append_slice` once per operator slice, passing
-/// one `SliceRef` per column. Each slice's data is appended directly into a pre-allocated
-/// `MutableBuffer` that becomes the Arrow column buffer at finalize time — no intermediate
-/// Vec or second copy is needed. Julia can reuse source memory as soon as the call returns.
+/// Lives as an internal field of `IcebergDataFileWriter`. Julia drives it through
+/// `iceberg_writer_append` (per upstream slice) and `iceberg_writer_flush` (explicit
+/// boundary). Auto-flush at `coalesce_rows` happens inside the writer's append entry
+/// point; the builder itself is mechanical.
 ///
-/// Null bits are populated lazily: all-valid slices are skipped entirely. The first null
-/// slice triggers a one-time backfill of all prior rows as valid, then subsequent slices
-/// are processed normally. If no null slice ever arrives, no NullBuffer is emitted.
+/// Each `append_slice` call copies one slice's data per column directly into per-column
+/// `MutableBuffer`s that already match Arrow's physical layout. At finalize time those
+/// buffers become Arrow `Buffer`s via a zero-copy `.into()` move, get wrapped in typed
+/// arrays, and assemble into a `RecordBatch` — no further copy. Fresh same-capacity
+/// buffers swap in for the next window, so steady-state reallocation is zero.
 ///
-/// When a coalesce window is full, Julia calls `iceberg_batch_builder_write` which
-/// finalises all per-column buffers into Arrow arrays, assembles a `RecordBatch`, and
-/// submits it to the async encode pool — then resets the builder in-place for reuse.
-/// Reset swaps in a fresh pre-allocated `MutableBuffer` (same capacity) so the next
-/// window never reallocates.
+/// Null bits are populated lazily: all-valid slices skip the bitmap entirely. The first
+/// null slice triggers a one-time backfill of all prior rows as valid, then subsequent
+/// slices proceed normally. If no null slice ever arrives, no `NullBuffer` is emitted.
 use std::sync::Arc;
 
 use arrow_array::{
@@ -22,9 +22,8 @@ use arrow_array::{
 use arrow_buffer::{BooleanBuffer, Buffer, MutableBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 
-use crate::writer::{submit_batch, IcebergDataFileWriter, GLOBAL_ENCODE_POOL};
 use crate::writer_columns::{
-    SliceRef, COLUMN_TYPE_BOOLEAN, COLUMN_TYPE_DATE, COLUMN_TYPE_DECIMAL_INT128,
+    ColumnSlice, COLUMN_TYPE_BOOLEAN, COLUMN_TYPE_DATE, COLUMN_TYPE_DECIMAL_INT128,
     COLUMN_TYPE_DECIMAL_INT32, COLUMN_TYPE_DECIMAL_INT64, COLUMN_TYPE_FLOAT32, COLUMN_TYPE_FLOAT64,
     COLUMN_TYPE_INT32, COLUMN_TYPE_INT64, COLUMN_TYPE_JULIA_DATE, COLUMN_TYPE_JULIA_TIMESTAMP,
     COLUMN_TYPE_JULIA_TIMESTAMPTZ, COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS,
@@ -38,8 +37,8 @@ const JULIA_DATE_OFFSET: i64 = 719_163;
 /// Milliseconds from Julia DateTime epoch (0001-01-01) to Unix epoch (1970-01-01).
 const JULIA_TIMESTAMP_OFFSET_MS: i64 = 719_163 * 86_400_000;
 
-// Default coalesce_rows — must match Julia's DEFAULT_COALESCE_ROWS.
-const DEFAULT_COALESCE_ROWS: usize = 1_048_576;
+/// Default coalesce-window size for the embedded builder.
+pub(crate) const DEFAULT_COALESCE_ROWS: usize = 1_048_576;
 
 /// Bytes per row for numeric column types (0 for Bool/Str which are not Numeric).
 fn column_bytes_per_row(column_type: i32) -> usize {
@@ -131,15 +130,15 @@ impl ColumnBuilderState {
 }
 
 // ---------------------------------------------------------------------------
-// Public builder type
+// Builder type
 
-pub struct ColumnBatchBuilder {
+pub(crate) struct RecordBatchBuilder {
     columns: Vec<ColumnBuilderState>,
     arrow_schema: ArrowSchemaRef,
     coalesce_rows: usize,
 }
 
-impl ColumnBatchBuilder {
+impl RecordBatchBuilder {
     pub(crate) fn new(
         arrow_schema: ArrowSchemaRef,
         col_types: &[i32],
@@ -164,7 +163,27 @@ impl ColumnBatchBuilder {
         })
     }
 
-    pub(crate) unsafe fn append_slice(&mut self, slices: &[SliceRef]) -> Result<(), anyhow::Error> {
+    /// Rows accumulated in the current window (across all columns; they stay in sync).
+    pub(crate) fn rows(&self) -> usize {
+        self.columns.first().map(|c| c.rows).unwrap_or(0)
+    }
+
+    /// True when the current window has reached or passed `coalesce_rows` — the writer
+    /// should finalize and reset before continuing.
+    pub(crate) fn should_flush(&self) -> bool {
+        self.rows() >= self.coalesce_rows
+    }
+
+    /// Append one slice per column. Rust copies all data synchronously; source memory
+    /// may be released the moment this call returns.
+    ///
+    /// # Safety
+    /// All pointers inside the `ColumnSlice`s must be valid for `len` elements for the
+    /// duration of this call.
+    pub(crate) unsafe fn append_slice(
+        &mut self,
+        slices: &[ColumnSlice],
+    ) -> Result<(), anyhow::Error> {
         if slices.len() != self.columns.len() {
             return Err(anyhow::anyhow!(
                 "slice count {} != column count {}",
@@ -178,19 +197,18 @@ impl ColumnBatchBuilder {
         Ok(())
     }
 
-    pub(crate) fn write_and_reset(
-        &mut self,
-        writer_ref: &IcebergDataFileWriter,
-        pool: &crate::writer::GlobalWorkerPool,
-    ) -> Result<(), anyhow::Error> {
+    /// Finalize the accumulated columns into a `RecordBatch` and reset all column
+    /// buffers in-place for the next window. The buffers are swapped with fresh
+    /// pre-allocated `MutableBuffer`s of the same capacity, so the next window never
+    /// reallocates.
+    pub(crate) fn take_record_batch(&mut self) -> Result<arrow_array::RecordBatch, anyhow::Error> {
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.columns.len());
         for (i, state) in self.columns.iter_mut().enumerate() {
             let field = self.arrow_schema.field(i);
             arrays.push(finalize_and_reset(state, field, self.coalesce_rows)?);
         }
-        let batch = arrow_array::RecordBatch::try_new(self.arrow_schema.clone(), arrays)
-            .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))?;
-        submit_batch(writer_ref, pool, batch)
+        arrow_array::RecordBatch::try_new(self.arrow_schema.clone(), arrays)
+            .map_err(|e| anyhow::anyhow!("RecordBatch: {}", e))
     }
 }
 
@@ -199,7 +217,7 @@ impl ColumnBatchBuilder {
 
 unsafe fn append_to_state(
     state: &mut ColumnBuilderState,
-    slice: &SliceRef,
+    slice: &ColumnSlice,
 ) -> Result<(), anyhow::Error> {
     let len = slice.len;
 
@@ -216,10 +234,8 @@ unsafe fn append_to_state(
                 state.null_bits.resize(needed, 0u8);
                 set_bits_range(&mut state.null_bits, 0, out_start);
                 state.has_nulls = true;
-            } else {
-                if state.null_bits.len() < needed {
-                    state.null_bits.resize(needed, 0u8);
-                }
+            } else if state.null_bits.len() < needed {
+                state.null_bits.resize(needed, 0u8);
             }
             // Copy validity bits. When source and destination are byte-aligned (out_start
             // is a multiple of 8 — always true for flush-per-slice), one copy_nonoverlapping
@@ -372,7 +388,7 @@ macro_rules! append_transform {
 /// Identity (sequential) slices use a bulk byte copy; scattered slices loop element-wise.
 unsafe fn append_numeric(
     buf: &mut MutableBuffer,
-    slice: &SliceRef,
+    slice: &ColumnSlice,
     column_type: i32,
     len: usize,
 ) -> Result<(), anyhow::Error> {
@@ -624,79 +640,5 @@ fn set_bits_range(bits: &mut [u8], start: usize, end: usize) {
 unsafe fn as_bytes<T>(s: &[T]) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * std::mem::size_of::<T>())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FFI entry points
-
-#[no_mangle]
-pub extern "C" fn iceberg_batch_builder_new(
-    writer: *mut IcebergDataFileWriter,
-    col_types: *const i32,
-    num_columns: usize,
-) -> *mut ColumnBatchBuilder {
-    if writer.is_null() || col_types.is_null() || num_columns == 0 {
-        return std::ptr::null_mut();
-    }
-    let writer_ref = unsafe { &*writer };
-    let col_types_slice = unsafe { std::slice::from_raw_parts(col_types, num_columns) };
-    match ColumnBatchBuilder::new(
-        writer_ref.arrow_schema.clone(),
-        col_types_slice,
-        DEFAULT_COALESCE_ROWS,
-    ) {
-        Ok(b) => Box::into_raw(Box::new(b)),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn iceberg_batch_builder_append_slice(
-    builder: *mut ColumnBatchBuilder,
-    slices: *const SliceRef,
-    num_columns: usize,
-) -> i32 {
-    if builder.is_null() || slices.is_null() || num_columns == 0 {
-        return -1;
-    }
-    let builder_ref = unsafe { &mut *builder };
-    let slices_slice = unsafe { std::slice::from_raw_parts(slices, num_columns) };
-    match unsafe { builder_ref.append_slice(slices_slice) } {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn iceberg_batch_builder_write(
-    writer: *mut IcebergDataFileWriter,
-    builder: *mut ColumnBatchBuilder,
-) -> i32 {
-    if writer.is_null() || builder.is_null() {
-        return -1;
-    }
-    let writer_ref = unsafe { &*writer };
-    let builder_ref = unsafe { &mut *builder };
-    let pool = match GLOBAL_ENCODE_POOL.get() {
-        Some(p) => p,
-        None => {
-            eprintln!("[iceberg] encode pool not initialized");
-            return -1;
-        }
-    };
-    match builder_ref.write_and_reset(writer_ref, pool) {
-        Ok(()) => 0,
-        Err(e) => {
-            crate::writer::store_writer_error_pub(writer_ref, e);
-            -1
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn iceberg_batch_builder_free(builder: *mut ColumnBatchBuilder) {
-    if !builder.is_null() {
-        unsafe { drop(Box::from_raw(builder)) }
     }
 }

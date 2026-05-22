@@ -8,6 +8,7 @@
 /// blocking that the old single-MPMC design suffered when many workers happened to pull
 /// tasks for the same writer. Workers `.await` the I/O inside `w.write()`, so a runtime
 /// thread parked on an S3 PUT is free to drive another writer's encode in the meantime.
+use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
 use std::io::Cursor;
@@ -17,7 +18,7 @@ use std::thread;
 
 use arrow_array::RecordBatch;
 use arrow_ipc::reader::StreamReader;
-use arrow_schema::SchemaRef as ArrowSchemaRef;
+use arrow_schema::{DataType, SchemaRef as ArrowSchemaRef, TimeUnit};
 use iceberg::arrow::schema_to_arrow_schema;
 use iceberg::spec::DataFileFormat;
 use iceberg::writer::base_writer::data_file_writer::{DataFileWriter, DataFileWriterBuilder};
@@ -95,12 +96,18 @@ impl ParquetWriterPropertiesFFI {
     }
 }
 
-use crate::batch_builder::ColumnBatchBuilder;
+use crate::record_batch_builder::{RecordBatchBuilder, DEFAULT_COALESCE_ROWS};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
 use crate::transaction::IcebergDataFiles;
 use crate::util::parse_c_string;
-use crate::writer_columns::{ColumnDescriptor, SliceRef};
+use crate::writer_columns::{
+    ColumnSlice, COLUMN_TYPE_BOOLEAN, COLUMN_TYPE_DECIMAL_INT128, COLUMN_TYPE_DECIMAL_INT32,
+    COLUMN_TYPE_DECIMAL_INT64, COLUMN_TYPE_FLOAT32, COLUMN_TYPE_FLOAT64, COLUMN_TYPE_INT32,
+    COLUMN_TYPE_INT64, COLUMN_TYPE_JULIA_DATE, COLUMN_TYPE_JULIA_TIMESTAMP,
+    COLUMN_TYPE_JULIA_TIMESTAMPTZ, COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS,
+    COLUMN_TYPE_JULIA_TIMESTAMP_NS, COLUMN_TYPE_STRING, COLUMN_TYPE_UUID,
+};
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
@@ -489,17 +496,29 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
 
 /// Opaque writer handle for FFI.
 ///
-/// Writing is pipelined: Julia gathers a RecordBatch and submits it directly to the
-/// global encode pool, then returns immediately. Pool workers (async tasks; default
-/// N = 2 * available_parallelism) encode Parquet concurrently across all active writers.
+/// Writing is pipelined: Julia hands one upstream slice at a time to `iceberg_writer_append`,
+/// which copies it into the embedded `RecordBatchBuilder`'s per-column buffers. When the
+/// builder hits the coalesce window, the writer finalizes a `RecordBatch` and submits it to
+/// the global encode pool. Pool workers (async tasks; default N = 2 * available_parallelism)
+/// encode Parquet concurrently across all active writers.
 pub struct IcebergDataFileWriter {
-    /// Arrow schema for this table, used by write_columns to create RecordBatches.
+    /// Arrow schema for this table; used to set up the embedded builder and to assemble
+    /// RecordBatches from IPC writes.
     pub(crate) arrow_schema: ArrowSchemaRef,
+    /// Per-column type codes derived from `arrow_schema` at construction time. Drives the
+    /// builder's copy/conversion logic.
+    pub(crate) col_types: Vec<i32>,
+    /// Lazily-constructed RecordBatch builder. `UnsafeCell` because the FFI dereferences
+    /// the writer as `&IcebergDataFileWriter` (one writer is only ever accessed from one
+    /// Julia thread, so interior mutability without locking is sound).
+    pub(crate) builder: UnsafeCell<Option<RecordBatchBuilder>>,
     /// Shared state: owns the ConcreteDataFileWriter, tracks pending count and errors.
     pub(crate) writer_state: Arc<WriterState>,
 }
 
 unsafe impl Send for IcebergDataFileWriter {}
+// Safety: callers must ensure each writer is accessed from one Julia thread at a time —
+// the FFI contract. `builder` is the only `!Sync` field; everything else is Sync via Arc.
 unsafe impl Sync for IcebergDataFileWriter {}
 
 /// Type alias for writer response
@@ -520,9 +539,79 @@ fn store_writer_error(writer_ref: &IcebergDataFileWriter, e: anyhow::Error) {
     }
 }
 
-/// Store an error in the writer state (public for batch_builder module).
-pub(crate) fn store_writer_error_pub(writer_ref: &IcebergDataFileWriter, e: anyhow::Error) {
-    store_writer_error(writer_ref, e);
+/// Map an Arrow `DataType` to the corresponding `COLUMN_TYPE_*` code the builder uses.
+///
+/// Date and Timestamp variants default to the Julia-epoch codes because that's the natural
+/// shape of incoming Julia data (`Dates.value(d)` of a Julia `Date` returns days since
+/// 0001-01-01). Users sending pre-converted Unix-epoch integers are an edge case the new
+/// schema-driven API doesn't address — they'd need to pre-convert and write integers
+/// against a plain integer column.
+fn arrow_type_to_column_type(dt: &DataType) -> Result<i32, anyhow::Error> {
+    Ok(match dt {
+        DataType::Int32 => COLUMN_TYPE_INT32,
+        DataType::Int64 => COLUMN_TYPE_INT64,
+        DataType::Float32 => COLUMN_TYPE_FLOAT32,
+        DataType::Float64 => COLUMN_TYPE_FLOAT64,
+        DataType::Utf8 => COLUMN_TYPE_STRING,
+        DataType::Boolean => COLUMN_TYPE_BOOLEAN,
+        DataType::Date32 => COLUMN_TYPE_JULIA_DATE,
+        DataType::Timestamp(TimeUnit::Microsecond, None) => COLUMN_TYPE_JULIA_TIMESTAMP,
+        DataType::Timestamp(TimeUnit::Microsecond, Some(_)) => COLUMN_TYPE_JULIA_TIMESTAMPTZ,
+        DataType::Timestamp(TimeUnit::Nanosecond, None) => COLUMN_TYPE_JULIA_TIMESTAMP_NS,
+        DataType::Timestamp(TimeUnit::Nanosecond, Some(_)) => COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS,
+        DataType::FixedSizeBinary(16) => COLUMN_TYPE_UUID,
+        DataType::Decimal128(p, _) => {
+            if *p <= 9 {
+                COLUMN_TYPE_DECIMAL_INT32
+            } else if *p <= 18 {
+                COLUMN_TYPE_DECIMAL_INT64
+            } else {
+                COLUMN_TYPE_DECIMAL_INT128
+            }
+        }
+        other => {
+            return Err(anyhow::anyhow!(
+                "Unsupported Arrow type for column writer: {:?}",
+                other
+            ))
+        }
+    })
+}
+
+/// Get the embedded builder, constructing it on first access.
+///
+/// # Safety
+/// Caller must ensure no other thread is accessing the writer at the same time. The FFI
+/// contract is one Julia thread per writer.
+unsafe fn get_or_init_builder(
+    writer_ref: &IcebergDataFileWriter,
+) -> Result<&mut RecordBatchBuilder, anyhow::Error> {
+    let slot = unsafe { &mut *writer_ref.builder.get() };
+    if slot.is_none() {
+        *slot = Some(RecordBatchBuilder::new(
+            writer_ref.arrow_schema.clone(),
+            &writer_ref.col_types,
+            DEFAULT_COALESCE_ROWS,
+        )?);
+    }
+    Ok(slot.as_mut().unwrap())
+}
+
+/// Finalize the current window of the builder (if non-empty) and submit the resulting
+/// `RecordBatch` to the encode pool. Resets the builder in-place for the next window.
+fn flush_builder(
+    writer_ref: &IcebergDataFileWriter,
+    pool: &GlobalWorkerPool,
+) -> Result<(), anyhow::Error> {
+    let slot = unsafe { &mut *writer_ref.builder.get() };
+    let Some(builder) = slot.as_mut() else {
+        return Ok(());
+    };
+    if builder.rows() == 0 {
+        return Ok(());
+    }
+    let batch = builder.take_record_batch()?;
+    submit_batch(writer_ref, pool, batch)
 }
 
 /// Submit a `RecordBatch` to the writer's queue. Lazily registers the writer with the
@@ -561,53 +650,22 @@ pub(crate) fn submit_batch(
     Ok(())
 }
 
-/// Validates column count, converts each `ColumnDescriptor` into a single-slice `SliceRef`,
-/// routes through `ColumnBatchBuilder`, and submits the resulting `RecordBatch` to the
-/// encode pool.  Using the builder here keeps all type-conversion and null-bit logic in one
-/// place (`batch_builder.rs`) instead of duplicating it.
-unsafe fn write_columns_inner(
-    writer_ref: &IcebergDataFileWriter,
-    pool: &GlobalWorkerPool,
-    arrow_schema: ArrowSchemaRef,
-    col_descs: &[ColumnDescriptor],
-) -> Result<(), anyhow::Error> {
-    if col_descs.len() != arrow_schema.fields().len() {
-        return Err(anyhow::anyhow!(
-            "Column count mismatch: got {} but schema has {}",
-            col_descs.len(),
-            arrow_schema.fields().len()
-        ));
-    }
-    let num_rows = col_descs.iter().map(|d| d.num_rows).max().unwrap_or(0);
-    let col_types: Vec<i32> = col_descs.iter().map(|d| d.column_type).collect();
-    let mut builder = ColumnBatchBuilder::new(arrow_schema.clone(), &col_types, num_rows.max(1))?;
-    let slices: Vec<SliceRef> = col_descs
-        .iter()
-        .map(|d| SliceRef {
-            data_ptr: d.data_ptr,
-            lengths_ptr: d.lengths_ptr,
-            validity_ptr: d.validity_ptr,
-            sel_ptr: std::ptr::null(),
-            len: d.num_rows,
-        })
-        .collect();
-    unsafe { builder.append_slice(&slices) }?;
-    builder.write_and_reset(writer_ref, pool)
-}
-
-/// Synchronous write of flat column data: copies each column from Julia memory into
-/// Rust-owned Arrow arrays in the calling thread, then submits to the global encode
-/// pool asynchronously.
+/// Append one `RowChunk` (one `ColumnSlice` per output column) to the embedded builder.
 ///
-/// Each `ColumnDescriptor` is treated as a single sequential slice (no scatter/gather).
-/// Returns 0 on success, -1 on error (error stored in writer state, propagated on close).
+/// Rust copies all slice data synchronously into per-column buffers; source memory may be
+/// released the moment this call returns. If the post-append row count reaches
+/// `coalesce_rows`, the builder is finalized into a `RecordBatch` and submitted to the
+/// encode pool (auto-flush). The window may end up slightly over `coalesce_rows` — we
+/// never split a slice mid-append, preserving the byte-aligned fast paths.
+///
+/// Returns 0 on success, -1 on error (error stored in writer state, surfaced on close).
 #[no_mangle]
-pub extern "C" fn iceberg_writer_write_columns(
+pub extern "C" fn iceberg_writer_append(
     writer: *mut IcebergDataFileWriter,
-    columns: *const ColumnDescriptor,
+    slices: *const ColumnSlice,
     num_columns: usize,
 ) -> i32 {
-    if writer.is_null() || columns.is_null() || num_columns == 0 {
+    if writer.is_null() || slices.is_null() || num_columns == 0 {
         return -1;
     }
     let writer_ref = unsafe { &*writer };
@@ -618,9 +676,47 @@ pub extern "C" fn iceberg_writer_write_columns(
             return -1;
         }
     };
-    let arrow_schema = writer_ref.arrow_schema.clone();
-    let col_descs = unsafe { std::slice::from_raw_parts(columns, num_columns) };
-    if let Err(e) = unsafe { write_columns_inner(writer_ref, pool, arrow_schema, col_descs) } {
+    let slices_slice = unsafe { std::slice::from_raw_parts(slices, num_columns) };
+
+    let result = (|| -> Result<(), anyhow::Error> {
+        let builder = unsafe { get_or_init_builder(writer_ref) }?;
+        unsafe { builder.append_slice(slices_slice) }?;
+        if builder.should_flush() {
+            // Take the batch and submit. Do this after the borrow ends.
+            let batch = builder.take_record_batch()?;
+            submit_batch(writer_ref, pool, batch)?;
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        store_writer_error(writer_ref, e);
+        return -1;
+    }
+    0
+}
+
+/// Force the builder to flush its current (partial) window to the encode pool.
+///
+/// Use this on logical boundaries (end of transaction, time tick) when you want a Parquet
+/// row group break that doesn't naturally fall at `coalesce_rows`. No-op if the builder
+/// is empty or hasn't been initialized.
+///
+/// Returns 0 on success, -1 on error (error stored in writer state, surfaced on close).
+#[no_mangle]
+pub extern "C" fn iceberg_writer_flush(writer: *mut IcebergDataFileWriter) -> i32 {
+    if writer.is_null() {
+        return -1;
+    }
+    let writer_ref = unsafe { &*writer };
+    let pool = match GLOBAL_ENCODE_POOL.get() {
+        Some(p) => p,
+        None => {
+            eprintln!("[iceberg] encode pool not initialized; call iceberg_writer_new first");
+            return -1;
+        }
+    };
+    if let Err(e) = flush_builder(writer_ref, pool) {
         store_writer_error(writer_ref, e);
         return -1;
     }
@@ -718,11 +814,19 @@ export_runtime_op!(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to build data file writer: {}", e))?;
 
-        // Convert Iceberg schema to Arrow schema for use in write_columns
+        // Convert Iceberg schema to Arrow schema for use by both the IPC and append paths.
         let arrow_schema = Arc::new(
             schema_to_arrow_schema(table.metadata().current_schema().as_ref())
                 .map_err(|e| anyhow::anyhow!("Failed to convert schema to Arrow: {}", e))?
         );
+
+        // Derive the per-column type codes from the Arrow schema; this is what the
+        // embedded builder uses to drive copy/conversion decisions.
+        let col_types: Vec<i32> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| arrow_type_to_column_type(f.data_type()))
+            .collect::<Result<_, _>>()?;
 
         // Initialize global pool (no-op if already running).
         get_or_init_encode_pool();
@@ -731,6 +835,8 @@ export_runtime_op!(
 
         Ok::<IcebergDataFileWriter, anyhow::Error>(IcebergDataFileWriter {
             arrow_schema,
+            col_types,
+            builder: UnsafeCell::new(None),
             writer_state,
         })
     },
@@ -763,6 +869,12 @@ pub extern "C" fn iceberg_writer_write(
             return -1;
         }
     };
+
+    // Flush any pending builder window first so IPC batches don't reorder around append!.
+    if let Err(e) = flush_builder(writer_ref, pool) {
+        store_writer_error(writer_ref, e);
+        return -1;
+    }
 
     let ipc_bytes = unsafe { std::slice::from_raw_parts(arrow_ipc_data, arrow_ipc_len).to_vec() };
 
@@ -808,6 +920,13 @@ export_runtime_op!(
     },
     writer_ref,
     async {
+        // Flush any partial-window remainder in the embedded builder before we wait.
+        if let Some(pool) = GLOBAL_ENCODE_POOL.get() {
+            if let Err(e) = flush_builder(writer_ref, pool) {
+                store_writer_error(writer_ref, e);
+            }
+        }
+
         // Wait for all pending pool encodes to complete.
         // Uses a timeout to guard against a dead worker thread (e.g. panic outside
         // catch_unwind) that would otherwise leave pending > 0 forever.

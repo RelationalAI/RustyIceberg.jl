@@ -678,8 +678,8 @@ end
     println("\n✅ Writer with vended credentials tests completed!")
 end
 
-@testset "Writer write_columns API" begin
-    println("Testing write_columns (raw column) API...")
+@testset "Writer append! / RowChunk API" begin
+    println("Testing append!(writer, RowChunk) API...")
 
     catalog_uri = get_catalog_uri()
     props = get_catalog_properties()
@@ -720,10 +720,9 @@ end
         @test table != C_NULL
         println("✅ Test table created: $table_name")
 
-        # Test: Write raw column data using write_columns
-        println("\nTest: Writing data via write_columns...")
+        # Test: Write raw column data via the streaming RowChunk path
+        println("\nTest: Writing data via append!(writer, RowChunk)...")
 
-        # Prepare raw column data
         col_ids = Int64[1, 2, 3, 4, 5]
         col_counts = Int32[10, 20, 30, 40, 50]
         col_values = Float64[1.1, 2.2, 3.3, 4.4, 5.5]
@@ -739,15 +738,14 @@ end
             @test writer.ptr != C_NULL
             println("✅ Writer created successfully")
 
-            # Build column batch using the helper
-            batch = RustyIceberg.ColumnBatch()
-            push!(batch, col_ids)
-            push!(batch, col_counts; validity=validity_counts)
-            push!(batch, col_values; validity=validity_values)
-            push!(batch, col_flags; validity=validity_flags)
+            chunk = RustyIceberg.RowChunk()
+            push!(chunk, col_ids)
+            push!(chunk, col_counts; validity=validity_counts)
+            push!(chunk, col_values; validity=validity_values)
+            push!(chunk, col_flags; validity=validity_flags)
 
-            RustyIceberg.write_columns(writer, batch)
-            println("✅ Data written via write_columns")
+            append!(writer, chunk)
+            println("✅ Data appended; close_writer will flush the remainder")
         end
         @test data_files !== nothing
         @test data_files.ptr != C_NULL
@@ -784,7 +782,7 @@ end
         @test sorted_counts == Int32[10, 20, 30, 40, 50]
         @test sorted_values == Float64[1.1, 2.2, 3.3, 4.4, 5.5]
         @test sorted_flags == Bool[true, false, true, false, true]
-        println("✅ Verified write_columns data content matches exactly")
+        println("✅ Verified append!/RowChunk data content matches exactly")
 
         # Clean up updated table
         RustyIceberg.free_table(updated_table)
@@ -812,11 +810,11 @@ end
         end
     end
 
-    println("\n✅ write_columns API tests completed!")
+    println("\n✅ append!/RowChunk API tests completed!")
 end
 
-@testset "Writer write_columns with nulls" begin
-    println("Testing write_columns with null values...")
+@testset "Writer RowChunk with nulls" begin
+    println("Testing RowChunk with null values...")
 
     catalog_uri = get_catalog_uri()
     props = get_catalog_properties()
@@ -861,12 +859,11 @@ end
         validity_values = BitVector([true, false, true, false, true])  # positions 2 and 4 are null
 
         data_files = RustyIceberg.with_data_file_writer(table) do writer
-            batch = RustyIceberg.ColumnBatch()
-            push!(batch, col_ids)
-            push!(batch, col_values; validity=validity_values)
-
-            RustyIceberg.write_columns(writer, batch)
-            println("✅ Data with nulls written via write_columns")
+            chunk = RustyIceberg.RowChunk()
+            push!(chunk, col_ids)
+            push!(chunk, col_values; validity=validity_values)
+            append!(writer, chunk)
+            println("✅ Data with nulls appended")
         end
         @test data_files !== nothing
         println("✅ Writer closed successfully")
@@ -923,11 +920,11 @@ end
         end
     end
 
-    println("\n✅ write_columns with nulls tests completed!")
+    println("\n✅ RowChunk with nulls tests completed!")
 end
 
-@testset "Writer write_columns decimal types" begin
-    println("Testing write_columns with decimal types (Int32/Int64/bytes backing)...")
+@testset "Writer RowChunk decimal types" begin
+    println("Testing RowChunk with decimal types (Int32/Int64/Int128 backing)...")
 
     catalog_uri = get_catalog_uri()
     props = get_catalog_properties()
@@ -977,13 +974,16 @@ end
         col_balances = Int128[12345678901234567890, -999999999999, 1]
 
         data_files = RustyIceberg.with_data_file_writer(table) do writer
-            batch = RustyIceberg.ColumnBatch()
-            push!(batch, col_ids)
-            push!(batch, col_prices;   column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT32)
-            push!(batch, col_volumes;  column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT64)
-            push!(batch, col_balances; column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT128)
-            RustyIceberg.write_columns(writer, batch)
-            println("✅ Decimal data written via write_columns")
+            # The writer infers DECIMAL_INT32 / INT64 / INT128 column types from the
+            # schema's Decimal128(precision, scale). Callers just push raw Int32 / Int64
+            # / Int128 scaled-integer columns matching that precision.
+            chunk = RustyIceberg.RowChunk()
+            push!(chunk, col_ids)
+            push!(chunk, col_prices)
+            push!(chunk, col_volumes)
+            push!(chunk, col_balances)
+            append!(writer, chunk)
+            println("✅ Decimal data appended")
         end
         @test data_files !== nothing && data_files.ptr != C_NULL
         println("✅ Writer closed, got DataFiles handle")
@@ -1049,11 +1049,11 @@ end
         end
     end
 
-    println("\n✅ write_columns decimal types tests completed!")
+    println("\n✅ RowChunk decimal types tests completed!")
 end
 
-@testset "Writer write_columns decimal nullable" begin
-    println("Testing write_columns with nullable decimal column...")
+@testset "Writer RowChunk decimal nullable" begin
+    println("Testing RowChunk with nullable decimal column...")
 
     catalog_uri = get_catalog_uri()
     props = get_catalog_properties()
@@ -1089,11 +1089,11 @@ end
         validity   = BitVector([true, false, true, false, true])
 
         data_files = RustyIceberg.with_data_file_writer(table) do writer
-            batch = RustyIceberg.ColumnBatch()
-            push!(batch, col_ids)
-            push!(batch, col_prices; validity=validity, column_type=RustyIceberg.COLUMN_TYPE_DECIMAL_INT64)
-            RustyIceberg.write_columns(writer, batch)
-            println("✅ Nullable decimal data written")
+            chunk = RustyIceberg.RowChunk()
+            push!(chunk, col_ids)
+            push!(chunk, col_prices; validity=validity)
+            append!(writer, chunk)
+            println("✅ Nullable decimal data appended")
         end
         @test data_files !== nothing
 
@@ -1146,11 +1146,11 @@ end
         end
     end
 
-    println("\n✅ write_columns decimal nullable tests completed!")
+    println("\n✅ RowChunk decimal nullable tests completed!")
 end
 
-@testset "Writer ColumnBatchBuilder — multi-slice coalescing" begin
-    println("Testing ColumnBatchBuilder with multiple slices per column...")
+@testset "Writer streaming — multi-chunk coalescing" begin
+    println("Testing streaming append! with multiple RowChunks per writer...")
 
     catalog_uri = get_catalog_uri()
     props = get_catalog_properties()
@@ -1180,51 +1180,40 @@ end
         @test table != C_NULL
         println("✅ Table created")
 
-        # Write 4 rows across 3 separate append_slice! calls.
-        # id:    [1, 2, 3, 4]  — non-nullable; 3 slices of lengths 1, 2, 1
-        # score: [1.1, null, 3.3, null]  — nullable; 3 slices with validity
-        # tag:   ["alpha", null, "gamma", null]  — nullable string; 3 slices
+        # Write 4 rows across 3 separate append! calls.
+        # id:    [1, 2, 3, 4]  — non-nullable; 3 chunks of lengths 1, 2, 1
+        # score: [1.1, null, 3.3, null]  — nullable; 3 chunks with validity
+        # tag:   ["alpha", null, "gamma", null]  — nullable string; 3 chunks
         #
-        # Slices are deliberately mis-aligned in terms of source array sizes to exercise
-        # the multi-slice accumulation path. Slice 2 for score uses a scattered sel_ptr.
-
-        col_types = RustyIceberg.ColumnType[
-            RustyIceberg.COLUMN_TYPE_INT64,
-            RustyIceberg.COLUMN_TYPE_FLOAT64,
-            RustyIceberg.COLUMN_TYPE_STRING,
-        ]
+        # Chunks are deliberately mis-aligned in terms of source array sizes to exercise
+        # the multi-chunk accumulation path. Chunk 2 for score uses a scattered sel.
 
         data_files = RustyIceberg.with_data_file_writer(table) do writer
-            builder = RustyIceberg.ColumnBatchBuilder(writer, col_types)
+            # --- Chunk 1: row 0 ---
+            c1 = RustyIceberg.RowChunk()
+            push!(c1, Int64[1])
+            push!(c1, Float64[1.1]; validity=BitVector([true]))
+            push!(c1, ["alpha"])
+            append!(writer, c1)
+            println("✅ Chunk 1 appended")
 
-            # --- Slice 1: row 0 ---
-            sb1 = RustyIceberg.SliceBatch()
-            push!(sb1, Int64[1])
-            push!(sb1, Float64[1.1]; validity=BitVector([true]))
-            push!(sb1, ["alpha"])
-            RustyIceberg.append_slice!(builder, sb1)
-            println("✅ Slice 1 appended")
-
-            # --- Slice 2: rows 1-2 (score uses a scattered selection) ---
+            # --- Chunk 2: rows 1-2 (score uses a scattered selection) ---
             # score_src: [99.9, 3.3, 88.8], sel=[2,1] → values [3.3, 99.9], valid=[true,false]
-            sb2 = RustyIceberg.SliceBatch()
-            push!(sb2, Int64[2, 3])
-            push!(sb2, Float64[99.9, 3.3, 88.8];
+            c2 = RustyIceberg.RowChunk()
+            push!(c2, Int64[2, 3])
+            push!(c2, Float64[99.9, 3.3, 88.8];
                 sel=Int64[2, 1], validity=BitVector([true, false]))
-            push!(sb2, ["", "gamma"]; validity=BitVector([false, true]))
-            RustyIceberg.append_slice!(builder, sb2)
-            println("✅ Slice 2 appended (scattered score, nullable strings)")
+            push!(c2, ["", "gamma"]; validity=BitVector([false, true]))
+            append!(writer, c2)
+            println("✅ Chunk 2 appended (scattered score, nullable strings)")
 
-            # --- Slice 3: row 3 ---
-            sb3 = RustyIceberg.SliceBatch()
-            push!(sb3, Int64[4])
-            push!(sb3, Float64[0.0]; validity=BitVector([false]))
-            push!(sb3, [""]; validity=BitVector([false]))
-            RustyIceberg.append_slice!(builder, sb3)
-            println("✅ Slice 3 appended")
-
-            RustyIceberg.write_columns(writer, builder)
-            println("✅ Builder flushed via write_columns")
+            # --- Chunk 3: row 3 ---
+            c3 = RustyIceberg.RowChunk()
+            push!(c3, Int64[4])
+            push!(c3, Float64[0.0]; validity=BitVector([false]))
+            push!(c3, [""]; validity=BitVector([false]))
+            append!(writer, c3)
+            println("✅ Chunk 3 appended; close_writer will flush remainder")
         end
         @test data_files !== nothing && data_files.ptr != C_NULL
         println("✅ Writer closed")
@@ -1283,11 +1272,11 @@ end
         end
     end
 
-    println("\n✅ ColumnBatchBuilder multi-slice tests completed!")
+    println("\n✅ Streaming multi-chunk tests completed!")
 end
 
-@testset "Writer ColumnBatchBuilder — reuse across windows" begin
-    println("Testing ColumnBatchBuilder reuse: two write_columns calls on one builder...")
+@testset "Writer streaming — explicit flush! between windows" begin
+    println("Testing explicit flush!(writer) between windows...")
 
     catalog_uri = get_catalog_uri()
     props = get_catalog_properties()
@@ -1315,29 +1304,22 @@ end
         @test table != C_NULL
         println("✅ Table created")
 
-        col_types = RustyIceberg.ColumnType[
-            RustyIceberg.COLUMN_TYPE_INT64,
-            RustyIceberg.COLUMN_TYPE_FLOAT64,
-        ]
-
         data_files = RustyIceberg.with_data_file_writer(table) do writer
-            builder = RustyIceberg.ColumnBatchBuilder(writer, col_types)
-
             # Window 1: rows [1, 2]
-            sb1 = RustyIceberg.SliceBatch()
-            push!(sb1, Int64[1, 2])
-            push!(sb1, Float64[10.0, 20.0])
-            RustyIceberg.append_slice!(builder, sb1)
-            RustyIceberg.write_columns(writer, builder)   # flushes window 1, resets builder
-            println("✅ Window 1 written")
+            c1 = RustyIceberg.RowChunk()
+            push!(c1, Int64[1, 2])
+            push!(c1, Float64[10.0, 20.0])
+            append!(writer, c1)
+            RustyIceberg.flush!(writer)   # force a flush boundary
+            println("✅ Window 1 flushed")
 
-            # Window 2: rows [3, 4, 5] — builder reused in-place
-            sb2 = RustyIceberg.SliceBatch()
-            push!(sb2, Int64[3, 4, 5])
-            push!(sb2, Float64[30.0, 40.0, 50.0])
-            RustyIceberg.append_slice!(builder, sb2)
-            RustyIceberg.write_columns(writer, builder)   # flushes window 2
-            println("✅ Window 2 written")
+            # Window 2: rows [3, 4, 5] — fresh window after flush!
+            c2 = RustyIceberg.RowChunk()
+            push!(c2, Int64[3, 4, 5])
+            push!(c2, Float64[30.0, 40.0, 50.0])
+            append!(writer, c2)
+            # close_writer will flush window 2's remainder
+            println("✅ Window 2 appended (close flushes remainder)")
         end
         @test data_files !== nothing && data_files.ptr != C_NULL
         println("✅ Writer closed")
@@ -1380,11 +1362,11 @@ end
         end
     end
 
-    println("\n✅ ColumnBatchBuilder reuse tests completed!")
+    println("\n✅ Streaming explicit-flush tests completed!")
 end
 
-@testset "Writer ColumnBatchBuilder — date and timestamp epoch conversion" begin
-    println("Testing ColumnBatchBuilder date/timestamp epoch conversion...")
+@testset "Writer streaming — date and timestamp epoch conversion" begin
+    println("Testing date/timestamp epoch conversion through the streaming path...")
 
     catalog_uri = get_catalog_uri()
     props = get_catalog_properties()
@@ -1420,22 +1402,16 @@ end
         julia_date_val = Dates.value(Dates.Date(2024, 1, 1))   # 738886
         julia_ts_val   = Dates.value(Dates.DateTime(2024, 1, 1, 0, 0, 0))  # ms since year 1
 
-        col_types = RustyIceberg.ColumnType[
-            RustyIceberg.COLUMN_TYPE_INT64,
-            RustyIceberg.COLUMN_TYPE_JULIA_DATE,
-            RustyIceberg.COLUMN_TYPE_JULIA_TIMESTAMP,
-        ]
-
+        # Writer infers JULIA_DATE / JULIA_TIMESTAMP from the schema (IcebergDate /
+        # IcebergTimestamp). User just pushes raw Int64 values (Dates.value of the Julia
+        # Date/DateTime) and Rust handles the epoch conversion at copy time.
         data_files = RustyIceberg.with_data_file_writer(table) do writer
-            builder = RustyIceberg.ColumnBatchBuilder(writer, col_types)
-
-            sb = RustyIceberg.SliceBatch()
-            push!(sb, Int64[1])
-            push!(sb, Int64[julia_date_val])
-            push!(sb, Int64[julia_ts_val])
-            RustyIceberg.append_slice!(builder, sb)
-            RustyIceberg.write_columns(writer, builder)
-            println("✅ Date/timestamp slice written")
+            chunk = RustyIceberg.RowChunk()
+            push!(chunk, Int64[1])
+            push!(chunk, Int64[julia_date_val])
+            push!(chunk, Int64[julia_ts_val])
+            append!(writer, chunk)
+            println("✅ Date/timestamp chunk appended")
         end
         @test data_files !== nothing && data_files.ptr != C_NULL
 
@@ -1478,7 +1454,7 @@ end
         end
     end
 
-    println("\n✅ ColumnBatchBuilder date/timestamp tests completed!")
+    println("\n✅ Streaming date/timestamp tests completed!")
 end
 
 @testset "Writer WriterConfig parquet properties" begin
