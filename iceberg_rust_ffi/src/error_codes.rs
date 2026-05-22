@@ -100,12 +100,12 @@ pub fn classified_error(
 #[track_caller]
 pub fn classify_iceberg(e: iceberg::Error) -> anyhow::Error {
     let loc = std::panic::Location::caller();
-    let detail = format!("{:#}", e);
-    let (code, user_msg) = classify_by_kind(e.kind(), &detail);
+    let classify_str = format!("{e}");
+    let (code, user_msg) = classify_by_kind(e.kind(), &classify_str);
     anyhow::Error::new(ClassifiedError {
         code,
         user_msg,
-        detail: format!("{detail} [{}:{}]", loc.file(), loc.line()),
+        detail: format!("{e:?} [{}:{}]", loc.file(), loc.line()),
     })
 }
 
