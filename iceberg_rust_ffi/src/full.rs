@@ -22,20 +22,34 @@ use object_store_ffi::{
 pub struct IcebergScan {
     pub builder: Option<TableScanBuilder<'static>>,
     pub scan: Option<TableScan>,
-    /// Serialization thread count (0 = auto-detect). Currently unused by the
-    /// pipeline (kept for future use / backward compat with incremental scan).
+    /// Dead field kept for FFI ABI compatibility and shape-symmetry with
+    /// `IncrementalScan` (whose twin *is* still used, but only for the
+    /// incremental delete-stream's parallel serialization — the per-file
+    /// append/full pipeline uses `tokio::task::spawn_blocking` directly,
+    /// with parallelism implicitly bounded by `file_prefetch_depth`).
+    /// The FFI setter `iceberg_scan_with_serialization_concurrency_limit`
+    /// writes this field, but nothing reads it.
     pub serialization_concurrency: usize,
     /// Cloned from the Table at construction time. Passed to the pipeline so
     /// each per-file ArrowReader can open its own parquet file.
     pub file_io: FileIO,
-    /// Captured when Julia calls with_batch_size. Forwarded to each per-file
-    /// ArrowReaderBuilder inside the pipeline.
+    /// Set by Julia via `iceberg_scan_with_batch_size`. Required: the FFI
+    /// stream ops error out if this is still `None` at stream-creation time.
+    /// Forwarded to each per-file `ArrowReaderBuilder` inside the pipeline.
     pub batch_size: Option<usize>,
-    /// How many parquet files to process concurrently in the pipeline.
-    /// Set by with_data_file_concurrency_limit (0 = auto-detect).
+    /// Dead field kept for FFI ABI compatibility and shape-symmetry with
+    /// `IncrementalScan` (whose `file_concurrency` is likewise dead — both
+    /// pipelines are now bounded by `file_prefetch_depth` alone via
+    /// `Stream::buffered`). The FFI setter
+    /// `iceberg_scan_with_data_file_concurrency_limit` is a no-op and
+    /// does not write here; nothing reads this. Removing it would force
+    /// `scan_common.rs` macros to switch to functional-record-update
+    /// just to skip one field on one of the two structs they handle.
     pub file_concurrency: usize,
-    /// How many FileScan items to queue in the outer channel of the nested pipeline.
-    /// 0 = use file_concurrency as the default.
+    /// How many FileScan items the full-scan pipeline keeps in flight (i.e.
+    /// `Stream::buffered(prefetch_depth)`). 0 = auto (= cpu_count()). This is
+    /// the only concurrency knob; see `nested_pipeline`'s module-level
+    /// "Concurrency invariant" doc for the cap on alive `process_file` tasks.
     pub file_prefetch_depth: usize,
 }
 
@@ -66,32 +80,20 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
 
 impl_select_columns!(iceberg_select_columns, IcebergScan);
 
-/// Set file concurrency. Hand-written (not macro-generated) because we need
-/// to both (a) forward the value to the iceberg-rs scan builder and (b)
-/// capture it in `file_concurrency` for our pipeline.
+/// FFI-stable no-op kept for API compatibility with Julia callers. The
+/// full-scan pipeline used to take this as a separate concurrency cap, but
+/// it overlapped with `file_prefetch_depth` and is now replaced by
+/// `Stream::buffered(prefetch_depth)`. The iceberg-rs scan builder's own
+/// `with_data_file_concurrency_limit` only affects `to_arrow()` (which we
+/// don't call — we use `plan_files()` directly), so forwarding is unnecessary.
 #[no_mangle]
 pub extern "C" fn iceberg_scan_with_data_file_concurrency_limit(
     scan: &mut *mut IcebergScan,
-    n: usize,
+    _n: usize,
 ) -> CResult {
     if scan.is_null() || (*scan).is_null() {
         return CResult::Error;
     }
-    let scan_ref = unsafe { Box::from_raw(*scan) };
-    if scan_ref.builder.is_none() {
-        return CResult::Error;
-    }
-    *scan = Box::into_raw(Box::new(IcebergScan {
-        builder: scan_ref
-            .builder
-            .map(|b| b.with_data_file_concurrency_limit(n)),
-        scan: scan_ref.scan,
-        serialization_concurrency: scan_ref.serialization_concurrency,
-        file_io: scan_ref.file_io,
-        batch_size: scan_ref.batch_size,
-        file_concurrency: n,
-        file_prefetch_depth: scan_ref.file_prefetch_depth,
-    }));
     CResult::Ok
 }
 
@@ -136,32 +138,26 @@ impl_scan_builder_method!(
 // Instead of calling iceberg-rs's `scan.to_arrow()` (which uses
 // `try_for_each_concurrent` internally and interleaves batches across
 // files in arbitrary order), we:
-//   1. Call `scan.plan_files()` to get an ordered list of FileScanTasks.
-//   2. Feed them into our own file-parallel pipeline
-//      (ordered_file_pipeline.rs) which processes N files concurrently
-//      but yields batches in strict file-then-row order.
+//   1. Call `scan.plan_files()` to get an ordered stream of FileScanTasks.
+//   2. Feed that stream straight into our own file-parallel pipeline
+//      (nested_pipeline.rs), which processes N files concurrently but
+//      yields batches in strict file-then-row order.
 
 /// Resolve the pipeline tuning parameters from a configured scan.
-/// Returns `(concurrency, prefetch_depth, file_io, batch_size)`.
-/// A stored value of 0 means "auto": concurrency defaults to available
-/// parallelism; prefetch_depth defaults to concurrency.
-fn resolve_pipeline_params(scan: &IcebergScan) -> (usize, usize, FileIO, Option<usize>) {
-    let concurrency = if scan.file_concurrency == 0 {
-        crate::cpu_count()
-    } else {
-        scan.file_concurrency
-    };
+/// Returns `(prefetch_depth, file_io, batch_size)`. A stored
+/// `file_prefetch_depth` of 0 means "auto" → defaults to `cpu_count()`.
+/// `batch_size` must have been set via `iceberg_scan_with_batch_size`;
+/// otherwise the FFI op returns an error.
+fn resolve_pipeline_params(scan: &IcebergScan) -> anyhow::Result<(usize, FileIO, usize)> {
     let prefetch_depth = if scan.file_prefetch_depth == 0 {
-        concurrency
+        crate::cpu_count()
     } else {
         scan.file_prefetch_depth
     };
-    (
-        concurrency,
-        prefetch_depth,
-        scan.file_io.clone(),
-        scan.batch_size,
-    )
+    let batch_size = scan.batch_size.ok_or_else(|| {
+        anyhow::anyhow!("batch_size not set; call iceberg_scan_with_batch_size before scan")
+    })?;
+    Ok((prefetch_depth, scan.file_io.clone(), batch_size))
 }
 
 export_runtime_op!(
@@ -176,24 +172,22 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Scan not initialized"));
         }
-        let (concurrency, prefetch_depth, file_io, batch_size) =
-            resolve_pipeline_params(scan_ptr);
-        Ok((scan_ref.as_ref().unwrap(), concurrency, prefetch_depth, file_io, batch_size))
+        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr)?;
+        Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))
     },
     result_tuple,
     async {
-        let (scan_ref, concurrency, prefetch_depth, file_io, batch_size) = result_tuple;
+        let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
 
-        // Collect the ordered file task list from iceberg-rs.
-        use futures::TryStreamExt;
-        let tasks: Vec<iceberg::scan::FileScanTask> =
-            scan_ref.plan_files().await?.try_collect().await?;
-
-        // Hand off to the file-parallel pipeline.
-        let stream = crate::ordered_file_pipeline::create_pipeline(
-            tasks, file_io, batch_size, concurrency, prefetch_depth,
+        // Hand off to the file-parallel pipeline. We pass the planner's
+        // task stream directly — no `try_collect` into a `Vec`, since the
+        // nested pipeline already drives `plan_files()` through
+        // `Stream::buffered(prefetch_depth)`.
+        let tasks = scan_ref.plan_files().await?;
+        let stream = crate::full_pipeline::create_pipeline(
+            tasks, file_io, batch_size, prefetch_depth,
         )
-        .await?;
+        .await;
 
         Ok::<IcebergArrowStream, anyhow::Error>(stream)
     },
@@ -206,8 +200,8 @@ impl_scan_free!(iceberg_scan_free, IcebergScan);
 //
 // Returns an IcebergFileScanStream whose items are per-file (filename,
 // record_count, inner-batch-stream) tuples, yielded in strict file order.
-// The flat iceberg_arrow_stream is implemented as a flattening wrapper over
-// this same nested pipeline.
+// The flat iceberg_arrow_stream above is implemented as a flattening wrapper
+// over this same nested pipeline.
 
 export_runtime_op!(
     iceberg_file_scan_stream,
@@ -221,22 +215,19 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(anyhow::anyhow!("Scan not initialized"));
         }
-        let (concurrency, prefetch_depth, file_io, batch_size) =
-            resolve_pipeline_params(scan_ptr);
-        Ok((scan_ref.as_ref().unwrap(), concurrency, prefetch_depth, file_io, batch_size))
+        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr)?;
+        Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))
     },
     result_tuple,
     async {
-        let (scan_ref, concurrency, prefetch_depth, file_io, batch_size) = result_tuple;
+        let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
 
-        use futures::TryStreamExt;
-        let tasks: Vec<iceberg::scan::FileScanTask> =
-            scan_ref.plan_files().await?.try_collect().await?;
-
-        let stream = crate::ordered_file_pipeline::create_nested_pipeline(
-            tasks, file_io, batch_size, concurrency, prefetch_depth,
+        // Pass the planner's task stream directly into the pipeline.
+        let tasks = scan_ref.plan_files().await?;
+        let stream = crate::full_pipeline::create_full_scan_pipeline(
+            tasks, file_io, batch_size, prefetch_depth,
         )
-        .await?;
+        .await;
 
         Ok::<IcebergFileScanStream, anyhow::Error>(stream)
     },

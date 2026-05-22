@@ -113,7 +113,7 @@ unsafe fn build_null_buffer_gathered(slices: &[SliceRef], total_rows: usize) -> 
     if !slices.iter().any(|s| !s.validity_ptr.is_null()) {
         return None;
     }
-    let mut bits = vec![0u8; (total_rows + 7) / 8];
+    let mut bits = vec![0u8; total_rows.div_ceil(8)];
     let mut out = 0usize;
     for slice in slices {
         if slice.validity_ptr.is_null() {
@@ -217,7 +217,7 @@ pub(crate) unsafe fn build_arrow_array_gathered(
             )
         }
         COLUMN_TYPE_BOOLEAN => {
-            let mut bits = vec![0u8; (total + 7) / 8];
+            let mut bits = vec![0u8; total.div_ceil(8)];
             let mut out = 0usize;
             for slice in slices {
                 let src = slice.data_ptr as *const u8;

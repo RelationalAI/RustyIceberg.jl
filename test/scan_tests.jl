@@ -21,6 +21,8 @@ using Arrow
     @test scan.ptr != C_NULL
     println("✅ Scan created successfully")
 
+    RustyIceberg.with_batch_size!(scan, UInt(1024))
+
     # Build and get stream
     stream = RustyIceberg.scan!(scan)
     @test stream != C_NULL
@@ -475,6 +477,7 @@ end
     @testset "select_columns! - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Select specific columns
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
@@ -588,6 +591,7 @@ end
     @testset "with_data_file_concurrency_limit! - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Set concurrency limit (should not error)
         @test_nowarn RustyIceberg.with_data_file_concurrency_limit!(scan, UInt(4))
@@ -632,6 +636,7 @@ end
     @testset "with_manifest_entry_concurrency_limit! - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Set concurrency limit (should not error)
         @test_nowarn RustyIceberg.with_manifest_entry_concurrency_limit!(scan, UInt(4))
@@ -654,6 +659,7 @@ end
     @testset "with_manifest_file_concurrency_limit! - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Set concurrency limit (should not error)
         @test_nowarn RustyIceberg.with_manifest_file_concurrency_limit!(scan, UInt(4))
@@ -771,6 +777,7 @@ end
     @testset "select_columns! with with_file_column! - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Select specific columns AND include file metadata
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
@@ -853,6 +860,7 @@ end
     @testset "select_columns! with FILE_COLUMN constant" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Select columns including FILE_COLUMN constant
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", RustyIceberg.FILE_COLUMN])
@@ -893,6 +901,7 @@ end
     @testset "select_columns! with with_pos_column! - Full Scan" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Select specific columns AND include pos metadata
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
@@ -1027,6 +1036,7 @@ end
     @testset "select_columns! with POS_COLUMN constant" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Select columns including POS_COLUMN constant
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", RustyIceberg.POS_COLUMN])
@@ -1070,6 +1080,7 @@ end
     @testset "with_file_column! and with_pos_column! combined" begin
         table = RustyIceberg.table_open(customer_path)
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Select columns and include both file and pos metadata
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
@@ -1122,6 +1133,7 @@ end
         customer_snapshot_id = Int64(3441867730092225551)
 
         scan = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         # Set snapshot ID explicitly using builder method
         RustyIceberg.with_snapshot_id!(scan, customer_snapshot_id)
@@ -1174,6 +1186,7 @@ end
     @testset "with_file_prefetch_depth!" begin
         table = RustyIceberg.table_open(customer_path)
         scan  = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         @test_nowarn RustyIceberg.with_file_prefetch_depth!(scan, UInt(4))
         stream = RustyIceberg.scan!(scan)
@@ -1201,6 +1214,7 @@ end
     @testset "with_file_prefetch_depth! - Incremental Scan" begin
         table = RustyIceberg.table_open(incremental_path)
         scan  = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
 
         @test_nowarn RustyIceberg.with_file_prefetch_depth!(scan, UInt(4))
         append_stream, delete_stream = RustyIceberg.scan_incremental_nested!(scan)
@@ -1292,6 +1306,7 @@ end
         # scan_nested! = build! + nested_arrow_stream; exercise the two-step path.
         table = RustyIceberg.table_open(nations_path)
         scan  = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
         RustyIceberg.build!(scan)
         outer = RustyIceberg.nested_arrow_stream(scan)
         @test outer != C_NULL
@@ -1325,6 +1340,7 @@ end
     @testset "Basic iteration — filenames and record counts" begin
         table = RustyIceberg.table_open(nations_path)
         scan  = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
         outer = RustyIceberg.scan_nested!(scan)
         @test outer != C_NULL
 
@@ -1369,6 +1385,7 @@ end
         # Collect total rows via nested pipeline.
         table_n = RustyIceberg.table_open(customer_path)
         scan_n  = RustyIceberg.new_scan(table_n)
+        RustyIceberg.with_batch_size!(scan_n, UInt(1024))
         outer   = RustyIceberg.scan_nested!(scan_n)
 
         nested_rows = 0
@@ -1396,6 +1413,7 @@ end
         # Collect total rows via flat pipeline.
         table_f  = RustyIceberg.table_open(customer_path)
         scan_f   = RustyIceberg.new_scan(table_f)
+        RustyIceberg.with_batch_size!(scan_f, UInt(1024))
         stream_f = RustyIceberg.scan!(scan_f)
 
         flat_rows = 0
@@ -1422,6 +1440,7 @@ end
     @testset "Correct data — nations table" begin
         table = RustyIceberg.table_open(nations_path)
         scan  = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
         outer = RustyIceberg.scan_nested!(scan)
 
         rows = Tuple[]
@@ -1521,6 +1540,7 @@ end
         # Run a full scan so the pipeline stats are populated.
         table  = RustyIceberg.table_open(nations_path)
         scan   = RustyIceberg.new_scan(table)
+        RustyIceberg.with_batch_size!(scan, UInt(1024))
         stream = RustyIceberg.scan!(scan)
         try
             batch_ptr = RustyIceberg.next_batch(stream)

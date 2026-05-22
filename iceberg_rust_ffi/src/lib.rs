@@ -43,8 +43,12 @@ mod writer_columns;
 // Profiling stats for the file-parallel pipeline
 mod pipeline_stats;
 
-// Ordered file-parallel pipeline
-mod ordered_file_pipeline;
+// Ordered file-parallel pipeline (shared helpers)
+mod nested_pipeline;
+
+// Full-scan pipeline entry points (composes `nested_pipeline` helpers
+// with an `ArrowReaderBuilder`-based per-file batch stream).
+mod full_pipeline;
 
 // Per-file nested pipeline for incremental scans
 mod incremental_pipeline;
@@ -116,18 +120,10 @@ impl RawResponse for IcebergResponse {
 }
 
 // Simple config for iceberg - only what we need
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 #[repr(C)]
 pub struct IcebergStaticConfig {
     n_threads: usize,
-}
-
-impl Default for IcebergStaticConfig {
-    fn default() -> Self {
-        IcebergStaticConfig {
-            n_threads: 0, // 0 means use tokio's default
-        }
-    }
 }
 
 // FFI structure for passing key-value properties
@@ -187,7 +183,7 @@ pub extern "C" fn iceberg_init_runtime(
     result_callback: ResultCallback,
 ) -> CResult {
     // Set the result callback
-    if let Err(_) = RESULT_CB.set(result_callback) {
+    if RESULT_CB.set(result_callback).is_err() {
         return CResult::Error; // Already initialized
     }
 
