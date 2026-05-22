@@ -5,11 +5,9 @@
 /// scan the set of active writers and claim one (via the per-writer `busy` flag) before
 /// draining its queue. This avoids the head-of-line blocking that the old single-MPMC
 /// design suffered when many workers happened to pull tasks for the same writer.
-use std::any::Any;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
 use std::io::Cursor;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -151,6 +149,11 @@ pub(crate) struct WriterState {
     done_notify: tokio::sync::Notify,
     /// First encode error encountered by a pool worker, if any.
     error: Mutex<Option<anyhow::Error>>,
+    /// Set by iceberg_writer_free to tell in-flight async encodes to drop the writer
+    /// instead of putting it back. Needed because async encode takes the writer out of
+    /// the Option for the duration of `w.write(batch).await`, releasing the Mutex so the
+    /// runtime thread can drive other tasks while parked on I/O.
+    poisoned: AtomicBool,
 }
 
 // Safety: ConcreteDataFileWriter is Send (verified by its use in spawn_blocking previously).
@@ -168,6 +171,7 @@ impl WriterState {
             pending: AtomicUsize::new(0),
             done_notify: tokio::sync::Notify::new(),
             error: Mutex::new(None),
+            poisoned: AtomicBool::new(false),
         }
     }
 }
@@ -232,18 +236,6 @@ impl GlobalWorkerPool {
     }
 }
 
-/// Formats a Rust panic payload into an anyhow error, preserving the message where possible.
-fn format_panic_error(panic: Box<dyn Any + Send>) -> anyhow::Error {
-    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-        format!("encode worker panicked: {}", s)
-    } else if let Some(s) = panic.downcast_ref::<String>() {
-        format!("encode worker panicked: {}", s)
-    } else {
-        "encode worker panicked (no string payload)".to_string()
-    };
-    anyhow::anyhow!(msg)
-}
-
 /// Try to claim a writer with pending work. Returns the claimed writer (busy=true) or
 /// None if no writer has work available right now.
 ///
@@ -278,70 +270,86 @@ fn try_claim_writer(pool: &GlobalWorkerPool) -> Option<Arc<WriterState>> {
     None
 }
 
-/// Encode a single batch for the given (already-claimed) writer. Stores any encode error
-/// in `state.error` (first-writer-wins) and always decrements `pending` exactly once.
-fn encode_one_batch(
-    state: &Arc<WriterState>,
-    batch: RecordBatch,
-    handle: &tokio::runtime::Handle,
-) {
+/// Drop guard that decrements `pending` exactly once. Used by the async encode path to
+/// guarantee the counter still falls to zero (so `iceberg_writer_close` can return) even
+/// if `w.write(...).await` panics and unwinds the task.
+struct PendingGuard(Arc<WriterState>);
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        let prev = self.0.pending.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            self.0.done_notify.notify_one();
+        }
+    }
+}
+
+/// Encode a single batch for the given (already-claimed) writer.
+///
+/// **Async**: takes the underlying writer out of `state.writer` under the std Mutex
+/// (briefly), awaits `w.write(batch)` without holding any sync lock, then puts the writer
+/// back — unless `iceberg_writer_free` has set `poisoned`, in which case the writer is
+/// dropped. The take-put pattern is what lets the runtime thread go drive other tasks
+/// while this one is parked in an S3 PUT inside `w.write()`.
+///
+/// Stores any encode error in `state.error` (first-writer-wins). `pending` is decremented
+/// exactly once via the `PendingGuard` Drop impl, so close() never hangs even on panic.
+async fn encode_one_batch(state: Arc<WriterState>, batch: RecordBatch) {
+    let _pending = PendingGuard(state.clone());
+
     // Test hook: bypass the real Parquet write so we can exercise the dispatch logic in
     // isolation. Enabled only when a test installs a positive delay via `test_hooks`.
     #[cfg(test)]
     {
         let delay_ms = test_hooks::DELAY_MS.load(Ordering::Relaxed);
         if delay_ms > 0 {
-            test_hooks::run_hook(state, &batch);
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
-            if prev == 1 {
-                state.done_notify.notify_one();
-            }
+            test_hooks::run_hook(&state, &batch);
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             return;
         }
     }
 
-    let state_for_panic = state.clone();
-    let handle_enc = handle.clone();
-    let state_for_encode = state.clone();
-    let encode_result = catch_unwind(AssertUnwindSafe(move || {
-        let mut guard = state_for_encode
-            .writer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        match guard.as_mut() {
-            Some(w) => handle_enc
-                .block_on(w.write(batch))
-                .map_err(|e| anyhow::anyhow!("write batch: {}", e)),
-            None => Err(anyhow::anyhow!("writer already closed")),
-        }
-    }));
-
-    let err = match encode_result {
-        Ok(Ok(())) => None,
-        Ok(Err(e)) => Some(e),
-        Err(panic) => Some(format_panic_error(panic)),
+    // Take the writer out under the std Mutex. If the writer was already poisoned by
+    // a prior free(), we want to drop any writer that's still in the slot — but the
+    // Some/None of the slot itself tells us that.
+    let writer_opt = {
+        let mut guard = state.writer.lock().unwrap_or_else(|e| e.into_inner());
+        guard.take()
     };
-    if let Some(e) = err {
-        let mut slot = state_for_panic
-            .error
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if slot.is_none() {
-            *slot = Some(e);
+
+    let (mut writer_opt, result) = match writer_opt {
+        Some(mut w) => {
+            let r = w
+                .write(batch)
+                .await
+                .map_err(|e| anyhow::anyhow!("write batch: {}", e));
+            (Some(w), r)
+        }
+        None => (None, Err(anyhow::anyhow!("writer already closed"))),
+    };
+
+    // Put the writer back unless free() ran during our .await — in which case
+    // `poisoned` is set and we drop the writer to honor the poison semantic.
+    if let Some(w) = writer_opt.take() {
+        if state.poisoned.load(Ordering::Acquire) {
+            drop(w);
+        } else {
+            *state.writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(w);
         }
     }
 
-    let prev = state.pending.fetch_sub(1, Ordering::AcqRel);
-    if prev == 1 {
-        state.done_notify.notify_one();
+    if let Err(e) = result {
+        let mut slot = state.error.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(e);
+        }
     }
 }
 
 /// Drain the claimed writer's queue while we hold `busy`. Pops one batch at a time and
 /// encodes it. The `busy` flag ensures FIFO per-writer ordering: while we hold it, no
 /// other worker can interleave a pop on this writer's queue.
-fn drain_claimed_writer(state: &Arc<WriterState>, handle: &tokio::runtime::Handle) {
+async fn drain_claimed_writer(state: Arc<WriterState>) {
     loop {
         let batch = {
             let mut q = state
@@ -356,7 +364,7 @@ fn drain_claimed_writer(state: &Arc<WriterState>, handle: &tokio::runtime::Handl
                 None => break,
             }
         };
-        encode_one_batch(state, batch, handle);
+        encode_one_batch(state.clone(), batch).await;
     }
 }
 
@@ -376,7 +384,7 @@ fn drain_claimed_writer(state: &Arc<WriterState>, handle: &tokio::runtime::Handl
 ///   `notify_one()` may have been consumed by some other worker that ran an empty scan
 ///   and went back to sleep. Mitigation: after clearing `busy`, this worker re-reads
 ///   `queue_len`; if non-zero, it notifies again so someone re-claims the writer.
-fn encode_worker_loop(pool: &'static GlobalWorkerPool, handle: tokio::runtime::Handle) {
+async fn encode_worker_loop(pool: &'static GlobalWorkerPool) {
     loop {
         // Pre-register interest in the next wake-up. `enable()` guarantees that any
         // `notify_one()` issued from this point on will wake the future even if it
@@ -390,7 +398,7 @@ fn encode_worker_loop(pool: &'static GlobalWorkerPool, handle: tokio::runtime::H
             // parallel before we commit to draining this one.
             pool.wake.notify_one();
 
-            drain_claimed_writer(&state, &handle);
+            drain_claimed_writer(state.clone()).await;
 
             // Release the claim. After this point another worker is free to claim
             // the writer.
@@ -405,7 +413,7 @@ fn encode_worker_loop(pool: &'static GlobalWorkerPool, handle: tokio::runtime::H
         }
 
         // Nothing to claim — go to sleep until notified.
-        handle.block_on(notified);
+        notified.await;
     }
 }
 
@@ -455,12 +463,13 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
             .get()
             .expect("pool was just installed");
 
-        for i in 0..n {
-            let handle = handle.clone();
-            thread::Builder::new()
-                .name(format!("iceberg-encode-{}", i))
-                .spawn(move || encode_worker_loop(pool_ref, handle))
-                .expect("failed to spawn iceberg encode worker");
+        // Spawn N async worker tasks on the tokio runtime. Each task runs
+        // `encode_worker_loop`, which awaits at I/O boundaries inside `w.write()` —
+        // freeing the runtime thread to drive other tasks (other writers' encodes)
+        // during S3 PUTs. Number of in-flight encodes is no longer bounded by OS
+        // thread count, only by core count for actual CPU work.
+        for _ in 0..n {
+            handle.spawn(encode_worker_loop(pool_ref));
         }
     });
     GLOBAL_ENCODE_POOL
@@ -619,6 +628,13 @@ pub extern "C" fn iceberg_writer_free(writer: *mut IcebergDataFileWriter) {
             if let Some(pool) = GLOBAL_ENCODE_POOL.get() {
                 pool.unregister(&boxed.writer_state);
             }
+            // Set the poison flag BEFORE taking the writer out, so any encode task that
+            // currently holds the writer outside the Mutex (across its `.await`) will see
+            // `poisoned == true` when it goes to put the writer back, and drop it instead.
+            boxed
+                .writer_state
+                .poisoned
+                .store(true, Ordering::Release);
             // Poison the ConcreteDataFileWriter so any in-flight pool tasks return an error
             // rather than writing to a partially-freed writer.
             let _ = boxed.writer_state.writer.lock().unwrap().take();
@@ -920,6 +936,7 @@ mod tests {
             pending: std::sync::atomic::AtomicUsize::new(0),
             done_notify: tokio::sync::Notify::new(),
             error: Mutex::new(None),
+            poisoned: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
