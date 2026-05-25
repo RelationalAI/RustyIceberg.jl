@@ -2,6 +2,7 @@ using RustyIceberg
 using Test
 using DataFrames
 using Arrow
+using Tables
 
 @testset "Low-level API" begin
     # Test with the actual customer table that we know works
@@ -212,6 +213,35 @@ end
         RustyIceberg.free_table(table)
     end
     println("✅ Nations table read and verified successfully")
+end
+
+@testset "foreach_arrow_batch" begin
+    nations_snapshot_path = "s3://warehouse/tpch.sf01/nation/metadata/00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
+
+    table = RustyIceberg.table_open(nations_snapshot_path)
+    scan = RustyIceberg.new_scan(table)
+    RustyIceberg.with_batch_size!(scan, UInt(5))
+    stream = RustyIceberg.scan!(scan)
+
+    rows = Tuple[]
+    RustyIceberg.foreach_arrow_batch(stream) do batch
+        @test batch isa Arrow.Table
+        expected_columns = [:n_nationkey, :n_name, :n_regionkey, :n_comment]
+        @test Tables.columnnames(batch) == expected_columns
+        for row in Tables.rows(batch)
+            push!(rows, Tuple(row))
+        end
+    end
+
+    RustyIceberg.free_stream(stream)
+    RustyIceberg.free_scan!(scan)
+    RustyIceberg.free_table(table)
+
+    sort!(rows, by = x -> x[1])
+    @test length(rows) == 25
+    @test rows[1] == (0, "ALGERIA", 0, "furiously regular requests. platelets affix furious")
+    @test rows[25] == (24, "UNITED STATES", 1, "ly ironic requests along the slyly bold ideas hang after the blithely special notornis; blithely even accounts")
+    println("✅ foreach_arrow_batch test passed")
 end
 
 @testset "Incremental Scan API" begin
