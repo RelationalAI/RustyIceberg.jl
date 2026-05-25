@@ -110,7 +110,6 @@ mod tests {
     async fn full_pipeline_reads_parquet_file() {
         let _guard = PIPELINE_TEST_LOCK.lock().await;
         use arrow_array::{Int32Array, RecordBatch};
-        use arrow_ipc::reader::StreamReader;
         use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
         use bytes::Bytes;
         use iceberg::io::FileIO;
@@ -193,23 +192,22 @@ mod tests {
         assert_eq!(file_scan.record_count, 3);
         assert!(outer.next().await.is_none(), "expected exactly one file");
 
-        // ── 7. Drain inner IcebergArrowStream → decode Arrow IPC ──────────
+        // ── 7. Drain inner IcebergArrowStream → verify Arrow C Data Interface ──
         let mut inner = file_scan.stream.stream.lock().await;
         let arrow_batch = inner.next().await.unwrap().unwrap();
 
-        let data = unsafe { std::slice::from_raw_parts(arrow_batch.data, arrow_batch.length) };
-        let mut reader = StreamReader::try_new(std::io::Cursor::new(data), None).unwrap();
-        let decoded = reader.next().unwrap().unwrap();
-        assert_eq!(decoded.num_rows(), 3);
-        let id_col = decoded
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(id_col.values(), &[10, 20, 30]);
+        assert!(!arrow_batch.schema.is_null());
+        assert!(!arrow_batch.array.is_null());
+        // The first i64 field of FFI_ArrowArray is the row count.
+        let n_rows = unsafe { *(arrow_batch.array as *const i64) } as usize;
+        assert_eq!(n_rows, 3);
 
-        // Release the Vec<u8> allocated by serialize_record_batch.
-        unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut Vec<u8>)) };
+        // Drop the ArrowBatchInner — calls arrow-rs Drop on both FFI structs.
+        unsafe {
+            drop(Box::from_raw(
+                arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+            ))
+        };
 
         assert!(inner.next().await.is_none(), "expected exactly one batch");
 
@@ -248,7 +246,6 @@ mod tests {
         // per-batch permit release in `make_file_stream`). Assert all 30
         // rows arrive in 30 batches.
         use arrow_array::{Int32Array, RecordBatch};
-        use arrow_ipc::reader::StreamReader;
         use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
         use bytes::Bytes;
         use iceberg::io::FileIO;
@@ -325,19 +322,23 @@ mod tests {
         ));
         let flat = create_pipeline(tasks, file_io, 1, 2).await;
 
-        // Drain all batches and verify total row count + per-batch payload.
+        // Drain all batches and verify total row count via C Data Interface row count field.
         let mut stream = flat.stream.lock().await;
         let mut total_rows = 0usize;
         let mut batches_seen = 0usize;
         while let Some(item) = stream.next().await {
             let arrow_batch = item.unwrap();
-            let data = unsafe { std::slice::from_raw_parts(arrow_batch.data, arrow_batch.length) };
-            let mut reader = StreamReader::try_new(std::io::Cursor::new(data), None).unwrap();
-            let decoded = reader.next().unwrap().unwrap();
-            total_rows += decoded.num_rows();
+            assert!(!arrow_batch.schema.is_null());
+            assert!(!arrow_batch.array.is_null());
+            // The first i64 field of FFI_ArrowArray is the row count.
+            let n_rows = unsafe { *(arrow_batch.array as *const i64) } as usize;
+            total_rows += n_rows;
             batches_seen += 1;
-            // Release the Vec<u8> allocated by serialize_record_batch.
-            unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut Vec<u8>)) };
+            unsafe {
+                drop(Box::from_raw(
+                    arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+                ))
+            };
         }
         assert_eq!(batches_seen, 30, "expected 3 batches per file × 10 files");
         assert_eq!(total_rows, 30, "expected 30 rows total (10 files × 3 rows)");

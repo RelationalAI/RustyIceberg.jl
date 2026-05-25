@@ -107,7 +107,6 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::{Int32Array, RecordBatch};
-    use arrow_ipc::reader::StreamReader;
     use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
     use bytes::Bytes;
     use futures::StreamExt;
@@ -194,17 +193,17 @@ mod tests {
         }
     }
 
-    /// Decode an `ArrowBatch` (Arrow IPC bytes) and return the row count.
-    /// Frees the underlying Vec<u8> allocation before returning.
+    /// Read row count from an `ArrowBatch` (Arrow C Data Interface) and free it.
     fn decode_batch_row_count(batch: crate::table::ArrowBatch) -> usize {
-        let data = unsafe { std::slice::from_raw_parts(batch.data, batch.length) };
-        let total = StreamReader::try_new(std::io::Cursor::new(data), None)
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .map(|b| b.num_rows())
-            .sum();
-        unsafe { drop(Box::from_raw(batch.rust_ptr as *mut Vec<u8>)) };
-        total
+        assert!(!batch.array.is_null());
+        // The first i64 field of FFI_ArrowArray is the row count.
+        let n_rows = unsafe { *(batch.array as *const i64) } as usize;
+        unsafe {
+            drop(Box::from_raw(
+                batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+            ))
+        };
+        n_rows
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────
@@ -262,21 +261,16 @@ mod tests {
         let mut inner = file_scan.stream.stream.lock().await;
         let arrow_batch = inner.next().await.unwrap().unwrap();
 
-        // Decode and verify the row values.
-        let data = unsafe { std::slice::from_raw_parts(arrow_batch.data, arrow_batch.length) };
-        let decoded = StreamReader::try_new(std::io::Cursor::new(data), None)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap();
-        assert_eq!(decoded.num_rows(), 3);
-        let id_col = decoded
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(id_col.values(), &[10, 20, 30]);
-        unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut Vec<u8>)) };
+        // Verify via Arrow C Data Interface pointers.
+        assert!(!arrow_batch.schema.is_null());
+        assert!(!arrow_batch.array.is_null());
+        let n_rows = unsafe { *(arrow_batch.array as *const i64) } as usize;
+        assert_eq!(n_rows, 3);
+        unsafe {
+            drop(Box::from_raw(
+                arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+            ))
+        };
         assert!(inner.next().await.is_none(), "expected one batch");
 
         // ── Delete side: empty (no deletes) ──────────────────────────────

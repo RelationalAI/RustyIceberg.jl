@@ -101,11 +101,10 @@ macro_rules! impl_scan_builder_method {
 
 /// Macro to generate with_batch_size function for any scan type.
 ///
-/// Writes `n` into the FFI struct's `batch_size` field, which the pipeline
-/// reads when starting a stream. The `TableScanBuilder::with_batch_size`
-/// setter on `b` is intentionally *not* called here: we never invoke
-/// `scan.to_arrow()` (we use `plan_files()` + our own `ArrowReaderBuilder`),
-/// so that field would be ignored.
+/// Writes `n` into the FFI struct's `batch_size` field (read by the nested
+/// pipeline's `ArrowReaderBuilder`) AND calls `b.with_batch_size(Some(n))` on
+/// the scan builder so that the legacy `to_unzipped_arrow()` path (incremental
+/// flat scans) also respects the requested batch size.
 macro_rules! impl_with_batch_size {
     ($fn_name:ident, $scan_type:ident) => {
         #[no_mangle]
@@ -122,7 +121,7 @@ macro_rules! impl_with_batch_size {
             assert!(scan_ref.scan.is_none());
 
             *scan = Box::into_raw(Box::new($scan_type {
-                builder: scan_ref.builder,
+                builder: scan_ref.builder.map(|b| b.with_batch_size(Some(n))),
                 scan: None,
                 serialization_concurrency: scan_ref.serialization_concurrency,
                 file_io: scan_ref.file_io,

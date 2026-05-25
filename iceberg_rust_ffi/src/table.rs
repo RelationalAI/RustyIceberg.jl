@@ -2,6 +2,7 @@ use crate::nested_pipeline::FileScan;
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
+use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
@@ -32,17 +33,40 @@ pub struct IcebergArrowStream {
 
 unsafe impl Send for IcebergArrowStream {}
 
-/// Arrow batch serialized for FFI
-#[repr(C)]
-pub struct ArrowBatch {
-    pub data: *const u8,
-    pub length: usize,
-    pub rust_ptr: *mut std::ffi::c_void,
+/// Heap allocation backing one ArrowBatch.
+///
+/// `FFI_ArrowSchema` and `FFI_ArrowArray` must live at stable heap addresses
+/// because `ArrowBatch` is passed *by value* across the FFI boundary — Julia
+/// receives a copy of the struct. Storing the FFI structs inline in `ArrowBatch`
+/// would mean each copy carries its own values, but the raw pointers in
+/// `ArrowBatch::schema` / `::array` must keep pointing at the *original*
+/// allocation. Boxing them here pins them in place; the box address never
+/// changes regardless of how `ArrowBatch` is moved or copied.
+///
+/// Dropping this calls `Drop` on both FFI structs, which invokes the arrow-rs
+/// release callbacks and frees the buffer Arcs.
+pub(crate) struct ArrowBatchInner {
+    pub(crate) schema: FFI_ArrowSchema,
+    pub(crate) array: FFI_ArrowArray,
 }
 
-// SAFETY: ArrowBatch contains raw pointers that are owned by the FFI layer.
-// The pointers are allocated in Rust and deallocated via iceberg_arrow_batch_free,
-// making it safe to send between threads.
+// SAFETY: raw pointers inside FFI structs are owned exclusively by this batch.
+unsafe impl Send for ArrowBatchInner {}
+
+/// Arrow batch exported via Arrow C Data Interface.
+///
+/// `schema` and `array` point into the `ArrowBatchInner` owned by `rust_ptr`.
+/// `iceberg_arrow_batch_free` drops the inner allocation, which calls the
+/// arrow-rs release callbacks and frees all buffer data.
+#[repr(C)]
+pub struct ArrowBatch {
+    pub schema: *mut FFI_ArrowSchema,
+    pub array: *mut FFI_ArrowArray,
+    pub rust_ptr: *mut std::ffi::c_void, // Box<ArrowBatchInner>
+}
+
+// SAFETY: ArrowBatch contains raw pointers owned by the FFI layer; freed via
+// iceberg_arrow_batch_free.
 unsafe impl Send for ArrowBatch {}
 
 /// Type aliases for response types
@@ -158,17 +182,19 @@ pub extern "C" fn iceberg_table_free(table: *mut IcebergTable) {
     }
 }
 
-/// Free an arrow batch
+/// Free an arrow batch.
+///
+/// Drops the `ArrowBatchInner` (via `rust_ptr`), which calls the arrow-rs
+/// release callbacks on the FFI structs and frees all buffer data.
 #[no_mangle]
 pub extern "C" fn iceberg_arrow_batch_free(batch: *mut ArrowBatch) {
     if batch.is_null() {
         return;
     }
-
     unsafe {
-        let batch_ref = Box::from_raw(batch);
-        if !batch_ref.rust_ptr.is_null() {
-            let _ = Box::from_raw(batch_ref.rust_ptr as *mut Vec<u8>);
+        let b = Box::from_raw(batch);
+        if !b.rust_ptr.is_null() {
+            drop(Box::from_raw(b.rust_ptr as *mut ArrowBatchInner));
         }
     }
 }

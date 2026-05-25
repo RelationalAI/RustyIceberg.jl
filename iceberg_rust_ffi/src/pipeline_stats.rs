@@ -49,8 +49,8 @@ pub(crate) struct PipelineStats {
     /// Time inside batch_stream.next() — fetches compressed pages from
     /// storage, decompresses (ZSTD), decodes pages, assembles columns.
     pub fetch_decode_ns: AtomicU64,
-    /// Time in spawn_blocking(serialize_record_batch) — writes RecordBatch
-    /// to Arrow IPC wire format for transfer to Julia.
+    /// Time in record_batch_to_c_ffi — exports RecordBatch via Arrow C Data
+    /// Interface (O(columns) Arc-clones, no serialization).
     pub serialize_ns: AtomicU64,
     /// Time a producer (`serialize_and_forward_batches`) is suspended on per-file
     /// backpressure: any of (a) `byte_sem.acquire_many` (100 MB cap),
