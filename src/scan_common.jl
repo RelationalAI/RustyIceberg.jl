@@ -128,35 +128,33 @@ function next_arrow_batch(stream::ArrowStream)
 end
 
 """
-    with_next_arrow_batch(f, stream::ArrowStream)
+    foreach_arrow_batch(f, stream::ArrowStream)
 
-Fetch the next batch from `stream`, call `f(batch)` with a zero-copy Arrow
-table, release the Rust memory, and return `f`'s result.
-Returns `nothing` when the stream is exhausted.
+Call `f(batch)` for every batch in `stream`, releasing each batch's Rust
+memory after `f` returns. Returns `nothing`.
 
-Rust memory is released automatically once `f` returns, so any data you need
-must be copied inside `f` (e.g. by constructing a `DataFrame`).
+Any data needed beyond `f`'s scope must be copied inside `f`
+(e.g. by constructing a `DataFrame`).
 
 # Example
 ```julia
 stream = scan!(scan)
-while true
-    result = with_next_arrow_batch(stream) do batch
-        DataFrame(batch)
-    end
-    result === nothing && break
+foreach_arrow_batch(stream) do batch
+    process(DataFrame(batch))
 end
 free_stream(stream)
 ```
 """
-function with_next_arrow_batch(f::F, stream::ArrowStream) where {F}
-    result = next_arrow_batch(stream)
-    result === nothing && return nothing
-    handle, batch_ptr = result
-    try
-        return f(handle)
-    finally
-        Arrow.release_c_data(handle)
-        free_batch(batch_ptr)
+function foreach_arrow_batch(f::F, stream::ArrowStream) where {F}
+    while true
+        result = next_arrow_batch(stream)
+        result === nothing && return nothing
+        handle, batch_ptr = result
+        try
+            f(handle)
+        finally
+            Arrow.release_c_data(handle)
+            free_batch(batch_ptr)
+        end
     end
 end
