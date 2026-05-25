@@ -90,3 +90,73 @@ Free the memory associated with an Arrow stream.
 function free_stream(stream::ArrowStream)
     @ccall rust_lib.iceberg_arrow_stream_free(stream::ArrowStream)::Cvoid
 end
+
+"""
+    next_arrow_batch(stream::ArrowStream) -> (Arrow.CImportedArray, Ptr{ArrowBatch}) | nothing
+
+Fetch the next batch from `stream` as a zero-copy Arrow table.
+Returns `nothing` when the stream is exhausted.
+
+The caller must call `Arrow.release_c_data(handle)` followed by
+`free_batch(batch_ptr)` on the returned pair when done with the data.
+Prefer `with_next_arrow_batch` when the batch lifetime fits a single block.
+
+# Example
+```julia
+stream = scan!(scan)
+while true
+    result = next_arrow_batch(stream)
+    result === nothing && break
+    handle, batch_ptr = result
+    df = DataFrame(handle)
+    Arrow.release_c_data(handle)
+    free_batch(batch_ptr)
+end
+free_stream(stream)
+```
+"""
+function next_arrow_batch(stream::ArrowStream)
+    batch_ptr = next_batch(stream)
+    batch_ptr == C_NULL && return nothing
+    batch = unsafe_load(batch_ptr)
+    if batch.schema != C_NULL && batch.array != C_NULL
+        return Arrow.from_c_data(batch.schema, batch.array), batch_ptr
+    else
+        free_batch(batch_ptr)
+        return nothing
+    end
+end
+
+"""
+    with_next_arrow_batch(f, stream::ArrowStream)
+
+Fetch the next batch from `stream`, call `f(batch)` with a zero-copy Arrow
+table, release the Rust memory, and return `f`'s result.
+Returns `nothing` when the stream is exhausted.
+
+Rust memory is released automatically once `f` returns, so any data you need
+must be copied inside `f` (e.g. by constructing a `DataFrame`).
+
+# Example
+```julia
+stream = scan!(scan)
+while true
+    result = with_next_arrow_batch(stream) do batch
+        DataFrame(batch)
+    end
+    result === nothing && break
+end
+free_stream(stream)
+```
+"""
+function with_next_arrow_batch(f::F, stream::ArrowStream) where {F}
+    result = next_arrow_batch(stream)
+    result === nothing && return nothing
+    handle, batch_ptr = result
+    try
+        return f(handle)
+    finally
+        Arrow.release_c_data(handle)
+        free_batch(batch_ptr)
+    end
+end
