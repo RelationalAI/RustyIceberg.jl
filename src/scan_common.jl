@@ -133,8 +133,13 @@ end
 Call `f(batch)` for every batch in `stream`, releasing each batch's Rust
 memory after `f` returns. Returns `nothing`.
 
-Any data needed beyond `f`'s scope must be copied inside `f`
-(e.g. by constructing a `DataFrame`).
+Each `batch` is an `Arrow.Table` whose columns are zero-copy views into the
+underlying Rust-owned memory. The table is valid only for the duration of `f`;
+any data needed beyond that scope must be copied inside `f`
+(e.g. `collect(batch[:col])` or `DataFrame(batch)`).
+
+The last column of every batch is `_pos::Arrow.Primitive{Int64}` containing
+the 1-based row positions within the source Parquet file.
 
 # Example
 ```julia
@@ -151,10 +156,16 @@ function foreach_arrow_batch(f::F, stream::ArrowStream) where {F}
         result === nothing && return nothing
         handle, batch_ptr = result
         try
-            f(handle)
+            f(_cimported_to_table(handle))
         finally
             Arrow.release_c_data(handle)
             free_batch(batch_ptr)
         end
     end
+end
+
+# Wrap a CImportedArray struct batch as an Arrow.Table, reusing the child ArrowVectors
+# without copying. The returned table is only valid for the duration of the batch callback.
+function _cimported_to_table(handle::Arrow.CImportedArray)
+    return Arrow.Table(NamedTuple{fieldnames(eltype(handle))}(handle.data.data))
 end
