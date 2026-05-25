@@ -575,8 +575,6 @@ end
         @test scan != C_NULL
         println("✅ Scan created successfully on loaded table")
 
-        RustyIceberg.with_batch_size!(scan, UInt(1024))
-
         # Select specific columns to verify table structure
         println("Selecting specific columns from customer table...")
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
@@ -594,11 +592,11 @@ end
 
         if batch_ptr != C_NULL
             batch = unsafe_load(batch_ptr)
-            if batch.schema != C_NULL && batch.array != C_NULL
-                println("✅ Successfully read first batch via Arrow C Data Interface")
+            if batch.data != C_NULL && batch.length > 0
+                println("✅ Successfully read first batch with $(batch.length) bytes of Arrow IPC data")
 
                 # Verify we got actual data from the customer table
-                @test batch.schema != C_NULL
+                @test batch.length > 0
                 println("✅ Batch contains valid Arrow data from catalog-loaded customer table")
 
                 # Clean up the batch
@@ -664,8 +662,6 @@ end
         @test scan != C_NULL
         println("✅ Scan created successfully on loaded table")
 
-        RustyIceberg.with_batch_size!(scan, UInt(1024))
-
         # Select specific columns
         println("Selecting specific columns from customer table...")
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
@@ -683,11 +679,11 @@ end
 
         if batch_ptr != C_NULL
             batch = unsafe_load(batch_ptr)
-            if batch.schema != C_NULL && batch.array != C_NULL
-                println("✅ Successfully read first batch via Arrow C Data Interface")
+            if batch.data != C_NULL && batch.length > 0
+                println("✅ Successfully read first batch with $(batch.length) bytes of Arrow IPC data")
 
                 # Verify we got actual data
-                @test batch.schema != C_NULL
+                @test batch.length > 0
                 println("✅ Batch contains valid Arrow data from catalog-loaded customer table with vended credentials")
 
                 # Clean up the batch
@@ -743,7 +739,6 @@ end
             try
                 table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer"; load_credentials=false)
                 scan = RustyIceberg.new_scan(table)
-                RustyIceberg.with_batch_size!(scan, UInt(1024))
                 RustyIceberg.select_columns!(scan, ["c_custkey"])
                 stream = RustyIceberg.scan!(scan)
                 RustyIceberg.next_batch(stream)
@@ -814,8 +809,6 @@ end
             @test scan != C_NULL
             println("✅ Scan created successfully on loaded table")
 
-            RustyIceberg.with_batch_size!(scan, UInt(1024))
-
             # Select specific columns
             println("Selecting specific columns from customer table...")
             RustyIceberg.select_columns!(scan, ["c_custkey", "c_name", "c_nationkey"])
@@ -833,10 +826,10 @@ end
 
             if batch_ptr != C_NULL
                 batch = unsafe_load(batch_ptr)
-                if batch.schema != C_NULL && batch.array != C_NULL
-                    println("✅ Successfully read first batch via Arrow C Data Interface")
+                if batch.data != C_NULL && batch.length > 0
+                    println("✅ Successfully read first batch with $(batch.length) bytes of Arrow IPC data")
 
-                    @test batch.schema != C_NULL
+                    @test batch.length > 0
                     println("✅ Batch contains valid Arrow data - storage credentials loader worked!")
 
                     RustyIceberg.free_batch(batch_ptr)
@@ -918,10 +911,9 @@ end
         while batch_ptr != C_NULL
             inserts_count += 1
             batch = unsafe_load(batch_ptr)
-            if batch.schema != C_NULL && batch.array != C_NULL
-                imported = Arrow.from_c_data(batch.schema, batch.array)
-                df = DataFrame(imported)
-                Arrow.release_c_data(imported)
+            if batch.data != C_NULL && batch.length > 0
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
                 @test "n" in names(df)
                 total_inserts += nrow(df)
 
@@ -942,10 +934,9 @@ end
         while batch_ptr != C_NULL
             deletes_count += 1
             batch = unsafe_load(batch_ptr)
-            if batch.schema != C_NULL && batch.array != C_NULL
-                imported = Arrow.from_c_data(batch.schema, batch.array)
-                df = DataFrame(imported)
-                Arrow.release_c_data(imported)
+            if batch.data != C_NULL && batch.length > 0
+                arrow_table = Arrow.Table(unsafe_wrap(Array, batch.data, batch.length))
+                df = DataFrame(arrow_table)
                 @test "file_path" in names(df) || "pos" in names(df)
                 total_deletes += nrow(df)
 
