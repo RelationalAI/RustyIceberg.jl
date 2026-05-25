@@ -203,7 +203,11 @@ mod tests {
         assert_eq!(n_rows, 3);
 
         // Drop the ArrowBatchInner — calls arrow-rs Drop on both FFI structs.
-        unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner)) };
+        unsafe {
+            drop(Box::from_raw(
+                arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+            ))
+        };
 
         assert!(inner.next().await.is_none(), "expected exactly one batch");
 
@@ -330,7 +334,11 @@ mod tests {
             let n_rows = unsafe { *(arrow_batch.array as *const i64) } as usize;
             total_rows += n_rows;
             batches_seen += 1;
-            unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner)) };
+            unsafe {
+                drop(Box::from_raw(
+                    arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+                ))
+            };
         }
         assert_eq!(batches_seen, 30, "expected 3 batches per file × 10 files");
         assert_eq!(total_rows, 30, "expected 30 rows total (10 files × 3 rows)");

@@ -151,12 +151,19 @@ fn record_batch_to_c_ffi(batch: RecordBatch) -> Result<ArrowBatch> {
     // to_ffi returns (FFI_ArrowArray, FFI_ArrowSchema) — array first, schema second.
     let (ffi_array, ffi_schema) = arrow_ffi::to_ffi(&struct_array.to_data())?;
 
-    let mut inner = Box::new(ArrowBatchInner { schema: ffi_schema, array: ffi_array });
+    let mut inner = Box::new(ArrowBatchInner {
+        schema: ffi_schema,
+        array: ffi_array,
+    });
     let schema_ptr = &mut inner.schema as *mut arrow_ffi::FFI_ArrowSchema;
     let array_ptr = &mut inner.array as *mut arrow_ffi::FFI_ArrowArray;
     let rust_ptr = Box::into_raw(inner) as *mut c_void;
 
-    Ok(ArrowBatch { schema: schema_ptr, array: array_ptr, rust_ptr })
+    Ok(ArrowBatch {
+        schema: schema_ptr,
+        array: array_ptr,
+        rust_ptr,
+    })
 }
 
 /// Transform a stream of RecordBatches into a stream of C Data Interface ArrowBatches.

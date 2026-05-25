@@ -198,7 +198,11 @@ mod tests {
         assert!(!batch.array.is_null());
         // The first i64 field of FFI_ArrowArray is the row count.
         let n_rows = unsafe { *(batch.array as *const i64) } as usize;
-        unsafe { drop(Box::from_raw(batch.rust_ptr as *mut crate::table::ArrowBatchInner)) };
+        unsafe {
+            drop(Box::from_raw(
+                batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+            ))
+        };
         n_rows
     }
 
@@ -262,7 +266,11 @@ mod tests {
         assert!(!arrow_batch.array.is_null());
         let n_rows = unsafe { *(arrow_batch.array as *const i64) } as usize;
         assert_eq!(n_rows, 3);
-        unsafe { drop(Box::from_raw(arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner)) };
+        unsafe {
+            drop(Box::from_raw(
+                arrow_batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+            ))
+        };
         assert!(inner.next().await.is_none(), "expected one batch");
 
         // ── Delete side: empty (no deletes) ──────────────────────────────
