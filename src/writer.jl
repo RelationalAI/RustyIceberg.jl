@@ -87,6 +87,24 @@ struct ParquetWriterPropertiesFFI
 end
 
 """
+    ColumnSlice
+
+FFI struct describing one column's contribution to a single `RowChunk`. Internal —
+users build `RowChunk`s via `push!` instead of constructing `ColumnSlice` directly.
+
+All fields are 8 bytes; total struct size is 40 bytes with no padding (matches Rust's
+`ColumnSlice` layout). Defined here (rather than next to `RowChunk`) so the
+`DataFileWriter` struct can carry a `Vector{ColumnSlice}` scratch buffer.
+"""
+struct ColumnSlice
+    data_ptr::Ptr{Cvoid}
+    lengths_ptr::Ptr{Int64}
+    validity_ptr::Ptr{UInt8}
+    sel_ptr::Ptr{Int64}
+    len::Csize_t
+end
+
+"""
     DataFileWriter
 
 Opaque handle representing an Iceberg data file writer.
@@ -98,12 +116,21 @@ data files.
 The writer tracks any `DataFiles` produced by `close_writer` and automatically
 frees them when `free_writer!` is called, unless they have already been freed
 or consumed.
+
+The writer also owns per-column scratch buffers (`_slices`, `_str_ptrs`,
+`_str_lens`) that are reused across `append!` calls. They grow lazily on first
+use and stay sized for the steady state, so a typical streaming pipeline pays
+no per-`append!` allocation for these.
 """
 mutable struct DataFileWriter
     ptr::Ptr{Cvoid}
     table::Table  # Keep reference to table to prevent GC
     colmeta::Dict{Symbol, Vector{Pair{String, String}}}  # Column metadata with Iceberg field IDs
     data_files::Union{DataFiles, Nothing}  # Track DataFiles for automatic cleanup
+    # Scratch buffers reused across append! calls. Sized lazily by `append!`.
+    _slices::Vector{ColumnSlice}                # per-call FFI argument
+    _str_ptrs::Vector{Vector{Ptr{UInt8}}}       # one buffer per column position
+    _str_lens::Vector{Vector{Int64}}            # one buffer per column position
 end
 
 # Response type for writer creation
@@ -232,7 +259,10 @@ function DataFileWriter(table::Table, config::WriterConfig)
     # This metadata is added to Arrow IPC data so iceberg-rust can match fields
     colmeta = get_column_metadata(table)
 
-    return DataFileWriter(response.value, table, colmeta, nothing)
+    return DataFileWriter(
+        response.value, table, colmeta, nothing,
+        ColumnSlice[], Vector{Ptr{UInt8}}[], Vector{Int64}[],
+    )
 end
 
 # Convenience constructor with keyword arguments
@@ -502,23 +532,6 @@ end
 # ==========================================================================================
 
 """
-    ColumnSlice
-
-FFI struct describing one column's contribution to a single `RowChunk`. Internal —
-users build `RowChunk`s via `push!` instead of constructing `ColumnSlice` directly.
-
-All fields are 8 bytes; total struct size is 40 bytes with no padding (matches Rust's
-`ColumnSlice` layout).
-"""
-struct ColumnSlice
-    data_ptr::Ptr{Cvoid}
-    lengths_ptr::Ptr{Int64}
-    validity_ptr::Ptr{UInt8}
-    sel_ptr::Ptr{Int64}
-    len::Csize_t
-end
-
-"""
     ColumnType
 
 Enum for column data types, matching the Rust FFI constants.
@@ -598,12 +611,32 @@ function iceberg_column_type(d::IcebergDecimal)
     end
 end
 
+# ------------------------------------------------------------------------------------------
+# Internal column-entry types stored inside a `RowChunk`.
+#
+# `push!` only records a reference to the user's data plus optional validity/sel; no
+# `pointer(...)`-taking and no allocation of ptr/len arrays happens at `push!` time.
+# The full `ColumnSlice` (the FFI argument) is materialized in `append!` using writer-owned
+# scratch — so per-`append!` allocations stay flat regardless of chunk size.
+# ------------------------------------------------------------------------------------------
+
+struct _NumericCol
+    data::Any                               # AbstractVector{T} for some T
+    validity::Union{Nothing, BitVector}
+    sel::Union{Nothing, Vector{Int64}}
+end
+
+struct _StringCol
+    strings::Any                            # AbstractVector{<:AbstractString}
+    validity::Union{Nothing, BitVector}
+end
+
 """
     RowChunk
 
 A horizontal stripe of rows across all output columns — what a streaming producer hands
-to the writer at each step. Build one by pushing the column data (in schema order); the
-chunk handles `ColumnSlice` construction and GC preservation automatically.
+to the writer at each step. Build one by pushing column data in schema order; `push!`
+just records the reference, so it allocates O(1) per column regardless of chunk size.
 
 ```julia
 chunk = RowChunk()
@@ -615,20 +648,21 @@ append!(writer, chunk)
 ```
 
 A `RowChunk` is single-use: after `append!` returns Rust has copied all data, so the
-source arrays may be released and the chunk discarded.
+source arrays may be released and the chunk discarded. The writer owns the scratch
+buffers used to materialize the FFI arguments, so they are reused across `append!`
+calls without per-call allocation.
 """
 mutable struct RowChunk
-    slices::Vector{ColumnSlice}
-    preserve::Vector{Any}
+    columns::Vector{Any}                    # holds _NumericCol or _StringCol instances
 end
 
-RowChunk() = RowChunk(ColumnSlice[], Any[])
+RowChunk() = RowChunk(Any[])
 
 """
     push!(chunk::RowChunk, data::AbstractVector{T};
           validity=nothing, sel=nothing)
 
-Add a non-string column slice to the chunk.
+Record a non-string column slice on the chunk.
 
 - `validity`: optional `BitVector` where `true` = valid, `false` = null.
 - `sel`: optional `Vector{Int64}` of 1-based indices into `data` for scattered access.
@@ -640,97 +674,114 @@ function Base.push!(
     validity::Union{Nothing, BitVector} = nothing,
     sel::Union{Nothing, Vector{Int64}} = nothing,
 ) where T
-    len = sel === nothing ? length(data) : length(sel)
-
-    sel_ptr = if sel !== nothing
-        push!(chunk.preserve, sel)
-        pointer(sel)
-    else
-        Ptr{Int64}(C_NULL)
-    end
-
-    validity_ptr = if validity !== nothing
-        push!(chunk.preserve, validity)
-        Ptr{UInt8}(pointer(validity.chunks))
-    else
-        Ptr{UInt8}(C_NULL)
-    end
-
-    push!(chunk.preserve, data)
-    push!(chunk.slices, ColumnSlice(
-        Ptr{Cvoid}(pointer(data)),
-        Ptr{Int64}(C_NULL),
-        validity_ptr,
-        sel_ptr,
-        Csize_t(len),
-    ))
+    push!(chunk.columns, _NumericCol(data, validity, sel))
     return chunk
 end
 
 """
-    push!(chunk::RowChunk, strings::Vector{String}; validity=nothing)
+    push!(chunk::RowChunk, strings::AbstractVector{<:AbstractString}; validity=nothing)
 
-Add a string column slice to the chunk.
+Record a string column slice on the chunk. Accepts any `AbstractString` element type
+(`String`, `SubString{String}`, Arrow's `VariableSizeString`, …); the pointer/length
+gather happens inside `append!` so there's no per-`push!` materialization or copy.
 
 - `validity`: optional `BitVector` where `true` = valid, `false` = null.
 """
 function Base.push!(
     chunk::RowChunk,
-    strings::Vector{String};
+    strings::AbstractVector{<:AbstractString};
     validity::Union{Nothing, BitVector} = nothing,
 )
-    n = length(strings)
-    is_nullable = validity !== nothing
-    str_ptrs = Vector{Ptr{UInt8}}(undef, n)
-    str_lens = Vector{Int64}(undef, n)
-    for i in 1:n
-        if is_nullable && !validity[i]
-            str_ptrs[i] = Ptr{UInt8}(C_NULL)
-            str_lens[i] = 0
-        else
-            str_ptrs[i] = pointer(strings[i])
-            str_lens[i] = ncodeunits(strings[i])
-        end
-    end
-    push!(chunk.preserve, strings, str_ptrs, str_lens)
-
-    validity_ptr = if validity !== nothing
-        push!(chunk.preserve, validity)
-        Ptr{UInt8}(pointer(validity.chunks))
-    else
-        Ptr{UInt8}(C_NULL)
-    end
-
-    push!(chunk.slices, ColumnSlice(
-        Ptr{Cvoid}(pointer(str_ptrs)),
-        pointer(str_lens),
-        validity_ptr,
-        Ptr{Int64}(C_NULL),
-        Csize_t(n),
-    ))
+    push!(chunk.columns, _StringCol(strings, validity))
     return chunk
 end
 
 """
     append!(writer::DataFileWriter, chunk::RowChunk)
 
-Hand one `RowChunk` to the writer. Rust copies all slice data synchronously into per-column
-buffers; the source arrays may be released the moment this call returns. When the
-accumulated window reaches the coalesce size the writer auto-flushes a `RecordBatch` to
-the encode pool. No reordering happens — `append!` calls are appended in order.
+Hand one `RowChunk` to the writer. All per-column FFI prep (pointer-taking, validity bitmap
+lookup, string ptr/len gather) happens here using writer-owned scratch buffers, so per-call
+allocations stay flat. Rust then copies the slice data synchronously into per-column
+buffers; the source arrays may be released the moment this call returns.
+
+When the accumulated window reaches the coalesce size the writer auto-flushes a
+`RecordBatch` to the encode pool. `append!` calls are appended in order — no reordering.
 """
 function Base.append!(writer::DataFileWriter, chunk::RowChunk)
     writer.ptr == C_NULL && throw(IcebergException("Writer has been freed"))
-    isempty(chunk.slices) && throw(IcebergException("RowChunk has no columns"))
-    ret = GC.@preserve chunk begin
+    n = length(chunk.columns)
+    n == 0 && throw(IcebergException("RowChunk has no columns"))
+
+    # Grow writer scratch to fit `n` columns. Stays at this capacity for the writer's
+    # lifetime, so the steady-state cost is zero.
+    resize!(writer._slices, n)
+    while length(writer._str_ptrs) < n
+        push!(writer._str_ptrs, Ptr{UInt8}[])
+        push!(writer._str_lens, Int64[])
+    end
+
+    ret = GC.@preserve writer chunk begin
+        @inbounds for i in 1:n
+            writer._slices[i] = _build_column_slice(writer, i, chunk.columns[i])
+        end
         @ccall rust_lib.iceberg_writer_append(
             writer.ptr::Ptr{Cvoid},
-            pointer(chunk.slices)::Ptr{ColumnSlice},
-            length(chunk.slices)::Csize_t,
+            pointer(writer._slices)::Ptr{ColumnSlice},
+            n::Csize_t,
         )::Int32
     end
     ret == 0 || throw(IcebergException("append! failed (see close_writer for details)"))
     return writer
+end
+
+# Materialize a `ColumnSlice` for a numeric column. No allocation — just pointer-taking.
+@inline function _build_column_slice(::DataFileWriter, ::Int, col::_NumericCol)
+    data = col.data
+    sel_ptr = col.sel === nothing ? Ptr{Int64}(C_NULL) : pointer(col.sel)
+    validity_ptr = col.validity === nothing ?
+        Ptr{UInt8}(C_NULL) :
+        Ptr{UInt8}(pointer(col.validity.chunks))
+    len = col.sel === nothing ? length(data) : length(col.sel)
+    return ColumnSlice(
+        Ptr{Cvoid}(pointer(data)),
+        Ptr{Int64}(C_NULL),
+        validity_ptr,
+        sel_ptr,
+        Csize_t(len),
+    )
+end
+
+# Materialize a `ColumnSlice` for a string column. Fills the writer's per-position
+# `str_ptrs` / `str_lens` scratch in place — `resize!` is amortized O(1) once steady state
+# is reached, so this is allocation-free across the streaming pipeline.
+@inline function _build_column_slice(writer::DataFileWriter, idx::Int, col::_StringCol)
+    strings = col.strings
+    n = length(strings)
+    str_ptrs = writer._str_ptrs[idx]
+    str_lens = writer._str_lens[idx]
+    resize!(str_ptrs, n)
+    resize!(str_lens, n)
+    is_nullable = col.validity !== nothing
+    @inbounds for i in 1:n
+        if is_nullable && !col.validity[i]
+            str_ptrs[i] = Ptr{UInt8}(C_NULL)
+            str_lens[i] = 0
+        else
+            s = strings[i]
+            str_ptrs[i] = pointer(s)
+            str_lens[i] = ncodeunits(s)
+        end
+    end
+    validity_ptr = col.validity === nothing ?
+        Ptr{UInt8}(C_NULL) :
+        Ptr{UInt8}(pointer(col.validity.chunks))
+    return ColumnSlice(
+        Ptr{Cvoid}(pointer(str_ptrs)),
+        pointer(str_lens),
+        validity_ptr,
+        Ptr{Int64}(C_NULL),
+        Csize_t(n),
+    )
 end
 
 """
