@@ -104,14 +104,15 @@ macro_rules! timed {
 // Pipeline implementation
 // ===========================================================================
 
-/// A serialized Arrow IPC batch bundled with the *clamped* byte size used
-/// for backpressure accounting and references to the originating file task's
-/// two semaphores. The consumer releases permits after forwarding the batch
-/// to Julia, unblocking the producer: `byte_sem` adds back `clamped_byte_len`
-/// bytes; `slot_sem` adds back 1 batch slot.
+/// An Arrow C Data Interface batch bundled with the *clamped* in-memory byte
+/// size used for backpressure accounting and references to the originating
+/// file task's two semaphores. The consumer releases permits after forwarding
+/// the batch to Julia, unblocking the producer: `byte_sem` adds back
+/// `clamped_byte_len` bytes; `slot_sem` adds back 1 batch slot.
 pub(crate) struct BufferedBatch {
     pub(crate) batch: ArrowBatch,
     pub(crate) clamped_byte_len: usize,
+    pub(crate) byte_len: usize,
     pub(crate) byte_sem: Arc<Semaphore>,
     pub(crate) slot_sem: Arc<Semaphore>,
 }
@@ -189,7 +190,7 @@ pub(crate) fn make_file_stream(
                     // not semaphore permits.
                     buf.byte_sem.add_permits(buf.clamped_byte_len);
                     buf.slot_sem.add_permits(1);
-                    STATS.track_buffer_release(buf.batch.length as u64);
+                    STATS.track_buffer_release(buf.byte_len as u64);
                     buf.batch
                 });
                 Some((result, rx))
@@ -323,7 +324,7 @@ async fn process_file<S, BSF>(
 ///   1. Reader setup — invoke `build_batch_stream`, which opens the file
 ///      and returns a stream of `RecordBatch`es.
 ///   2. Fetch + decode — I/O, ZSTD decompression, column assembly.
-///   3. Serialize — RecordBatch → Arrow IPC for transfer to Julia.
+///   3. Export — RecordBatch → Arrow C Data Interface for transfer to Julia.
 ///   4. Backpressure — wait on byte_sem / slot_sem if buffered too far
 ///      ahead.
 ///
@@ -349,8 +350,8 @@ where
     serialize_and_forward_batches(batch_stream, byte_sem, slot_sem, byte_budget, tx).await
 }
 
-/// Take a per-file `RecordBatch` stream and forward each batch — serialized
-/// as Arrow IPC — into the file's mpsc, throttled by `byte_sem` / `slot_sem`.
+/// Take a per-file `RecordBatch` stream and forward each batch — exported
+/// via Arrow C Data Interface — into the file's mpsc, throttled by `byte_sem` / `slot_sem`.
 /// Phases 2-4 of the file pipeline; recording timing and throughput into STATS.
 /// Shared by both the full-scan and incremental-scan pipelines — the only
 /// difference between the two is how the input stream is obtained before
@@ -366,7 +367,7 @@ where
 /// file level via `Stream::buffered(prefetch_depth)` in `create_nested_pipeline`.
 ///
 ///   2. Fetch + decode — timed; each `.next()` does I/O + decompression
-///   3. Serialize      — timed; dispatched via tokio::task::spawn_blocking
+///   3. C FFI export   — timed; inline O(columns) Arrow C Data Interface wrap
 ///   4. Backpressure   — timed; semaphore blocks if producer is too far ahead
 pub(crate) async fn serialize_and_forward_batches(
     mut batch_stream: impl Stream<Item = iceberg::Result<RecordBatch>> + Unpin,
@@ -387,35 +388,26 @@ pub(crate) async fn serialize_and_forward_batches(
             None => break, // end of file
         };
 
-        // ── Phase 3: Serialize to Arrow IPC ─────────────────────────────
-        // Dispatched to Tokio's blocking thread pool so Tokio worker
-        // threads stay free to make progress on async work while the CPU-
-        // heavy IPC serialization runs on a dedicated blocking thread.
-        //
-        // We deliberately use Tokio's `spawn_blocking` rather than a bounded
-        // rayon pool (the previous `SERIALIZE_POOL`). Tokio's blocking pool
-        // is unbounded and elastic — it keeps recently-used threads warm for
-        // re-use and tears them down when idle — so a Rust prefetcher
-        // running here does not block Julia worker threads that are busy
-        // writing into raicode leaves.
-        let serialized = timed!(
-            serialize_ns,
-            tokio::task::spawn_blocking(move || crate::serialize_record_batch(batch))
-        )
-        .map_err(|e| unexpected(format!("serialize panicked: {e}")))?
-        .map_err(unexpected)?;
+        // ── Phase 3: Export to Arrow C Data Interface ───────────────────
+        // C Data Interface export is O(num_columns): just Arc-clones and a
+        // few small heap allocations. No serialization or blocking thread
+        // needed — runs inline on the Tokio worker.
+        let byte_len = batch.get_array_memory_size();
+        let export_start = std::time::Instant::now();
+        let serialized = crate::record_batch_to_c_ffi(batch).map_err(unexpected)?;
+        STATS.add_elapsed(&STATS.serialize_ns, export_start);
 
         STATS.batches_produced.fetch_add(1, Ordering::Relaxed);
         STATS
             .bytes_produced
-            .fetch_add(serialized.length as u64, Ordering::Relaxed);
+            .fetch_add(byte_len as u64, Ordering::Relaxed);
         // Clamp the per-batch cost used for backpressure to the byte budget.
         // `acquire_many` for a >budget batch would never resolve (the
         // semaphore only has `byte_budget` permits), and clamping also
         // protects the `as u32` cast below from wrapping at ≥ 4 GiB.
         // Real throughput accounting (`bytes_produced`, above) sees the
         // unclamped value.
-        let clamped_byte_len = serialized.length.min(byte_budget);
+        let clamped_byte_len = byte_len.min(byte_budget);
 
         // ── Phase 4: Backpressure ───────────────────────────────────────
         // Producer is throttled by three per-file bounds, all funneling
@@ -460,10 +452,9 @@ pub(crate) async fn serialize_and_forward_batches(
         };
         std::mem::forget(_slot_permit);
 
-        // Track the *actual* serialized byte size as in-flight memory, not
-        // the clamped permit count. The clamp only affects what we acquire
-        // from `byte_sem`; the real allocation is `serialized.length` bytes.
-        STATS.track_buffer_add(serialized.length as u64);
+        // Track the *actual* in-memory byte size, not the clamped permit count.
+        // The clamp only affects what we acquire from `byte_sem`.
+        STATS.track_buffer_add(byte_len as u64);
 
         // Send the batch to this file's channel.
         let send_result = timed!(
@@ -471,6 +462,7 @@ pub(crate) async fn serialize_and_forward_batches(
             tx.send(Ok(BufferedBatch {
                 batch: serialized,
                 clamped_byte_len,
+                byte_len,
                 byte_sem: byte_sem.clone(),
                 slot_sem: slot_sem.clone(),
             }))
