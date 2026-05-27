@@ -607,10 +607,13 @@ to the writer at each step. Build one by pushing column data in schema order, th
 
 ```julia
 chunk = RowChunk()
-push!(chunk, ids)                              # non-nullable numeric, sequential
-push!(chunk, values; validity=valid_bv)        # nullable numeric, sequential
-push!(chunk, scores; sel=sel_indices)          # non-nullable scattered
-push!(chunk, tags; validity=valid_bv)          # nullable strings
+push!(chunk, ids)                                            # non-nullable numeric, sequential
+push!(chunk, values; validity=src_valid_bv)                  # nullable numeric, sequential
+push!(chunk, source_scores;
+      validity=src_valid_bv, sel=sel_indices)                # nullable scattered: validity is
+                                                              # aligned to `source_scores`; the
+                                                              # library gathers through `sel`.
+push!(chunk, tags; validity=src_valid_bv)                    # nullable strings
 append!(writer, chunk)
 ```
 
@@ -635,14 +638,20 @@ anyway). The internal string pool is keyed by column position.
 mutable struct RowChunk
     slices::Vector{ColumnSlice}                  # FFI-ready, one entry per push!
     preserve::Vector{Any}                        # GC roots for source data / validity / sel
-    # Per-column-position string scratch. Entry `i` holds the `str_ptrs` / `str_lens`
-    # buffers for the i-th pushed column when it was a string column. Non-string positions
-    # have unused (length-0) entries. Retained across `empty!` so streaming reuse is free.
+    # Per-column-position string scratch. Entry `i` holds the `str_ptrs` / `str_lens` /
+    # `str_validity` buffers for the i-th pushed column when it was a string column.
+    # `str_validity` is the output-aligned validity bitmap Rust receives when both `sel`
+    # and `validity` are present on a string push — see that `push!` overload for why.
+    # Non-string positions have unused (length-0) entries. Retained across `empty!` so
+    # streaming reuse is free.
     str_ptrs::Vector{Vector{Ptr{UInt8}}}
     str_lens::Vector{Vector{Int64}}
+    str_validity::Vector{BitVector}
 end
 
-RowChunk() = RowChunk(ColumnSlice[], Any[], Vector{Ptr{UInt8}}[], Vector{Int64}[])
+RowChunk() = RowChunk(
+    ColumnSlice[], Any[], Vector{Ptr{UInt8}}[], Vector{Int64}[], BitVector[],
+)
 
 """
     empty!(chunk::RowChunk)
@@ -668,7 +677,11 @@ Add a non-string column slice to the chunk. Builds the FFI-ready `ColumnSlice` i
 just `pointer(data)` and pointer arithmetic, no allocation beyond the chunk's own
 `slices` / `preserve` growth.
 
-- `validity`: optional `BitVector` where `true` = valid, `false` = null.
+- `validity`: optional `BitVector` *aligned to `data`* — `length(validity) >= length(data)`,
+  bit `i` describes whether `data[i]` is valid (`true` = valid, `false` = null). When
+  `sel` is also provided, Rust gathers validity through `sel` alongside the value gather:
+  bit `sel[i] - 1` of the source bitmap becomes bit `i` of the output bitmap. When `sel`
+  is omitted, source and output positions coincide.
 - `sel`: optional `Vector{Int64}` of 1-based indices into `data` for scattered access.
   If omitted, all rows of `data` are used sequentially.
 """
@@ -717,10 +730,17 @@ The ptr/len gather buffers live in the chunk's per-position pool and are reused 
 `empty!`/refill cycles, so a streaming loop pays no allocation for them after the first
 chunk.
 
-- `validity`: optional `BitVector` (length matches the number of output rows) where
-  `true` = valid, `false` = null.
+- `validity`: optional `BitVector` *aligned to `strings`* — `length(validity) >= length(strings)`,
+  bit `i` describes whether `strings[i]` is valid (`true` = valid, `false` = null).
 - `sel`: optional `Vector{Int64}` of 1-based indices into `strings` for scattered access.
   If omitted, all rows of `strings` are used sequentially.
+
+Unlike the numeric `push!`, the value gather is performed here on the Julia side
+(`pointer(strings[sel[i]])` per row) because Rust can't walk a Julia `AbstractString`
+vector across the FFI. When both `sel` and `validity` are supplied, the validity gather
+is folded into that same loop and an output-aligned bitmap is materialized in the
+chunk's per-position pool. The consumer-visible contract is therefore identical to the
+numeric case — pass a source-aligned `validity` either way.
 """
 function Base.push!(
     chunk::RowChunk,
@@ -734,6 +754,7 @@ function Base.push!(
     while length(chunk.str_ptrs) < pos
         push!(chunk.str_ptrs, Ptr{UInt8}[])
         push!(chunk.str_lens, Int64[])
+        push!(chunk.str_validity, BitVector())
     end
     str_ptrs = chunk.str_ptrs[pos]
     str_lens = chunk.str_lens[pos]
@@ -741,7 +762,18 @@ function Base.push!(
     n = sel === nothing ? length(strings) : length(sel)
     resize!(str_ptrs, n)        # amortized O(1) once the pool is sized
     resize!(str_lens, n)
+
     is_nullable = validity !== nothing
+    # Rust never sees `sel_ptr` for string columns (the value gather is pre-applied
+    # below), so when `sel` *and* `validity` are both supplied we have to rewrite the
+    # source-aligned validity bitmap to an output-aligned one here. With `sel === nothing`,
+    # source and output positions coincide and we pass `validity` through unchanged.
+    needs_validity_gather = is_nullable && sel !== nothing
+    str_validity = needs_validity_gather ? chunk.str_validity[pos] : nothing
+    if needs_validity_gather
+        resize!(str_validity, n)
+    end
+
     if sel === nothing
         @inbounds for i in 1:n
             if is_nullable && !validity[i]
@@ -753,22 +785,35 @@ function Base.push!(
                 str_lens[i] = ncodeunits(s)
             end
         end
-    else
+    elseif needs_validity_gather
         @inbounds for i in 1:n
-            if is_nullable && !validity[i]
+            src = sel[i]
+            if !validity[src]
                 str_ptrs[i] = Ptr{UInt8}(C_NULL)
                 str_lens[i] = 0
+                str_validity[i] = false
             else
-                s = strings[sel[i]]
+                s = strings[src]
                 str_ptrs[i] = pointer(s)
                 str_lens[i] = ncodeunits(s)
+                str_validity[i] = true
             end
+        end
+        push!(chunk.preserve, sel)
+    else
+        @inbounds for i in 1:n
+            s = strings[sel[i]]
+            str_ptrs[i] = pointer(s)
+            str_lens[i] = ncodeunits(s)
         end
         push!(chunk.preserve, sel)
     end
 
     push!(chunk.preserve, strings)
-    validity_ptr = if validity !== nothing
+    validity_ptr = if needs_validity_gather
+        push!(chunk.preserve, str_validity)
+        Ptr{UInt8}(pointer(str_validity.chunks))
+    elseif validity !== nothing
         push!(chunk.preserve, validity)
         Ptr{UInt8}(pointer(validity.chunks))
     else

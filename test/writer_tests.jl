@@ -1198,11 +1198,15 @@ end
             println("✅ Chunk 1 appended")
 
             # --- Chunk 2: rows 1-2 (score uses a scattered selection) ---
-            # score_src: [99.9, 3.3, 88.8], sel=[2,1] → values [3.3, 99.9], valid=[true,false]
+            # score_src: [99.9, 3.3, 88.8], sel=[2,1] → values [3.3, 99.9].
+            # Source-aligned validity describes the source row, so the bits map as:
+            #   source row 0 = 99.9 → false (output row 1 will be null)
+            #   source row 1 =  3.3 → true  (output row 0 is valid)
+            #   source row 2 = 88.8 → unused (not selected); set to true for cleanliness.
             c2 = RustyIceberg.RowChunk()
             push!(c2, Int64[2, 3])
             push!(c2, Float64[99.9, 3.3, 88.8];
-                sel=Int64[2, 1], validity=BitVector([true, false]))
+                sel=Int64[2, 1], validity=BitVector([false, true, true]))
             push!(c2, ["", "gamma"]; validity=BitVector([false, true]))
             append!(writer, c2)
             println("✅ Chunk 2 appended (scattered score, nullable strings)")
@@ -1273,6 +1277,113 @@ end
     end
 
     println("\n✅ Streaming multi-chunk tests completed!")
+end
+
+@testset "Writer streaming — source-aligned validity with non-identity sel" begin
+    # Regression test for the source-aligned-validity gather. The source arrays are
+    # length 5, sel=[3, 1, 4] picks 3 output rows, and the validity bitmaps are
+    # source-aligned (length 5). Under the old output-aligned semantics the library
+    # would have memcpy'd validity bits [0..3) into the output without gathering, and
+    # the null pattern would have been wrong. Under source-aligned semantics the
+    # numeric path gathers through `sel` in Rust and the string path gathers through
+    # `sel` on the Julia side of `push!` — the visible contract is the same.
+    println("Testing source-aligned validity + non-identity sel...")
+
+    catalog_uri = get_catalog_uri()
+    props = get_catalog_properties()
+
+    catalog = nothing
+    table = C_NULL
+    data_files = nothing
+    test_namespace = nothing
+    table_name = nothing
+
+    try
+        catalog = RustyIceberg.catalog_create_rest(catalog_uri; properties=props)
+        @test catalog !== nothing
+
+        test_namespace = ["test_builder_srcval_$(round(Int, time() * 1000))"]
+        RustyIceberg.create_namespace(catalog, test_namespace)
+
+        schema = Schema([
+            Field(Int32(1), "id",    IcebergLong();   required=true),
+            Field(Int32(2), "v",     IcebergDouble(); required=false),
+            Field(Int32(3), "tag",   IcebergString(); required=false),
+        ])
+
+        table_name = "builder_srcval_$(round(Int, time() * 1000))"
+        table = RustyIceberg.create_table(catalog, test_namespace, table_name, schema)
+        @test table != C_NULL
+
+        # Source columns (length 5) and sel = [3, 1, 4]:
+        #   output row 0 ← source row 3 → v=30.0 (valid),    tag="gamma" (valid)
+        #   output row 1 ← source row 1 → v=10.0 (valid),    tag="alpha" (valid)
+        #   output row 2 ← source row 4 → v=40.0 (null!),    tag=""      (null)
+        v_src      = Float64[10.0, 20.0, 30.0, 40.0, 50.0]
+        v_validity = BitVector([true, false, true, false, true])     # source-aligned
+        tag_src    = String["alpha", "beta", "gamma", "", "epsilon"]
+        tag_valid  = BitVector([true,  true,  true,  false, true])    # source-aligned
+        sel        = Int64[3, 1, 4]
+
+        data_files = RustyIceberg.with_data_file_writer(table) do writer
+            c = RustyIceberg.RowChunk()
+            push!(c, Int64[1, 2, 3])
+            push!(c, v_src; sel=sel, validity=v_validity)
+            push!(c, tag_src; sel=sel, validity=tag_valid)
+            append!(writer, c)
+        end
+        @test data_files !== nothing && data_files.ptr != C_NULL
+
+        updated_table = RustyIceberg.with_transaction(table, catalog) do tx
+            RustyIceberg.with_fast_append(tx) do action
+                RustyIceberg.add_data_files(action, data_files)
+            end
+        end
+        @test updated_table != C_NULL
+
+        tbl = read_table_data(updated_table)
+        @test tbl !== nothing
+        @test length(tbl.id) == 3
+
+        perm = sortperm(tbl.id)
+        ids  = tbl.id[perm]
+        vs   = tbl.v[perm]
+        tags = tbl.tag[perm]
+
+        # id was written [1, 2, 3] in chunk order, paired with output rows 0..2.
+        # After sortperm(tbl.id) the position is id ascending, so:
+        #   ids[1]=1 ↔ output row 0 ↔ source row 3 → v=30.0,  tag="gamma"
+        #   ids[2]=2 ↔ output row 1 ↔ source row 1 → v=10.0,  tag="alpha"
+        #   ids[3]=3 ↔ output row 2 ↔ source row 4 → null,     tag=null
+        @test ids == Int64[1, 2, 3]
+        @test !ismissing(vs[1]) && vs[1] ≈ 30.0
+        @test !ismissing(vs[2]) && vs[2] ≈ 10.0
+        @test ismissing(vs[3])
+
+        @test !ismissing(tags[1]) && tags[1] == "gamma"
+        @test !ismissing(tags[2]) && tags[2] == "alpha"
+        @test ismissing(tags[3])
+
+        RustyIceberg.free_table(updated_table)
+    finally
+        if data_files !== nothing && data_files.ptr != C_NULL
+            RustyIceberg.free_data_files!(data_files)
+        end
+        if table != C_NULL
+            RustyIceberg.free_table(table)
+        end
+        if table_name !== nothing && test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_table(catalog, test_namespace, table_name)
+        end
+        if test_namespace !== nothing && catalog !== nothing
+            RustyIceberg.drop_namespace(catalog, test_namespace)
+        end
+        if catalog !== nothing
+            RustyIceberg.free_catalog!(catalog)
+        end
+    end
+
+    println("✅ Source-aligned validity + sel test completed")
 end
 
 @testset "Writer streaming — explicit flush! between windows" begin

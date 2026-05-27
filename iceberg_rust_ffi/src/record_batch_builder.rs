@@ -237,10 +237,28 @@ unsafe fn append_to_state(
             } else if state.null_bits.len() < needed {
                 state.null_bits.resize(needed, 0u8);
             }
-            // Copy validity bits. When source and destination are byte-aligned (out_start
-            // is a multiple of 8 — always true for flush-per-slice), one copy_nonoverlapping
-            // replaces the 4096-iteration per-bit loop.
-            if out_start % 8 == 0 {
+            // Copy validity bits. Three paths:
+            //   (1) `sel_ptr != null` — source-aligned bitmap + non-identity sel: gather
+            //       bit `sel[i] - 1` into output position `out_start + i`.
+            //   (2) `out_start % 8 == 0` — byte-aligned destination (the steady state
+            //       under flush-per-slice): one `copy_nonoverlapping` for the whole slice.
+            //   (3) otherwise — bit-by-bit copy.
+            // The gather path uses raw pointer arithmetic on `validity_ptr` because the
+            // source bitmap covers `length(data)` bits (≥ `max(sel)`), which is typically
+            // larger than `len`. ORing into 0-initialized `null_bits` is safe even when
+            // `out_start + len` shares a byte with prior rows — we never write a 0 over a
+            // previously-set 1 because `set_bits_range(0, out_start)` already populated
+            // earlier rows in a separate phase.
+            if !slice.sel_ptr.is_null() {
+                let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
+                for i in 0..len {
+                    let src_idx = (sel[i] - 1) as usize;
+                    let b =
+                        unsafe { (*slice.validity_ptr.add(src_idx / 8) >> (src_idx % 8)) & 1 };
+                    let pos = out_start + i;
+                    state.null_bits[pos / 8] |= b << (pos % 8);
+                }
+            } else if out_start % 8 == 0 {
                 let dst = out_start / 8;
                 let n_bytes = (len + 7) / 8;
                 unsafe {
