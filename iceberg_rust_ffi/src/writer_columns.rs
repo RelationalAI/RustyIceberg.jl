@@ -37,9 +37,12 @@ pub const COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS: i32 = 17;
 /// builder will copy on `append`. All fields are 8 bytes; total struct size is 40 bytes
 /// with no padding.
 ///
-/// - `sel_ptr = null`  → sequential (identity) access: read `data[0..len]`.
+/// - `sel_ptr = null`  → sequential (identity) access: read `data[0..len]`. `data_ptr`
+///   must be valid for `len` elements.
 /// - `sel_ptr != null` → scattered access: read `data[sel[i] - 1]` for `i in 0..len`
-///   (1-based Julia indices).
+///   (1-based Julia indices). `data_ptr` must be valid for `max(sel)` elements; the
+///   source array is typically longer than `len`, so the gather path uses raw pointer
+///   arithmetic rather than a `&[T]` of length `len`.
 /// - `validity_ptr = null` → all rows in this slice are valid.
 /// - `lengths_ptr != null` → string column: `data_ptr` is `*const *const u8`,
 ///   `lengths_ptr` is `*const i64` of byte lengths per string.

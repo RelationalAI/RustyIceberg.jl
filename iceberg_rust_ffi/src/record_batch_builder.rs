@@ -281,13 +281,15 @@ unsafe fn append_to_state(
             append_numeric(buf, slice, state.column_type, len)?;
         }
         ColumnValues::Bool(v) => {
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const u8, len) };
             if slice.sel_ptr.is_null() {
+                let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const u8, len) };
                 v.extend_from_slice(src);
             } else {
+                // See `append_primitive!` for why scatter uses a raw pointer.
+                let src = slice.data_ptr as *const u8;
                 let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
                 for &idx in sel {
-                    v.push(src[(idx - 1) as usize]);
+                    v.push(unsafe { *src.add((idx - 1) as usize) });
                 }
             }
         }
@@ -347,20 +349,26 @@ const PREFETCH_DIST: usize = 16;
 
 macro_rules! append_primitive {
     ($buf:expr, $slice:expr, $len:expr, $T:ty) => {{
-        let src = unsafe { std::slice::from_raw_parts($slice.data_ptr as *const $T, $len) };
         if $slice.sel_ptr.is_null() {
+            let src = unsafe { std::slice::from_raw_parts($slice.data_ptr as *const $T, $len) };
             $buf.extend_from_slice(unsafe { as_bytes(src) });
         } else {
+            // Scatter: index into the source array via raw pointer arithmetic. The
+            // source array may be longer than `$len` (which is the output stripe
+            // length), so a `&[T]` of length `$len` would false-positive on any
+            // sel index ≥ $len.
+            let src = $slice.data_ptr as *const $T;
             let sel = unsafe { std::slice::from_raw_parts($slice.sel_ptr, $len) };
             for (i, &idx) in sel.iter().enumerate() {
                 if i + PREFETCH_DIST < $len {
                     unsafe {
                         prefetch_read(
-                            src.as_ptr().add((sel[i + PREFETCH_DIST] - 1) as usize) as *const u8
+                            src.add((sel[i + PREFETCH_DIST] - 1) as usize) as *const u8
                         )
                     };
                 }
-                $buf.extend_from_slice(&src[(idx - 1) as usize].to_ne_bytes());
+                let v = unsafe { *src.add((idx - 1) as usize) };
+                $buf.extend_from_slice(&v.to_ne_bytes());
             }
         }
     }};
@@ -370,15 +378,18 @@ macro_rules! append_primitive {
 // `$f` maps S → a value whose `.to_ne_bytes()` is written to buf.
 macro_rules! append_transform {
     ($buf:expr, $slice:expr, $len:expr, $S:ty, $f:expr) => {{
-        let src = unsafe { std::slice::from_raw_parts($slice.data_ptr as *const $S, $len) };
         if $slice.sel_ptr.is_null() {
+            let src = unsafe { std::slice::from_raw_parts($slice.data_ptr as *const $S, $len) };
             for &v in src {
                 $buf.extend_from_slice(&($f)(v).to_ne_bytes());
             }
         } else {
+            // See `append_primitive!` for why scatter uses a raw pointer.
+            let src = $slice.data_ptr as *const $S;
             let sel = unsafe { std::slice::from_raw_parts($slice.sel_ptr, $len) };
             for &idx in sel {
-                $buf.extend_from_slice(&($f)(src[(idx - 1) as usize]).to_ne_bytes());
+                let v = unsafe { *src.add((idx - 1) as usize) };
+                $buf.extend_from_slice(&($f)(v).to_ne_bytes());
             }
         }
     }};
@@ -407,21 +418,25 @@ unsafe fn append_numeric(
         }
         COLUMN_TYPE_DECIMAL_INT128 | COLUMN_TYPE_UUID => {
             // 16-byte elements — no primitive type; copy as raw bytes.
-            let src = unsafe { std::slice::from_raw_parts(slice.data_ptr as *const u8, len * 16) };
             if slice.sel_ptr.is_null() {
+                let src =
+                    unsafe { std::slice::from_raw_parts(slice.data_ptr as *const u8, len * 16) };
                 buf.extend_from_slice(src);
             } else {
+                // See `append_primitive!` for why scatter uses a raw pointer.
+                let src = slice.data_ptr as *const u8;
                 let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
                 for (i, &idx) in sel.iter().enumerate() {
                     if i + PREFETCH_DIST < len {
                         unsafe {
                             prefetch_read(
-                                src.as_ptr().add((sel[i + PREFETCH_DIST] - 1) as usize * 16),
+                                src.add((sel[i + PREFETCH_DIST] - 1) as usize * 16),
                             )
                         };
                     }
                     let off = (idx - 1) as usize * 16;
-                    buf.extend_from_slice(&src[off..off + 16]);
+                    let chunk = unsafe { std::slice::from_raw_parts(src.add(off), 16) };
+                    buf.extend_from_slice(chunk);
                 }
             }
         }
