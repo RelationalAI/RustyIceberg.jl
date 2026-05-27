@@ -139,11 +139,19 @@ macro_rules! impl_with_batch_size {
 macro_rules! impl_scan_build {
     ($fn_name:ident, $scan_type:ident) => {
         #[no_mangle]
-        pub extern "C" fn $fn_name(scan: &mut *mut $scan_type) -> CResult {
+        pub extern "C" fn $fn_name(
+            scan: &mut *mut $scan_type,
+            error_out: *mut *mut std::os::raw::c_char,
+        ) -> CResult {
             if scan.is_null() || (*scan).is_null() {
                 return CResult::Error;
             }
+            // Take ownership and immediately null out *scan.  Any early return
+            // from this point on leaves *scan == null, which is safe to pass to
+            // the free function (impl_scan_free! guards against null inner ptrs).
             let scan_ref = unsafe { Box::from_raw(*scan) };
+            *scan = std::ptr::null_mut();
+
             if scan_ref.builder.is_none() {
                 return CResult::Error;
             }
@@ -162,18 +170,36 @@ macro_rules! impl_scan_build {
                     }));
                     CResult::Ok
                 }
-                Err(_) => CResult::Error,
+                Err(e) => {
+                    // Forward the classified error string to Julia via error_out.
+                    // The caller is responsible for freeing it with iceberg_destroy_cstring.
+                    if !error_out.is_null() {
+                        let classified = crate::error_codes::classify_iceberg(e);
+                        let msg = format!("{classified}");
+                        unsafe {
+                            *error_out = std::ffi::CString::new(msg).unwrap_or_default().into_raw();
+                        }
+                    }
+                    CResult::Error
+                }
             }
         }
     };
 }
 
-/// Macro to generate scan_free function for any scan type
+/// Macro to generate scan_free function for any scan type.
+///
+/// Guards against a null inner pointer (`*scan == null`) which can arise when
+/// `impl_scan_build!` returns an error — in that case the macro nulls `*scan`
+/// to prevent double-free but the caller still calls free for symmetry.
 macro_rules! impl_scan_free {
     ($fn_name:ident, $scan_type:ident) => {
         #[no_mangle]
         pub extern "C" fn $fn_name(scan: &mut *mut $scan_type) {
-            if !scan.is_null() {
+            // Check the *inner* pointer (*scan), not the outer reference (scan).
+            // The outer reference from Julia is never null; the inner pointer is
+            // null when build! failed and already freed the scan.
+            if !(*scan).is_null() {
                 unsafe {
                     let _ = Box::from_raw(*scan);
                     *scan = std::ptr::null_mut();

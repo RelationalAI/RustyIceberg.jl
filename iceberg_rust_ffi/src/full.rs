@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
-use crate::error_codes::{classified_error, classify_iceberg, STATE_RESOURCE_FREED};
+use crate::error_codes::{classified_error, classify_iceberg, IcebergErrorCode};
 use crate::scan_common::*;
 use crate::{
     IcebergArrowStream, IcebergArrowStreamResponse, IcebergFileScanStream,
@@ -166,12 +166,12 @@ export_runtime_op!(
     IcebergArrowStreamResponse,
     || {
         if scan.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &mut *scan };
         let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Scan not initialized"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Scan not initialized"));
         }
         let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr)?;
         Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))
@@ -209,12 +209,12 @@ export_runtime_op!(
     IcebergFileScanStreamResponse,
     || {
         if scan.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &mut *scan };
         let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Scan not initialized"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Scan not initialized"));
         }
         let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr)?;
         Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))

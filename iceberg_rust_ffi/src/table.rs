@@ -1,4 +1,4 @@
-use crate::error_codes::{classified_error, classify, classify_iceberg, STATE_RESOURCE_FREED};
+use crate::error_codes::{classified_error, classify, classify_iceberg, IcebergErrorCode};
 use crate::nested_pipeline::FileScan;
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
@@ -264,7 +264,7 @@ export_runtime_op!(
     IcebergFileScanResponse,
     || {
         if stream.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null file scan stream pointer"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null file scan stream pointer"));
         }
         let stream_ref = unsafe { &*stream };
         Ok(stream_ref)
@@ -329,7 +329,7 @@ export_runtime_op!(
     IcebergBatchResponse,
     || {
         if stream.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null stream pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null stream pointer provided"));
         }
         let stream_ref = unsafe { &*stream };
         Ok(stream_ref)

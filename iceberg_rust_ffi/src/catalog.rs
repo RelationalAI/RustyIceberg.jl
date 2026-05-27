@@ -1,4 +1,4 @@
-use crate::error_codes::{classified_error, classify, classify_iceberg, STATE_RESOURCE_FREED};
+use crate::error_codes::{classified_error, classify, classify_iceberg, IcebergErrorCode};
 use crate::response::{
     IcebergBoxedResponse, IcebergNestedStringListResponse, IcebergPropertyResponse,
     IcebergStringListResponse,
@@ -539,7 +539,7 @@ export_runtime_op!(
     IcebergCatalogResponse,
     || {
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
         // SAFETY: catalog was checked to be non-null above and came from FFI
         let catalog = unsafe { Box::from_raw(catalog) };
@@ -565,7 +565,7 @@ export_runtime_op!(
     crate::IcebergTableResponse,
     || {
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
@@ -591,7 +591,7 @@ export_runtime_op!(
     crate::IcebergTableResponse,
     || {
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
@@ -617,7 +617,7 @@ export_runtime_op!(
     IcebergStringListResponse,
     || {
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
@@ -641,7 +641,7 @@ export_runtime_op!(
     IcebergNestedStringListResponse,
     || {
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let parent_parts = if namespace_parts_len > 0 {
@@ -669,7 +669,7 @@ export_runtime_op!(
     IcebergBoolResponse,
     || {
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
@@ -739,7 +739,7 @@ export_runtime_op!(
     || {
         // Input validation
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         // Parse arguments
@@ -797,7 +797,7 @@ export_runtime_op!(
     || {
         // Input validation
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         // Parse arguments
@@ -829,7 +829,7 @@ export_runtime_op!(
     || {
         // Input validation
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         // Parse arguments
@@ -860,7 +860,7 @@ export_runtime_op!(
     || {
         // Input validation
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         // Parse arguments
@@ -887,7 +887,7 @@ export_runtime_op!(
     IcebergBoolResponse,
     || {
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
         // SAFETY: catalog was checked to be non-null above and came from FFI
         let catalog_ref = unsafe { &*catalog };
@@ -913,7 +913,7 @@ export_runtime_op!(
     IcebergCatalogResponse,
     || {
         if catalog.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
         // SAFETY: catalog was checked to be non-null above and came from Box::into_raw
         let catalog = unsafe { Box::from_raw(catalog) };

@@ -291,11 +291,16 @@ end
 Build the provided table scan object.
 """
 function build!(scan::Scan)
+    error_ptr = Ref{Ptr{Cchar}}(C_NULL)
     result = GC.@preserve scan @ccall rust_lib.iceberg_scan_build(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        error_ptr::Ref{Ptr{Cchar}}
     )::Cint
 
     if result != 0
+        if error_ptr[] != C_NULL
+            parse_and_throw(error_ptr[], "iceberg_scan_build")
+        end
         throw(IcebergException(
             STATE_RESOURCE_FREED,
             "Resource has been freed",

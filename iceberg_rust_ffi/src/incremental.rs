@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
-use crate::error_codes::{classified_error, classify_iceberg, STATE_RESOURCE_FREED};
+use crate::error_codes::{classified_error, classify_iceberg, IcebergErrorCode};
 use iceberg::scan::incremental::{IncrementalTableScan, IncrementalTableScanBuilder};
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, Context, NotifyGuard, RawResponse,
@@ -196,12 +196,12 @@ export_runtime_op!(
     IcebergUnzippedStreamsResponse,
     || {
         if scan.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &*scan };
         let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Incremental scan not initialized"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Incremental scan not initialized"));
         }
 
         // Determine concurrency (0 = auto-detect)
@@ -313,17 +313,17 @@ export_runtime_op!(
     IcebergIncrementalFileScanStreamResponse,
     || {
         if scan.is_null() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null scan pointer provided"));
         }
         let scan_ptr = unsafe { &*scan };
         let scan_ref = &scan_ptr.scan;
         if scan_ref.is_none() {
-            return Err(classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "Incremental scan not initialized"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Incremental scan not initialized"));
         }
         let file_io = scan_ptr
             .file_io
             .clone()
-            .ok_or_else(|| classified_error(STATE_RESOURCE_FREED, "Resource has been freed", "FileIO not available; create scan from table"))?;
+            .ok_or_else(|| classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "FileIO not available; create scan from table"))?;
         let (prefetch_depth, serialization_concurrency) =
             resolve_incremental_pipeline_params(scan_ptr);
         let batch_size = scan_ptr.batch_size.ok_or_else(|| {
