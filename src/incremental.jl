@@ -129,19 +129,10 @@ end
 """
     with_data_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
 
-Sets the data file concurrency level for the incremental scan.
+No-op (kept for API stability). The incremental pipeline derives its
+concurrency from `with_file_prefetch_depth!` only.
 """
-function with_data_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_data_file_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException("Failed to set data file concurrency limit for incremental scan", result))
-    end
-    return nothing
-end
+with_data_file_concurrency_limit!(::IncrementalScan, ::UInt) = nothing
 
 """
     with_manifest_entry_concurrency_limit!(scan::IncrementalScan, n::UInt)
@@ -163,7 +154,9 @@ end
 """
     with_batch_size!(scan::IncrementalScan, n::UInt)
 
-Sets the batch size for the incremental scan.
+Sets the batch size for the incremental scan. **Required**: must be called
+before streaming the scan; otherwise the Rust FFI will error out with
+"batch_size not set".
 """
 function with_batch_size!(scan::IncrementalScan, n::UInt)
     result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_batch_size(

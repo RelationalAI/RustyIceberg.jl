@@ -12,8 +12,7 @@ pub(crate) fn cpu_count() -> usize {
 }
 
 use anyhow::Result;
-use arrow_array::RecordBatch;
-use arrow_ipc::writer::StreamWriter;
+use arrow_array::{ffi as arrow_ffi, Array, RecordBatch, StructArray};
 
 // Import from object_store_ffi
 use object_store_ffi::{
@@ -48,8 +47,12 @@ mod record_batch_builder;
 // Profiling stats for the file-parallel pipeline
 mod pipeline_stats;
 
-// Ordered file-parallel pipeline
-mod ordered_file_pipeline;
+// Ordered file-parallel pipeline (shared helpers)
+mod nested_pipeline;
+
+// Full-scan pipeline entry points (composes `nested_pipeline` helpers
+// with an `ArrowReaderBuilder`-based per-file batch stream).
+mod full_pipeline;
 
 // Per-file nested pipeline for incremental scans
 mod incremental_pipeline;
@@ -121,18 +124,10 @@ impl RawResponse for IcebergResponse {
 }
 
 // Simple config for iceberg - only what we need
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 #[repr(C)]
 pub struct IcebergStaticConfig {
     n_threads: usize,
-}
-
-impl Default for IcebergStaticConfig {
-    fn default() -> Self {
-        IcebergStaticConfig {
-            n_threads: 0, // 0 means use tokio's default
-        }
-    }
 }
 
 // FFI structure for passing key-value properties
@@ -146,29 +141,36 @@ unsafe impl Send for PropertyEntry {}
 
 // Table structures are in the table module
 
-/// Helper function to serialize RecordBatch to Arrow IPC format
-// TODO: Switch to zero-copy once Arrow.jl supports C API.
-fn serialize_record_batch(batch: RecordBatch) -> Result<ArrowBatch> {
-    let buffer = Vec::new();
-    let mut stream_writer = StreamWriter::try_new(buffer, &batch.schema())?;
-    stream_writer.write(&batch)?;
-    stream_writer.finish()?;
-    let serialized_data = stream_writer.into_inner()?;
+/// Export a RecordBatch via the Arrow C Data Interface (zero-copy).
+///
+/// The batch is represented as a struct-typed (ArrowSchema, ArrowArray) pair
+/// where each column appears as a child.  Julia consumes it with
+/// `Arrow.from_c_data`.  `iceberg_arrow_batch_free` drops the inner
+/// `ArrowBatchInner`, which calls the arrow-rs `Drop` impls and frees all
+/// buffer Arcs.
+fn record_batch_to_c_ffi(batch: RecordBatch) -> Result<ArrowBatch> {
+    use crate::table::ArrowBatchInner;
 
-    let boxed_data = Box::new(serialized_data);
-    let data_ptr = boxed_data.as_ptr();
-    let length = boxed_data.len();
-    let rust_ptr = Box::into_raw(boxed_data) as *mut c_void;
+    let struct_array = StructArray::from(batch);
+    // to_ffi returns (FFI_ArrowArray, FFI_ArrowSchema) — array first, schema second.
+    let (ffi_array, ffi_schema) = arrow_ffi::to_ffi(&struct_array.to_data())?;
+
+    let mut inner = Box::new(ArrowBatchInner {
+        schema: ffi_schema,
+        array: ffi_array,
+    });
+    let schema_ptr = &mut inner.schema as *mut arrow_ffi::FFI_ArrowSchema;
+    let array_ptr = &mut inner.array as *mut arrow_ffi::FFI_ArrowArray;
+    let rust_ptr = Box::into_raw(inner) as *mut c_void;
 
     Ok(ArrowBatch {
-        data: data_ptr,
-        length,
+        schema: schema_ptr,
+        array: array_ptr,
         rust_ptr,
     })
 }
 
-/// Transform a stream of RecordBatches into a stream of serialized ArrowBatches
-/// with configurable parallel serialization concurrency
+/// Transform a stream of RecordBatches into a stream of C Data Interface ArrowBatches.
 pub(crate) fn transform_stream_with_parallel_serialization(
     stream: futures::stream::BoxStream<'static, Result<RecordBatch, iceberg::Error>>,
     concurrency: usize,
@@ -176,16 +178,7 @@ pub(crate) fn transform_stream_with_parallel_serialization(
     stream
         .map(|batch_result| async move {
             match batch_result {
-                Ok(record_batch) => {
-                    // Spawn blocking task and await immediately
-                    match tokio::task::spawn_blocking(move || serialize_record_batch(record_batch))
-                        .await
-                    {
-                        Ok(Ok(arrow_batch)) => Ok(arrow_batch),
-                        Ok(Err(e)) => Err(unexpected(e)),
-                        Err(e) => Err(unexpected(format!("Serialization task panicked: {e}"))),
-                    }
-                }
+                Ok(record_batch) => record_batch_to_c_ffi(record_batch).map_err(unexpected),
                 Err(e) => Err(unexpected(format!("Stream error: {e}"))),
             }
         })
@@ -201,7 +194,7 @@ pub extern "C" fn iceberg_init_runtime(
     result_callback: ResultCallback,
 ) -> CResult {
     // Set the result callback
-    if let Err(_) = RESULT_CB.set(result_callback) {
+    if RESULT_CB.set(result_callback).is_err() {
         return CResult::Error; // Already initialized
     }
 

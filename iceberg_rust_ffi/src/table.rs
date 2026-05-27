@@ -1,7 +1,8 @@
-use crate::ordered_file_pipeline::FileScan;
+use crate::nested_pipeline::FileScan;
 use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
+use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
@@ -32,17 +33,40 @@ pub struct IcebergArrowStream {
 
 unsafe impl Send for IcebergArrowStream {}
 
-/// Arrow batch serialized for FFI
-#[repr(C)]
-pub struct ArrowBatch {
-    pub data: *const u8,
-    pub length: usize,
-    pub rust_ptr: *mut std::ffi::c_void,
+/// Heap allocation backing one ArrowBatch.
+///
+/// `FFI_ArrowSchema` and `FFI_ArrowArray` must live at stable heap addresses
+/// because `ArrowBatch` is passed *by value* across the FFI boundary — Julia
+/// receives a copy of the struct. Storing the FFI structs inline in `ArrowBatch`
+/// would mean each copy carries its own values, but the raw pointers in
+/// `ArrowBatch::schema` / `::array` must keep pointing at the *original*
+/// allocation. Boxing them here pins them in place; the box address never
+/// changes regardless of how `ArrowBatch` is moved or copied.
+///
+/// Dropping this calls `Drop` on both FFI structs, which invokes the arrow-rs
+/// release callbacks and frees the buffer Arcs.
+pub(crate) struct ArrowBatchInner {
+    pub(crate) schema: FFI_ArrowSchema,
+    pub(crate) array: FFI_ArrowArray,
 }
 
-// SAFETY: ArrowBatch contains raw pointers that are owned by the FFI layer.
-// The pointers are allocated in Rust and deallocated via iceberg_arrow_batch_free,
-// making it safe to send between threads.
+// SAFETY: raw pointers inside FFI structs are owned exclusively by this batch.
+unsafe impl Send for ArrowBatchInner {}
+
+/// Arrow batch exported via Arrow C Data Interface.
+///
+/// `schema` and `array` point into the `ArrowBatchInner` owned by `rust_ptr`.
+/// `iceberg_arrow_batch_free` drops the inner allocation, which calls the
+/// arrow-rs release callbacks and frees all buffer data.
+#[repr(C)]
+pub struct ArrowBatch {
+    pub schema: *mut FFI_ArrowSchema,
+    pub array: *mut FFI_ArrowArray,
+    pub rust_ptr: *mut std::ffi::c_void, // Box<ArrowBatchInner>
+}
+
+// SAFETY: ArrowBatch contains raw pointers owned by the FFI layer; freed via
+// iceberg_arrow_batch_free.
 unsafe impl Send for ArrowBatch {}
 
 /// Type aliases for response types
@@ -122,6 +146,16 @@ impl RawResponse for IcebergFileScanResponse {
     fn set_payload(&mut self, payload: Option<Self::Payload>) {
         match payload.flatten() {
             Some(fs) => {
+                // Promote: this file is now active (a Julia consumer has
+                // picked it up). Lift the prefetch budget from
+                // MAX_PREFETCH_BUFFERS_OF_WAITING_FILE to
+                // MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE so the producer can
+                // fully fill the per-file mpsc. See `BufferedBatch::slot_sem`
+                // for the policy.
+                fs.slot_sem.add_permits(
+                    crate::nested_pipeline::MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
+                        - crate::nested_pipeline::MAX_PREFETCH_BUFFERS_OF_WAITING_FILE,
+                );
                 let filename = std::ffi::CString::new(fs.filename)
                     .unwrap_or_default()
                     .into_raw();
@@ -138,7 +172,6 @@ impl RawResponse for IcebergFileScanResponse {
 }
 
 /// Synchronous operations for table and batch management
-
 /// Free a table
 #[no_mangle]
 pub extern "C" fn iceberg_table_free(table: *mut IcebergTable) {
@@ -149,17 +182,19 @@ pub extern "C" fn iceberg_table_free(table: *mut IcebergTable) {
     }
 }
 
-/// Free an arrow batch
+/// Free an arrow batch.
+///
+/// Drops the `ArrowBatchInner` (via `rust_ptr`), which calls the arrow-rs
+/// release callbacks on the FFI structs and frees all buffer data.
 #[no_mangle]
 pub extern "C" fn iceberg_arrow_batch_free(batch: *mut ArrowBatch) {
     if batch.is_null() {
         return;
     }
-
     unsafe {
-        let batch_ref = Box::from_raw(batch);
-        if !batch_ref.rust_ptr.is_null() {
-            let _ = Box::from_raw(batch_ref.rust_ptr as *mut Vec<u8>);
+        let b = Box::from_raw(batch);
+        if !b.rust_ptr.is_null() {
+            drop(Box::from_raw(b.rust_ptr as *mut ArrowBatchInner));
         }
     }
 }
@@ -412,5 +447,93 @@ pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char 
             Err(_) => ptr::null_mut(),
         },
         Err(_) => ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nested_pipeline::{
+        FileScan, MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE, MAX_PREFETCH_BUFFERS_OF_WAITING_FILE,
+    };
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Semaphore};
+
+    /// `IcebergFileScanResponse::set_payload(Some(Some(fs)))` is the FFI
+    /// handoff that promotes a per-file producer's slot budget from
+    /// `MAX_PREFETCH_BUFFERS_OF_WAITING_FILE` to
+    /// `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE`. The empty `None` variant
+    /// must not touch the slot_sem.
+    #[test]
+    fn set_payload_promotes_slot_sem_to_attached_on_handoff() {
+        let slot_sem = Arc::new(Semaphore::new(MAX_PREFETCH_BUFFERS_OF_WAITING_FILE));
+        assert_eq!(
+            slot_sem.available_permits(),
+            MAX_PREFETCH_BUFFERS_OF_WAITING_FILE
+        );
+
+        // Build a minimal FileScan with an empty inner stream. We only
+        // care about the slot_sem promotion here, not stream draining.
+        let (_tx, rx) =
+            mpsc::channel::<Result<crate::nested_pipeline::BufferedBatch, iceberg::Error>>(1);
+        let fs = FileScan {
+            filename: "test.parquet".into(),
+            record_count: 0,
+            stream: crate::nested_pipeline::make_file_stream(rx),
+            slot_sem: slot_sem.clone(),
+        };
+
+        // Construct an empty response and hand off the FileScan.
+        let mut resp = IcebergFileScanResponse(IcebergBoxedResponse {
+            result: CResult::default(),
+            value: ptr::null_mut(),
+            error_message: ptr::null_mut(),
+            context: ptr::null(),
+        });
+        resp.set_payload(Some(Some(fs)));
+
+        assert_eq!(
+            slot_sem.available_permits(),
+            MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
+        );
+
+        // Free the FFI-owned bits we allocated via set_payload so the
+        // test doesn't leak (CString filename + boxed IcebergFileScan +
+        // boxed inner stream).
+        let scan_ptr = resp.0.value;
+        assert!(!scan_ptr.is_null());
+        unsafe {
+            let scan = Box::from_raw(scan_ptr);
+            drop(std::ffi::CString::from_raw(scan.filename));
+            drop(Box::from_raw(scan.stream));
+        }
+    }
+
+    /// The `None` handoff (used by the stream-exhausted path on the nested
+    /// FFI) must leave the slot_sem untouched — there is no consumer to
+    /// activate the file, so the producer should not be allowed to expand
+    /// its prefetch window.
+    #[test]
+    fn set_payload_does_not_promote_on_end_of_stream() {
+        let slot_sem = Arc::new(Semaphore::new(MAX_PREFETCH_BUFFERS_OF_WAITING_FILE));
+        let mut resp = IcebergFileScanResponse(IcebergBoxedResponse {
+            result: CResult::default(),
+            value: ptr::null_mut(),
+            error_message: ptr::null_mut(),
+            context: ptr::null(),
+        });
+        // Both `None` (outer "no payload") and `Some(None)` (stream
+        // returned `None` from try_next) must skip the promotion.
+        resp.set_payload(Some(None));
+        assert_eq!(
+            slot_sem.available_permits(),
+            MAX_PREFETCH_BUFFERS_OF_WAITING_FILE
+        );
+        resp.set_payload(None);
+        assert_eq!(
+            slot_sem.available_permits(),
+            MAX_PREFETCH_BUFFERS_OF_WAITING_FILE
+        );
+        assert!(resp.0.value.is_null());
     }
 }

@@ -17,7 +17,7 @@ export table_open, free_table, new_scan, free_scan!
 export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_current_snapshot_id, table_schema
 export select_columns!, with_batch_size!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
 export with_file_column!, with_pos_column!, with_file_prefetch_depth!
-export scan!, next_batch, free_batch, free_stream
+export scan!, next_batch, next_arrow_batch, foreach_arrow_batch, free_batch, free_stream
 export scan_nested!, nested_arrow_stream, next_file_scan
 export FileScanStream, file_scan_record_count, file_scan_filename, file_scan_arrow_stream
 export free_file_scan!, free_file_scan_stream!
@@ -258,18 +258,19 @@ const Table = Ptr{Cvoid}
 """
     ArrowBatch
 
-Structure representing a batch of Arrow data from the Rust FFI layer.
+Structure representing a batch of Arrow data from the Rust FFI layer (Arrow C Data Interface).
 
 # Fields
-- `data::Ptr{UInt8}`: Pointer to the Arrow IPC format data
-- `length::Csize_t`: Length of the data buffer in bytes
-- `rust_ptr::Ptr{Cvoid}`: Rust-side pointer for memory management
+- `schema::Ptr{Arrow.ArrowSchema}`: Pointer to the struct-typed ArrowSchema; children are the columns.
+- `array::Ptr{Arrow.ArrowArray}`: Pointer to the corresponding ArrowArray.
+- `rust_ptr::Ptr{Cvoid}`: Rust-side pointer for memory management.
 
-Batches should be freed using `free_batch` after processing.
+Use `Arrow.from_c_data(batch.schema, batch.array)` to obtain a zero-copy `CImportedArray`.
+Materialise or copy any data you need before calling `free_batch`, which releases the Rust memory.
 """
 struct ArrowBatch
-    data::Ptr{UInt8}
-    length::Csize_t
+    schema::Ptr{Arrow.ArrowSchema}
+    array::Ptr{Arrow.ArrowArray}
     rust_ptr::Ptr{Cvoid}
 end
 

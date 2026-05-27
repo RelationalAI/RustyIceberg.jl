@@ -99,7 +99,12 @@ macro_rules! impl_scan_builder_method {
     };
 }
 
-/// Macro to generate with_batch_size function for any scan type
+/// Macro to generate with_batch_size function for any scan type.
+///
+/// Writes `n` into the FFI struct's `batch_size` field (read by the nested
+/// pipeline's `ArrowReaderBuilder`) AND calls `b.with_batch_size(Some(n))` on
+/// the scan builder so that the legacy `to_unzipped_arrow()` path (incremental
+/// flat scans) also respects the requested batch size.
 macro_rules! impl_with_batch_size {
     ($fn_name:ident, $scan_type:ident) => {
         #[no_mangle]

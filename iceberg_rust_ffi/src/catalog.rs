@@ -185,6 +185,7 @@ enum CatalogKind {
 /// Opaque catalog handle for FFI.
 /// Stores the catalog backend plus any pre-creation configuration (authenticator,
 /// credentials-loader flag).
+#[derive(Default)]
 pub struct IcebergCatalog {
     /// `None` while the catalog is being configured (before `create_rest` /
     /// `create_memory` is called). Using `Option` here rather than adding an
@@ -205,16 +206,6 @@ pub struct IcebergCatalog {
 // 4. The struct is manually freed via iceberg_catalog_free(), not via Drop
 unsafe impl Send for IcebergCatalog {}
 unsafe impl Sync for IcebergCatalog {}
-
-impl Default for IcebergCatalog {
-    fn default() -> Self {
-        IcebergCatalog {
-            kind: None,
-            authenticator: None,
-            use_credentials_loader: false,
-        }
-    }
-}
 
 impl IcebergCatalog {
     /// Create and initialize a REST catalog with optional authenticator
@@ -433,6 +424,7 @@ impl IcebergCatalog {
 
     /// Internal method to create a table with optional credential vending
     /// Create a new table in the catalog with optional credential vending
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_table(
         &self,
         namespace_parts: Vec<String>,
