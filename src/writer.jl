@@ -721,8 +721,10 @@ function Base.push!(
 end
 
 """
-    push!(chunk::RowChunk, strings::AbstractVector{<:AbstractString};
-          validity=nothing, sel=nothing)
+    push!(
+        chunk::RowChunk, strings::AbstractVector{<:AbstractString};
+        validity=nothing, sel=nothing
+    )
 
 Add a string column slice to the chunk. Accepts any `AbstractString` element type
 (`String`, `SubString{String}`, Arrow's `VariableSizeString`, …) — `pointer(s)` and
