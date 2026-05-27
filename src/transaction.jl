@@ -39,7 +39,11 @@ free_transaction!(tx)
 function Transaction(table::Table)
     ptr = @ccall rust_lib.iceberg_transaction_new(table::Table)::Ptr{Cvoid}
     if ptr == C_NULL
-        throw(IcebergException("Failed to create transaction: null table pointer"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "null table pointer passed to Transaction()",
+        ))
     end
     return Transaction(ptr, table)
 end
@@ -74,10 +78,18 @@ free_transaction!(tx)
 """
 function commit(tx::Transaction, catalog::Catalog)
     if tx.ptr == C_NULL
-        throw(IcebergException("Transaction has been freed or consumed"))
+        throw(IcebergException(
+            STATE_TRANSACTION_CONSUMED,
+            "Transaction has already been committed or rolled back",
+            "Transaction has been freed or consumed",
+        ))
     end
     if catalog.ptr == C_NULL
-        throw(IcebergException("Catalog has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Catalog has been freed",
+        ))
     end
 
     response = TableResponse()
@@ -182,7 +194,11 @@ free_fast_append_action!(action)
 function FastAppendAction()
     ptr = @ccall rust_lib.iceberg_fast_append_action_new()::Ptr{Cvoid}
     if ptr == C_NULL
-        throw(IcebergException("Failed to create FastAppendAction"))
+        throw(IcebergException(
+            INTERNAL,
+            "Internal error (please report this as a bug)",
+            "iceberg_fast_append_action_new returned null",
+        ))
     end
     return FastAppendAction(ptr)
 end
@@ -219,10 +235,18 @@ The `data_files` handle is consumed by this operation and marked as such
 """
 function add_data_files(action::FastAppendAction, data_files::DataFiles)
     if action.ptr == C_NULL
-        throw(IcebergException("FastAppendAction has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "FastAppendAction has been freed",
+        ))
     end
     if data_files.ptr == C_NULL
-        throw(IcebergException("DataFiles has been freed or consumed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "DataFiles has been freed or consumed",
+        ))
     end
 
     try
@@ -235,12 +259,7 @@ function add_data_files(action::FastAppendAction, data_files::DataFiles)
         )::Cint
 
         if result != 0
-            error_msg = "add_data_files failed"
-            if error_message_ptr[] != C_NULL
-                error_msg = unsafe_string(error_message_ptr[])
-                @ccall rust_lib.iceberg_destroy_cstring(error_message_ptr[]::Ptr{Cchar})::Cint
-            end
-            throw(IcebergException(error_msg))
+            parse_and_throw(error_message_ptr[], "add_data_files / apply")
         end
     finally
         # Free the now-empty DataFiles container and mark as consumed
@@ -268,10 +287,18 @@ This applies all accumulated data files as a single FastAppendAction to the tran
 """
 function apply(action::FastAppendAction, tx::Transaction)
     if action.ptr == C_NULL
-        throw(IcebergException("FastAppendAction has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "FastAppendAction has been freed",
+        ))
     end
     if tx.ptr == C_NULL
-        throw(IcebergException("Transaction has been freed or consumed"))
+        throw(IcebergException(
+            STATE_TRANSACTION_CONSUMED,
+            "Transaction has already been committed or rolled back",
+            "Transaction has been freed or consumed",
+        ))
     end
 
     error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
@@ -283,12 +310,7 @@ function apply(action::FastAppendAction, tx::Transaction)
     )::Cint
 
     if result != 0
-        error_msg = "apply failed"
-        if error_message_ptr[] != C_NULL
-            error_msg = unsafe_string(error_message_ptr[])
-            @ccall rust_lib.iceberg_destroy_cstring(error_message_ptr[]::Ptr{Cchar})::Cint
-        end
-        throw(IcebergException(error_msg))
+        parse_and_throw(error_message_ptr[], "add_data_files / apply")
     end
 
     return nothing
