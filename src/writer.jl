@@ -682,14 +682,16 @@ just `pointer(data)` and pointer arithmetic, no allocation beyond the chunk's ow
   `sel` is also provided, Rust gathers validity through `sel` alongside the value gather:
   bit `sel[i] - 1` of the source bitmap becomes bit `i` of the output bitmap. When `sel`
   is omitted, source and output positions coincide.
-- `sel`: optional `Vector{Int64}` of 1-based indices into `data` for scattered access.
-  If omitted, all rows of `data` are used sequentially.
+- `sel`: optional contiguous `AbstractVector{Int64}` of 1-based indices into `data` for
+  scattered access. Output row count is `length(sel)`. If omitted, all rows of `data`
+  are used sequentially. A `view(sel_buf, 1:n)` is accepted — useful when the caller
+  has a sel buffer with stale capacity beyond the live region.
 """
 function Base.push!(
     chunk::RowChunk,
     data::AbstractVector{T};
     validity::Union{Nothing, BitVector} = nothing,
-    sel::Union{Nothing, Vector{Int64}} = nothing,
+    sel::Union{Nothing, AbstractVector{Int64}} = nothing,
 ) where T
     len = sel === nothing ? length(data) : length(sel)
 
@@ -732,8 +734,9 @@ chunk.
 
 - `validity`: optional `BitVector` *aligned to `strings`* — `length(validity) >= length(strings)`,
   bit `i` describes whether `strings[i]` is valid (`true` = valid, `false` = null).
-- `sel`: optional `Vector{Int64}` of 1-based indices into `strings` for scattered access.
-  If omitted, all rows of `strings` are used sequentially.
+- `sel`: optional contiguous `AbstractVector{Int64}` of 1-based indices into `strings`
+  for scattered access. Output row count is `length(sel)`. If omitted, all rows of
+  `strings` are used sequentially.
 
 Unlike the numeric `push!`, the value gather is performed here on the Julia side
 (`pointer(strings[sel[i]])` per row) because Rust can't walk a Julia `AbstractString`
@@ -746,7 +749,7 @@ function Base.push!(
     chunk::RowChunk,
     strings::AbstractVector{<:AbstractString};
     validity::Union{Nothing, BitVector} = nothing,
-    sel::Union{Nothing, Vector{Int64}} = nothing,
+    sel::Union{Nothing, AbstractVector{Int64}} = nothing,
 )
     pos = length(chunk.slices) + 1
     # Grow the per-position pool to cover this column's slot. Lazy and retained across
