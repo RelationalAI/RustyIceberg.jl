@@ -143,10 +143,10 @@ end
 end
 
 # ---------------------------------------------------------------------------
-# partial overwrite — delete one file, add one file
+# partial overwrite — delete only the first file, second file survives intact
 # ---------------------------------------------------------------------------
 
-@testset "Overwrite deletes one file and adds one file" begin
+@testset "Overwrite only deletes explicitly listed files" begin
     mktempdir() do warehouse
         cat = catalog_create_memory(warehouse)
         table = C_NULL; v1 = C_NULL; v2 = C_NULL; v3 = C_NULL
@@ -156,42 +156,33 @@ end
 
             # append two separate files
             v1 = _write_and_append(table, cat,
-                (id=Int64[1,2,3], value=[1.0,2.0,3.0]); prefix="keep")
+                (id=Int64[1,2,3], value=[1.0,2.0,3.0]); prefix="first")
             v2 = _write_and_append(v1, cat,
-                (id=Int64[4,5], value=[4.0,5.0]); prefix="replace")
+                (id=Int64[4,5], value=[4.0,5.0]); prefix="second")
 
             @test length(read_table_data(v2).id) == 5
 
-            # list all files, then delete only the second one by rebuilding
-            # the delete list from the file written in v2 (prefix="replace")
-            files_to_delete = RustyIceberg.with_data_file_writer(v2; prefix="replace2") do w
-                write(w, (id=Int64[4,5], value=[4.0,5.0]))
-            end
-            # We can't surgically pick one file from list_data_files yet,
-            # so instead we write a fresh replacement file and delete nothing
-            # from the "keep" batch.  Simulate partial delete by listing
-            # files from v2, deleting all, and re-appending the kept rows.
-            old_all = list_data_files(v2)
-            kept_files = RustyIceberg.with_data_file_writer(v2; prefix="kept") do w
-                write(w, (id=Int64[1,2,3], value=[1.0,2.0,3.0]))
-            end
-            new_replace = RustyIceberg.with_data_file_writer(v2; prefix="newreplace") do w
-                write(w, (id=Int64[40,50], value=[40.0,50.0]))
-            end
-            free_data_files!(files_to_delete)
+            # list_data_files on v1 returns only the first file
+            files_from_v1 = list_data_files(v1)
 
+            # replacement for the first file
+            new_file = RustyIceberg.with_data_file_writer(v2; prefix="new") do w
+                write(w, (id=Int64[10,11,12], value=[10.0,11.0,12.0]))
+            end
+
+            # overwrite: delete only the first file, add replacement
+            # the second file (rows 4,5) is NOT in the delete list → it survives
             v3 = RustyIceberg.with_transaction(v2, cat) do tx
                 with_overwrite(tx) do action
-                    add_data_files(action, kept_files)
-                    add_data_files(action, new_replace)
-                    delete_data_files(action, old_all)
+                    add_data_files(action, new_file)
+                    delete_data_files(action, files_from_v1)
                 end
             end
 
             after = read_table_data(v3)
             @test !isnothing(after)
-            @test length(after.id) == 5
-            @test sort(after.id) == [1, 2, 3, 40, 50]
+            @test length(after.id) == 5   # 2 surviving + 3 new
+            @test sort(after.id) == [4, 5, 10, 11, 12]
         finally
             table != C_NULL && free_table(table)
             v1    != C_NULL && free_table(v1)
@@ -200,7 +191,7 @@ end
             free_catalog!(cat)
         end
     end
-    println("✅ Overwrite deletes one file and adds one replacement file")
+    println("✅ Overwrite only deletes explicitly listed files; others survive")
 end
 
 # ---------------------------------------------------------------------------
