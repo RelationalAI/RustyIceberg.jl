@@ -882,8 +882,8 @@ function Base.append!(writer::DataFileWriter, chunk::RowChunk)
         )::Int32
     end
     ret == 0 || throw(IcebergException(
-        INTERNAL,
-        "Internal error (please report this as a bug)",
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
         "append! failed (see close_writer for details)",
     ))
     return writer
@@ -907,8 +907,8 @@ function flush!(writer::DataFileWriter)
     ))
     ret = @ccall rust_lib.iceberg_writer_flush(writer.ptr::Ptr{Cvoid})::Int32
     ret == 0 || throw(IcebergException(
-        INTERNAL,
-        "Internal error (please report this as a bug)",
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
         "flush! failed (see close_writer for details)",
     ))
     return writer
