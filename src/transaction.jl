@@ -350,3 +350,168 @@ function with_fast_append(f::Function, tx::Transaction)
     end
     return nothing
 end
+
+# ---------------------------------------------------------------------------
+# OverwriteAction
+# ---------------------------------------------------------------------------
+
+const DataFilesResponse = Response{Ptr{Cvoid}}
+
+"""
+    OverwriteAction
+
+Opaque handle that accumulates files to add and files to delete for an atomic
+overwrite snapshot (`Operation::Overwrite`).
+
+Create with `OverwriteAction()`, populate with `add_data_files` and
+`delete_data_files`, then commit with `apply`. Use `with_overwrite` for
+automatic cleanup.
+"""
+mutable struct OverwriteAction
+    ptr::Ptr{Cvoid}
+end
+
+function OverwriteAction()
+    ptr = @ccall rust_lib.iceberg_overwrite_action_new()::Ptr{Cvoid}
+    if ptr == C_NULL
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "iceberg_overwrite_action_new returned null"))
+    end
+    return OverwriteAction(ptr)
+end
+
+function free_overwrite_action!(action::OverwriteAction)
+    if action.ptr == C_NULL
+        return nothing
+    end
+    @ccall rust_lib.iceberg_overwrite_action_free(action.ptr::Ptr{Cvoid})::Cvoid
+    action.ptr = C_NULL
+    return nothing
+end
+
+"""
+    add_data_files(action::OverwriteAction, data_files::DataFiles)
+
+Add new data files to be written in the overwrite snapshot.
+The `data_files` handle is consumed by this call.
+"""
+function add_data_files(action::OverwriteAction, data_files::DataFiles)
+    if action.ptr == C_NULL
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "OverwriteAction has been freed"))
+    end
+    if data_files.ptr == C_NULL
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "DataFiles has been freed or consumed"))
+    end
+    err_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    ret = @ccall rust_lib.iceberg_overwrite_action_add_data_files(
+        action.ptr::Ptr{Cvoid},
+        data_files.ptr::Ptr{Cvoid},
+        err_ptr::Ptr{Ptr{Cchar}}
+    )::Cint
+    if ret != 0
+        msg = err_ptr[] != C_NULL ? unsafe_string(err_ptr[]) : "unknown error"
+        throw(IcebergException(UNEXPECTED, "Failed to add data files to overwrite action", msg))
+    end
+    data_files.ptr = C_NULL
+    return nothing
+end
+
+"""
+    delete_data_files(action::OverwriteAction, data_files::DataFiles)
+
+Mark existing data files for deletion in the overwrite snapshot.
+The `data_files` handle is consumed by this call.
+"""
+function delete_data_files(action::OverwriteAction, data_files::DataFiles)
+    if action.ptr == C_NULL
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "OverwriteAction has been freed"))
+    end
+    if data_files.ptr == C_NULL
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "DataFiles has been freed or consumed"))
+    end
+    err_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    ret = @ccall rust_lib.iceberg_overwrite_action_delete_data_files(
+        action.ptr::Ptr{Cvoid},
+        data_files.ptr::Ptr{Cvoid},
+        err_ptr::Ptr{Ptr{Cchar}}
+    )::Cint
+    if ret != 0
+        msg = err_ptr[] != C_NULL ? unsafe_string(err_ptr[]) : "unknown error"
+        throw(IcebergException(UNEXPECTED, "Failed to add delete files to overwrite action", msg))
+    end
+    data_files.ptr = C_NULL
+    return nothing
+end
+
+"""
+    apply(action::OverwriteAction, tx::Transaction)
+
+Apply the overwrite action to the transaction.
+"""
+function apply(action::OverwriteAction, tx::Transaction)
+    if action.ptr == C_NULL
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "OverwriteAction has been freed"))
+    end
+    if tx.ptr == C_NULL
+        throw(IcebergException(STATE_TRANSACTION_CONSUMED, "Transaction has already been committed or rolled back", "Transaction has been freed or consumed"))
+    end
+    err_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    ret = @ccall rust_lib.iceberg_overwrite_action_apply(
+        action.ptr::Ptr{Cvoid},
+        tx.ptr::Ptr{Cvoid},
+        err_ptr::Ptr{Ptr{Cchar}}
+    )::Cint
+    if ret != 0
+        msg = err_ptr[] != C_NULL ? unsafe_string(err_ptr[]) : "unknown error"
+        throw(IcebergException(UNEXPECTED, "Failed to apply overwrite action", msg))
+    end
+    return nothing
+end
+
+"""
+    with_overwrite(f::Function, tx::Transaction)
+
+Create an `OverwriteAction`, pass it to `f`, then apply it to `tx`.
+Frees the action automatically even on error.
+
+# Example
+```julia
+updated_table = with_transaction(table, catalog) do tx
+    with_overwrite(tx) do action
+        add_data_files(action, new_files)
+        delete_data_files(action, old_files)
+    end
+end
+```
+"""
+function with_overwrite(f::Function, tx::Transaction)
+    action = OverwriteAction()
+    try
+        f(action)
+        apply(action, tx)
+    finally
+        free_overwrite_action!(action)
+    end
+    return nothing
+end
+
+"""
+    list_data_files(table::Table) -> DataFiles
+
+Return a `DataFiles` handle containing all live data files in the current
+snapshot of `table`. Returns an empty handle if the table has no snapshot.
+
+The returned `DataFiles` must be freed with `free_data_files!` if not passed
+to `delete_data_files`.
+"""
+function list_data_files(table::Table)
+    response = DataFilesResponse()
+    async_ccall(response, table) do handle
+        @ccall rust_lib.iceberg_table_list_data_files(
+            table::Table,
+            response::Ref{DataFilesResponse},
+            handle::Ptr{Cvoid}
+        )::Cint
+    end
+    @throw_on_error(response, "list_data_files", IcebergException)
+    return DataFiles(response.value)
+end

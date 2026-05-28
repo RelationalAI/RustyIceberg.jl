@@ -47,6 +47,7 @@ export IcebergTimestampNs, IcebergTimestamptzNs
 export IcebergString, IcebergUuid, IcebergBinary, IcebergDecimal
 export Transaction, DataFiles, free_transaction!, free_data_files!, commit, transaction
 export FastAppendAction, free_fast_append_action!, add_data_files, apply, with_fast_append
+export OverwriteAction, free_overwrite_action!, delete_data_files, with_overwrite, list_data_files
 export DataFileWriter, free_writer!, close_writer, write_columns, set_encode_workers!
 export WriterConfig, CompressionCodec, UNCOMPRESSED, SNAPPY, GZIP, LZ4, ZSTD
 export ColumnDescriptor, ColumnBatch, ColumnType
