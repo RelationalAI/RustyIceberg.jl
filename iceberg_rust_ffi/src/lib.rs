@@ -34,6 +34,9 @@ mod table;
 // Transaction module
 mod transaction;
 
+// DataFiles handle, inspection helpers, and table listing
+mod data_file;
+
 // Writer module
 mod writer;
 
@@ -65,6 +68,7 @@ pub use error_codes::{classified_error, classify, ClassifiedError};
 
 // Re-export types and functions from submodules
 pub use catalog::{IcebergBoolResponse, IcebergCatalog, IcebergCatalogResponse};
+pub use data_file::{IcebergDataFiles, IcebergDataFilesResponse};
 pub use full::IcebergScan;
 pub use incremental::{IcebergIncrementalScan, IcebergUnzippedStreamsResponse};
 pub use response::{
@@ -76,10 +80,7 @@ pub use table::{
     IcebergFileScan, IcebergFileScanResponse, IcebergFileScanStream, IcebergFileScanStreamResponse,
     IcebergTable, IcebergTableResponse,
 };
-pub use transaction::{
-    IcebergDataFiles, IcebergDataFilesResponse, IcebergOverwriteAction, IcebergTransaction,
-    IcebergTransactionResponse,
-};
+pub use transaction::{IcebergOverwriteAction, IcebergTransaction, IcebergTransactionResponse};
 pub use writer::{
     IcebergDataFileWriter, IcebergDataFileWriterResponse, IcebergWriterCloseResponse,
 };

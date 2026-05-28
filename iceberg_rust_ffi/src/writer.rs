@@ -95,11 +95,11 @@ impl ParquetWriterPropertiesFFI {
 use crate::error_codes::{classified_error, classify, IcebergErrorCode};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
-use crate::transaction::IcebergDataFiles;
 use crate::util::parse_c_string;
 use crate::writer_columns::{
     build_arrow_array_gathered, ColumnDescriptor, GatheredColumnDescriptor, SliceRef,
 };
+use crate::IcebergDataFiles;
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
