@@ -1566,7 +1566,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.9.0"
-source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=a4a353577ad7414b065770ba970c1353325a3adb#a4a353577ad7414b065770ba970c1353325a3adb"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=50b335f371ad66a5d9fb9cc0cf4b5906ec88c003#50b335f371ad66a5d9fb9cc0cf4b5906ec88c003"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1623,7 +1623,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-rest"
 version = "0.9.0"
-source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=a4a353577ad7414b065770ba970c1353325a3adb#a4a353577ad7414b065770ba970c1353325a3adb"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=50b335f371ad66a5d9fb9cc0cf4b5906ec88c003#50b335f371ad66a5d9fb9cc0cf4b5906ec88c003"
 dependencies = [
  "async-trait",
  "chrono",
