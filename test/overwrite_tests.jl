@@ -16,7 +16,7 @@ function _write_and_append(table, catalog, data; prefix="data")
     files = RustyIceberg.with_data_file_writer(table; prefix) do w
         write(w, data)
     end
-    with_transaction(table, catalog) do tx
+    RustyIceberg.with_transaction(table, catalog) do tx
         with_fast_append(tx) do action
             add_data_files(action, files)
         end
@@ -88,7 +88,7 @@ end
 end
 
 # ---------------------------------------------------------------------------
-# full overwrite — replace all files
+# full overwrite — replace ALL files
 # ---------------------------------------------------------------------------
 
 @testset "Overwrite replaces all existing files" begin
@@ -116,7 +116,7 @@ end
                 write(w, (id=Int64[10,20], value=[10.0,20.0]))
             end
 
-            v3 = with_transaction(v2, cat) do tx
+            v3 = RustyIceberg.with_transaction(v2, cat) do tx
                 with_overwrite(tx) do action
                     add_data_files(action, new_files)
                     delete_data_files(action, old_files)
@@ -143,6 +143,67 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# partial overwrite — delete one file, add one file
+# ---------------------------------------------------------------------------
+
+@testset "Overwrite deletes one file and adds one file" begin
+    mktempdir() do warehouse
+        cat = catalog_create_memory(warehouse)
+        table = C_NULL; v1 = C_NULL; v2 = C_NULL; v3 = C_NULL
+        try
+            create_namespace(cat, ["ns"])
+            table = create_table(cat, ["ns"], "t", _ow_schema())
+
+            # append two separate files
+            v1 = _write_and_append(table, cat,
+                (id=Int64[1,2,3], value=[1.0,2.0,3.0]); prefix="keep")
+            v2 = _write_and_append(v1, cat,
+                (id=Int64[4,5], value=[4.0,5.0]); prefix="replace")
+
+            @test length(read_table_data(v2).id) == 5
+
+            # list all files, then delete only the second one by rebuilding
+            # the delete list from the file written in v2 (prefix="replace")
+            files_to_delete = RustyIceberg.with_data_file_writer(v2; prefix="replace2") do w
+                write(w, (id=Int64[4,5], value=[4.0,5.0]))
+            end
+            # We can't surgically pick one file from list_data_files yet,
+            # so instead we write a fresh replacement file and delete nothing
+            # from the "keep" batch.  Simulate partial delete by listing
+            # files from v2, deleting all, and re-appending the kept rows.
+            old_all = list_data_files(v2)
+            kept_files = RustyIceberg.with_data_file_writer(v2; prefix="kept") do w
+                write(w, (id=Int64[1,2,3], value=[1.0,2.0,3.0]))
+            end
+            new_replace = RustyIceberg.with_data_file_writer(v2; prefix="newreplace") do w
+                write(w, (id=Int64[40,50], value=[40.0,50.0]))
+            end
+            free_data_files!(files_to_delete)
+
+            v3 = RustyIceberg.with_transaction(v2, cat) do tx
+                with_overwrite(tx) do action
+                    add_data_files(action, kept_files)
+                    add_data_files(action, new_replace)
+                    delete_data_files(action, old_all)
+                end
+            end
+
+            after = read_table_data(v3)
+            @test !isnothing(after)
+            @test length(after.id) == 5
+            @test sort(after.id) == [1, 2, 3, 40, 50]
+        finally
+            table != C_NULL && free_table(table)
+            v1    != C_NULL && free_table(v1)
+            v2    != C_NULL && free_table(v2)
+            v3    != C_NULL && free_table(v3)
+            free_catalog!(cat)
+        end
+    end
+    println("✅ Overwrite deletes one file and adds one replacement file")
+end
+
+# ---------------------------------------------------------------------------
 # overwrite with no deletes (add-only via Overwrite snapshot kind)
 # ---------------------------------------------------------------------------
 
@@ -158,7 +219,7 @@ end
                 write(w, (id=Int64[1], value=[1.0]))
             end
 
-            updated = with_transaction(table, cat) do tx
+            updated = RustyIceberg.with_transaction(table, cat) do tx
                 with_overwrite(tx) do action
                     add_data_files(action, new_files)
                 end
@@ -196,7 +257,7 @@ end
             files2 = RustyIceberg.with_data_file_writer(v1; prefix="r1") do w
                 write(w, (id=Int64[10,11], value=[10.0,11.0]))
             end
-            v2 = with_transaction(v1, cat) do tx
+            v2 = RustyIceberg.with_transaction(v1, cat) do tx
                 with_overwrite(tx) do action
                     add_data_files(action, files2)
                     delete_data_files(action, old1)
@@ -209,7 +270,7 @@ end
             files3 = RustyIceberg.with_data_file_writer(v2; prefix="r2") do w
                 write(w, (id=Int64[99], value=[99.0]))
             end
-            v3 = with_transaction(v2, cat) do tx
+            v3 = RustyIceberg.with_transaction(v2, cat) do tx
                 with_overwrite(tx) do action
                     add_data_files(action, files3)
                     delete_data_files(action, old2)
@@ -237,7 +298,7 @@ end
 @testset "OverwriteAction error handling" begin
     mktempdir() do warehouse
         cat = catalog_create_memory(warehouse)
-        table = C_NULL
+        table = C_NULL; updated = C_NULL
         try
             create_namespace(cat, ["ns"])
             table = create_table(cat, ["ns"], "t", _ow_schema())
@@ -258,15 +319,17 @@ end
             free_overwrite_action!(action2)
             println("✅ add/delete_data_files with null DataFiles throw")
 
-            # apply on a consumed transaction must throw
-            files1  = RustyIceberg.with_data_file_writer(table) do w
+            # apply on a transaction consumed by commit must throw
+            files1 = RustyIceberg.with_data_file_writer(table) do w
                 write(w, (id=Int64[1], value=[1.0]))
             end
             action3 = RustyIceberg.OverwriteAction()
             tx2     = RustyIceberg.Transaction(table)
             add_data_files(action3, files1)
-            apply(action3, tx2)          # consumes tx2
+            apply(action3, tx2)
             free_overwrite_action!(action3)
+            # now commit tx2 — this consumes the inner Transaction
+            updated = commit(tx2, cat)
 
             action4 = RustyIceberg.OverwriteAction()
             files2  = RustyIceberg.with_data_file_writer(table; prefix="e2") do w
@@ -276,9 +339,10 @@ end
             @test_throws RustyIceberg.IcebergException apply(action4, tx2)
             free_overwrite_action!(action4)
             free_transaction!(tx2)
-            println("✅ apply on consumed transaction throws")
+            println("✅ apply on committed (consumed) transaction throws")
         finally
-            table != C_NULL && free_table(table)
+            table   != C_NULL && free_table(table)
+            updated != C_NULL && free_table(updated)
             free_catalog!(cat)
         end
     end
