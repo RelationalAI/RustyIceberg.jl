@@ -309,9 +309,8 @@ end
             snap2 = table_current_snapshot_id(v2)
             @test !isnothing(snap2)
 
-            # table should now be empty
-            data2 = read_table_data(v2)
-            @test length(data2.id) == 0
+            # table should now be empty (read_table_data returns nothing when no batches)
+            @test isnothing(read_table_data(v2))
 
             # fast append populates the table again
             v3 = _write_and_append(v2, cat,
