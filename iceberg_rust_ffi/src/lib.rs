@@ -76,7 +76,10 @@ pub use table::{
     IcebergFileScan, IcebergFileScanResponse, IcebergFileScanStream, IcebergFileScanStreamResponse,
     IcebergTable, IcebergTableResponse,
 };
-pub use transaction::{IcebergDataFiles, IcebergTransaction, IcebergTransactionResponse};
+pub use transaction::{
+    IcebergDataFiles, IcebergDataFilesResponse, IcebergOverwriteAction, IcebergTransaction,
+    IcebergTransactionResponse,
+};
 pub use writer::{
     IcebergDataFileWriter, IcebergDataFileWriterResponse, IcebergWriterCloseResponse,
 };
