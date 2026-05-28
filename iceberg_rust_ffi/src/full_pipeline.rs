@@ -35,7 +35,7 @@ fn read_one_full_scan_file(
     task: FileScanTask,
 ) -> iceberg::Result<iceberg::scan::ArrowRecordBatchStream> {
     let task_stream = Box::pin(futures::stream::once(async { Ok(task) }));
-    reader.read(task_stream)
+    reader.read(task_stream).map(|r| r.stream())
 }
 
 /// Full-scan entry point — wraps `create_nested_pipeline` with a closure
