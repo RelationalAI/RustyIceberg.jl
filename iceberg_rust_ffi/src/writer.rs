@@ -225,7 +225,10 @@ impl GlobalWorkerPool {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            let mut guard = self.active_writers.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self
+                .active_writers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             guard.push(state.clone());
         }
     }
@@ -235,7 +238,10 @@ impl GlobalWorkerPool {
         if !state.registered.swap(false, Ordering::AcqRel) {
             return;
         }
-        let mut guard = self.active_writers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .active_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let target = state as *const WriterState;
         guard.retain(|s| Arc::as_ptr(s) != target);
     }
@@ -243,7 +249,10 @@ impl GlobalWorkerPool {
     /// Snapshot the active-writers list. Returns Arc clones so subsequent encoding does
     /// not hold the list lock.
     fn snapshot(&self) -> Vec<Arc<WriterState>> {
-        let guard = self.active_writers.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .active_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.clone()
     }
 }
@@ -265,8 +274,7 @@ fn try_claim_writer(pool: &GlobalWorkerPool) -> Option<Arc<WriterState>> {
         if w.queue_len.load(Ordering::Acquire) == 0 {
             continue;
         }
-        if w
-            .busy
+        if w.busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
@@ -476,9 +484,8 @@ fn get_or_init_encode_pool() -> &'static GlobalWorkerPool {
             })
             .ok()
             .expect("encode pool initialized twice");
-        let pool_ref: &'static GlobalWorkerPool = GLOBAL_ENCODE_POOL
-            .get()
-            .expect("pool was just installed");
+        let pool_ref: &'static GlobalWorkerPool =
+            GLOBAL_ENCODE_POOL.get().expect("pool was just installed");
 
         // Spawn N async worker tasks on the tokio runtime. Each task runs
         // `encode_worker_loop`, which awaits at I/O boundaries inside `w.write()` —
@@ -583,6 +590,7 @@ fn arrow_type_to_column_type(dt: &DataType) -> Result<i32, anyhow::Error> {
 /// # Safety
 /// Caller must ensure no other thread is accessing the writer at the same time. The FFI
 /// contract is one Julia thread per writer.
+#[allow(clippy::mut_from_ref)]
 unsafe fn get_or_init_builder(
     writer_ref: &IcebergDataFileWriter,
 ) -> Result<&mut RecordBatchBuilder, anyhow::Error> {
@@ -737,10 +745,7 @@ pub extern "C" fn iceberg_writer_free(writer: *mut IcebergDataFileWriter) {
             // Set the poison flag BEFORE taking the writer out, so any encode task that
             // currently holds the writer outside the Mutex (across its `.await`) will see
             // `poisoned == true` when it goes to put the writer back, and drop it instead.
-            boxed
-                .writer_state
-                .poisoned
-                .store(true, Ordering::Release);
+            boxed.writer_state.poisoned.store(true, Ordering::Release);
             // Poison the ConcreteDataFileWriter so any in-flight pool tasks return an error
             // rather than writing to a partially-freed writer.
             let _ = boxed.writer_state.writer.lock().unwrap().take();
@@ -1178,10 +1183,8 @@ mod tests {
         // distinct writers. With <4 workers in the pool this would fail; on any modern
         // dev machine `available_parallelism() >= 4`.
         for chunk in completions.chunks(4) {
-            let distinct: std::collections::HashSet<usize> = chunk
-                .iter()
-                .map(|(wid, _)| writer_ids[wid])
-                .collect();
+            let distinct: std::collections::HashSet<usize> =
+                chunk.iter().map(|(wid, _)| writer_ids[wid]).collect();
             assert_eq!(
                 distinct.len(),
                 4,
@@ -1220,9 +1223,7 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 for batch_idx in 0..(BATCHES_PER_WRITER / 4) {
                     for (wi, w) in writers.iter().enumerate() {
-                        let id = (tid as i64) * 1_000_000
-                            + (wi as i64) * 10_000
-                            + batch_idx as i64;
+                        let id = (tid as i64) * 1_000_000 + (wi as i64) * 10_000 + batch_idx as i64;
                         push(pool, w, batch_with_id(id));
                     }
                 }

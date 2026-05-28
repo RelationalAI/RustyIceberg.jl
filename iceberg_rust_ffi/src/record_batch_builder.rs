@@ -87,11 +87,7 @@ impl ColumnValues {
                 bytes: Vec::new(),
                 // Start empty; finalize_and_reset right-sizes to the actual slice length
                 // after the first flush, so we never hold a 4MB coalesce_rows-sized Vec.
-                offsets: {
-                    let mut v = Vec::new();
-                    v.push(0i32);
-                    v
-                },
+                offsets: vec![0i32],
             },
             _ => {
                 let bpr = column_bytes_per_row(column_type).max(8); // fallback 8 for unknown
@@ -228,7 +224,7 @@ unsafe fn append_to_state(
     if state.is_nullable {
         if !slice.validity_ptr.is_null() {
             let out_start = state.rows;
-            let needed = (out_start + len + 7) / 8;
+            let needed = (out_start + len).div_ceil(8);
             if !state.has_nulls {
                 // First null slice: backfill all prior rows as valid.
                 state.null_bits.resize(needed, 0u8);
@@ -251,16 +247,15 @@ unsafe fn append_to_state(
             // earlier rows in a separate phase.
             if !slice.sel_ptr.is_null() {
                 let sel = unsafe { std::slice::from_raw_parts(slice.sel_ptr, len) };
-                for i in 0..len {
-                    let src_idx = (sel[i] - 1) as usize;
-                    let b =
-                        unsafe { (*slice.validity_ptr.add(src_idx / 8) >> (src_idx % 8)) & 1 };
+                for (i, &s) in sel.iter().enumerate() {
+                    let src_idx = (s - 1) as usize;
+                    let b = unsafe { (*slice.validity_ptr.add(src_idx / 8) >> (src_idx % 8)) & 1 };
                     let pos = out_start + i;
                     state.null_bits[pos / 8] |= b << (pos % 8);
                 }
-            } else if out_start % 8 == 0 {
+            } else if out_start.is_multiple_of(8) {
                 let dst = out_start / 8;
-                let n_bytes = (len + 7) / 8;
+                let n_bytes = len.div_ceil(8);
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         slice.validity_ptr,
@@ -270,7 +265,7 @@ unsafe fn append_to_state(
                 }
                 // Mask off garbage bits beyond `len` in the last byte so they don't
                 // corrupt a subsequent coalesced slice that shares that byte.
-                if len % 8 != 0 {
+                if !len.is_multiple_of(8) {
                     let tail = state.null_bits.last_mut().unwrap();
                     *tail &= (1u8 << (len % 8)) - 1;
                 }
@@ -284,7 +279,7 @@ unsafe fn append_to_state(
         } else if state.has_nulls {
             // All-valid slice but nulls seen earlier — extend bitmap with 1s.
             let out_start = state.rows;
-            let needed = (out_start + len + 7) / 8;
+            let needed = (out_start + len).div_ceil(8);
             if state.null_bits.len() < needed {
                 state.null_bits.resize(needed, 0u8);
             }
@@ -380,9 +375,7 @@ macro_rules! append_primitive {
             for (i, &idx) in sel.iter().enumerate() {
                 if i + PREFETCH_DIST < $len {
                     unsafe {
-                        prefetch_read(
-                            src.add((sel[i + PREFETCH_DIST] - 1) as usize) as *const u8
-                        )
+                        prefetch_read(src.add((sel[i + PREFETCH_DIST] - 1) as usize) as *const u8)
                     };
                 }
                 let v = unsafe { *src.add((idx - 1) as usize) };
@@ -447,9 +440,7 @@ unsafe fn append_numeric(
                 for (i, &idx) in sel.iter().enumerate() {
                     if i + PREFETCH_DIST < len {
                         unsafe {
-                            prefetch_read(
-                                src.add((sel[i + PREFETCH_DIST] - 1) as usize * 16),
-                            )
+                            prefetch_read(src.add((sel[i + PREFETCH_DIST] - 1) as usize * 16))
                         };
                     }
                     let off = (idx - 1) as usize * 16;
@@ -523,7 +514,7 @@ fn finalize_and_reset(
         ColumnValues::Bool(v) => {
             let cap = v.capacity();
             let taken = std::mem::replace(v, Vec::with_capacity(cap));
-            let mut bits = vec![0u8; (rows + 7) / 8];
+            let mut bits = vec![0u8; rows.div_ceil(8)];
             for (i, &b) in taken.iter().enumerate().take(rows) {
                 if b != 0 {
                     bits[i / 8] |= 1u8 << (i % 8);
@@ -671,7 +662,5 @@ fn set_bits_range(bits: &mut [u8], start: usize, end: usize) {
 /// Reinterpret a typed slice as bytes.
 #[inline(always)]
 unsafe fn as_bytes<T>(s: &[T]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * std::mem::size_of::<T>())
-    }
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
 }
