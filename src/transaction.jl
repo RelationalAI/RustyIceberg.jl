@@ -401,15 +401,14 @@ function add_data_files(action::OverwriteAction, data_files::DataFiles)
     if data_files.ptr == C_NULL
         throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "DataFiles has been freed or consumed"))
     end
-    err_ptr = Ref{Ptr{Cchar}}(C_NULL)
-    ret = @ccall rust_lib.iceberg_overwrite_action_add_data_files(
+    error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    result = @ccall rust_lib.iceberg_overwrite_action_add_data_files(
         action.ptr::Ptr{Cvoid},
         data_files.ptr::Ptr{Cvoid},
-        err_ptr::Ptr{Ptr{Cchar}}
+        error_message_ptr::Ref{Ptr{Cchar}}
     )::Cint
-    if ret != 0
-        msg = err_ptr[] != C_NULL ? unsafe_string(err_ptr[]) : "unknown error"
-        throw(IcebergException(UNEXPECTED, "Failed to add data files to overwrite action", msg))
+    if result != 0
+        parse_and_throw(error_message_ptr[], "overwrite add_data_files")
     end
     data_files.ptr = C_NULL
     return nothing
@@ -428,15 +427,14 @@ function delete_data_files(action::OverwriteAction, data_files::DataFiles)
     if data_files.ptr == C_NULL
         throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "DataFiles has been freed or consumed"))
     end
-    err_ptr = Ref{Ptr{Cchar}}(C_NULL)
-    ret = @ccall rust_lib.iceberg_overwrite_action_delete_data_files(
+    error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    result = @ccall rust_lib.iceberg_overwrite_action_delete_data_files(
         action.ptr::Ptr{Cvoid},
         data_files.ptr::Ptr{Cvoid},
-        err_ptr::Ptr{Ptr{Cchar}}
+        error_message_ptr::Ref{Ptr{Cchar}}
     )::Cint
-    if ret != 0
-        msg = err_ptr[] != C_NULL ? unsafe_string(err_ptr[]) : "unknown error"
-        throw(IcebergException(UNEXPECTED, "Failed to add delete files to overwrite action", msg))
+    if result != 0
+        parse_and_throw(error_message_ptr[], "overwrite delete_data_files")
     end
     data_files.ptr = C_NULL
     return nothing
@@ -454,15 +452,14 @@ function apply(action::OverwriteAction, tx::Transaction)
     if tx.ptr == C_NULL
         throw(IcebergException(STATE_TRANSACTION_CONSUMED, "Transaction has already been committed or rolled back", "Transaction has been freed or consumed"))
     end
-    err_ptr = Ref{Ptr{Cchar}}(C_NULL)
-    ret = @ccall rust_lib.iceberg_overwrite_action_apply(
+    error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    result = @ccall rust_lib.iceberg_overwrite_action_apply(
         action.ptr::Ptr{Cvoid},
         tx.ptr::Ptr{Cvoid},
-        err_ptr::Ptr{Ptr{Cchar}}
+        error_message_ptr::Ref{Ptr{Cchar}}
     )::Cint
-    if ret != 0
-        msg = err_ptr[] != C_NULL ? unsafe_string(err_ptr[]) : "unknown error"
-        throw(IcebergException(UNEXPECTED, "Failed to apply overwrite action", msg))
+    if result != 0
+        parse_and_throw(error_message_ptr[], "overwrite apply")
     end
     return nothing
 end
