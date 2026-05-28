@@ -1,3 +1,4 @@
+use crate::error_codes::{classified_error, classify, classify_iceberg, IcebergErrorCode};
 use crate::response::{
     IcebergBoxedResponse, IcebergNestedStringListResponse, IcebergPropertyResponse,
     IcebergStringListResponse,
@@ -538,7 +539,7 @@ export_runtime_op!(
     IcebergCatalogResponse,
     || {
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
         // SAFETY: catalog was checked to be non-null above and came from FFI
         let catalog = unsafe { Box::from_raw(catalog) };
@@ -550,7 +551,7 @@ export_runtime_op!(
     async {
         let (catalog, uri, props) = result_tuple;
         // create_rest takes ownership and returns the catalog
-        catalog.create_rest(uri, props).await
+        catalog.create_rest(uri, props).await.map_err(|e| classify(e))
     },
     catalog: *mut IcebergCatalog,
     uri: *const c_char,
@@ -564,7 +565,7 @@ export_runtime_op!(
     crate::IcebergTableResponse,
     || {
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
@@ -576,7 +577,7 @@ export_runtime_op!(
     result_tuple,
     async {
         let (catalog_ref, namespace_parts, table_name) = result_tuple;
-        catalog_ref.load_table(namespace_parts, table_name).await
+        catalog_ref.load_table(namespace_parts, table_name).await.map_err(|e| classify(e))
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -590,7 +591,7 @@ export_runtime_op!(
     crate::IcebergTableResponse,
     || {
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
@@ -602,7 +603,7 @@ export_runtime_op!(
     result_tuple,
     async {
         let (catalog_ref, namespace_parts, table_name) = result_tuple;
-        catalog_ref.load_table_with_credentials(namespace_parts, table_name).await
+        catalog_ref.load_table_with_credentials(namespace_parts, table_name).await.map_err(|e| classify(e))
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -616,7 +617,7 @@ export_runtime_op!(
     IcebergStringListResponse,
     || {
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
@@ -627,7 +628,7 @@ export_runtime_op!(
     result_tuple,
     async {
         let (catalog_ref, namespace_parts) = result_tuple;
-        catalog_ref.list_tables(namespace_parts).await
+        catalog_ref.list_tables(namespace_parts).await.map_err(|e| classify(e))
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -640,7 +641,7 @@ export_runtime_op!(
     IcebergNestedStringListResponse,
     || {
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let parent_parts = if namespace_parts_len > 0 {
@@ -655,7 +656,7 @@ export_runtime_op!(
     result_tuple,
     async {
         let (catalog_ref, parent_parts) = result_tuple;
-        catalog_ref.list_namespaces(parent_parts).await
+        catalog_ref.list_namespaces(parent_parts).await.map_err(|e| classify(e))
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -668,7 +669,7 @@ export_runtime_op!(
     IcebergBoolResponse,
     || {
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         let namespace_parts = parse_string_array(namespace_parts_ptr, namespace_parts_len)?;
@@ -680,7 +681,7 @@ export_runtime_op!(
     result_tuple,
     async {
         let (catalog_ref, namespace_parts, table_name) = result_tuple;
-        catalog_ref.table_exists(namespace_parts, table_name).await
+        catalog_ref.table_exists(namespace_parts, table_name).await.map_err(|e| classify(e))
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -738,7 +739,7 @@ export_runtime_op!(
     || {
         // Input validation
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         // Parse arguments
@@ -775,7 +776,7 @@ export_runtime_op!(
     result_tuple,
     async {
         let (catalog_ref, namespace_parts, table_name, schema, partition_spec, sort_order, props, load_credentials) = result_tuple;
-        catalog_ref.create_table(namespace_parts, table_name, schema, partition_spec, sort_order, props, load_credentials).await
+        catalog_ref.create_table(namespace_parts, table_name, schema, partition_spec, sort_order, props, load_credentials).await.map_err(|e| classify(e))
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -796,7 +797,7 @@ export_runtime_op!(
     || {
         // Input validation
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         // Parse arguments
@@ -811,8 +812,8 @@ export_runtime_op!(
     result_tuple,
     async {
         let (catalog_ref, namespace_parts, props) = result_tuple;
-        catalog_ref.create_namespace(namespace_parts, props).await?;
-        Ok::<bool, anyhow::Error>(true) // Return true to indicate success
+        catalog_ref.create_namespace(namespace_parts, props).await.map_err(|e| classify(e))?;
+        Ok::<bool, anyhow::Error>(true)
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -828,7 +829,7 @@ export_runtime_op!(
     || {
         // Input validation
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         // Parse arguments
@@ -843,8 +844,8 @@ export_runtime_op!(
     result_tuple,
     async {
         let (catalog_ref, namespace_parts, table_name) = result_tuple;
-        catalog_ref.drop_table(namespace_parts, table_name).await?;
-        Ok::<bool, anyhow::Error>(true) // Return true to indicate success
+        catalog_ref.drop_table(namespace_parts, table_name).await.map_err(|e| classify(e))?;
+        Ok::<bool, anyhow::Error>(true)
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -859,7 +860,7 @@ export_runtime_op!(
     || {
         // Input validation
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
 
         // Parse arguments
@@ -873,8 +874,8 @@ export_runtime_op!(
     result_tuple,
     async {
         let (catalog_ref, namespace_parts) = result_tuple;
-        catalog_ref.drop_namespace(namespace_parts).await?;
-        Ok::<bool, anyhow::Error>(true) // Return true to indicate success
+        catalog_ref.drop_namespace(namespace_parts).await.map_err(|e| classify(e))?;
+        Ok::<bool, anyhow::Error>(true)
     },
     catalog: *mut IcebergCatalog,
     namespace_parts_ptr: *const *const c_char,
@@ -886,7 +887,7 @@ export_runtime_op!(
     IcebergBoolResponse,
     || {
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
         // SAFETY: catalog was checked to be non-null above and came from FFI
         let catalog_ref = unsafe { &*catalog };
@@ -895,7 +896,7 @@ export_runtime_op!(
     catalog_ref,
     async {
         if let Some(CatalogKind::Rest(cat)) = &catalog_ref.kind {
-            cat.invalidate_token().await?;
+            cat.invalidate_token().await.map_err(|e| classify_iceberg(e))?;
         }
         Ok::<bool, anyhow::Error>(true)
     },
@@ -912,7 +913,7 @@ export_runtime_op!(
     IcebergCatalogResponse,
     || {
         if catalog.is_null() {
-            return Err(anyhow::anyhow!("Null catalog pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null catalog pointer provided"));
         }
         // SAFETY: catalog was checked to be non-null above and came from Box::into_raw
         let catalog = unsafe { Box::from_raw(catalog) };
@@ -923,7 +924,7 @@ export_runtime_op!(
     args,
     async {
         let (catalog, warehouse, props) = args;
-        catalog.create_memory(warehouse, props).await
+        catalog.create_memory(warehouse, props).await.map_err(|e| classify(e))
     },
     catalog: *mut IcebergCatalog,
     warehouse_path: *const c_char,

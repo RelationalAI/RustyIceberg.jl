@@ -51,7 +51,11 @@ function select_columns!(scan::Scan, column_names::Vector{String})
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to select columns", result))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_select_columns returned $result",
+        ))
     end
     return nothing
 end
@@ -76,7 +80,11 @@ function with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set manifest file concurrency limit", result))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_with_manifest_file_concurrency_limit returned $result",
+        ))
     end
     return nothing
 end
@@ -93,7 +101,11 @@ function with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set manifest entry concurrency limit", result))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_with_manifest_entry_concurrency_limit returned $result",
+        ))
     end
     return nothing
 end
@@ -112,7 +124,11 @@ function with_batch_size!(scan::Scan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set batch size", result))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_with_batch_size returned $result",
+        ))
     end
     return nothing
 end
@@ -138,7 +154,11 @@ function with_file_column!(scan::Scan)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to add file column to scan", result))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_with_file_column returned $result",
+        ))
     end
     return nothing
 end
@@ -164,7 +184,11 @@ function with_pos_column!(scan::Scan)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to add pos column to scan", result))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_with_pos_column returned $result",
+        ))
     end
     return nothing
 end
@@ -194,7 +218,11 @@ function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set serialization concurrency limit", result))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_with_serialization_concurrency_limit returned $result",
+        ))
     end
     return nothing
 end
@@ -214,7 +242,11 @@ function with_file_prefetch_depth!(scan::Scan, n::UInt)
         n::Csize_t
     )::Cint
     if result != 0
-        throw(IcebergException("Failed to set file prefetch depth", result))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_with_file_prefetch_depth returned $result",
+        ))
     end
     return nothing
 end
@@ -244,7 +276,11 @@ function with_snapshot_id!(scan::Scan, snapshot_id::Int64)
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to set snapshot ID", result))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_with_snapshot_id returned $result",
+        ))
     end
     return nothing
 end
@@ -255,12 +291,21 @@ end
 Build the provided table scan object.
 """
 function build!(scan::Scan)
+    error_ptr = Ref{Ptr{Cchar}}(C_NULL)
     result = GC.@preserve scan @ccall rust_lib.iceberg_scan_build(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}}
+        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
+        error_ptr::Ref{Ptr{Cchar}}
     )::Cint
 
     if result != 0
-        throw(IcebergException("Failed to build scan", result))
+        if error_ptr[] != C_NULL
+            parse_and_throw(error_ptr[], "iceberg_scan_build")
+        end
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "iceberg_scan_build returned $result",
+        ))
     end
     return nothing
 end

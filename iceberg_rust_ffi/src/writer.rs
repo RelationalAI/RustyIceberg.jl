@@ -96,6 +96,7 @@ impl ParquetWriterPropertiesFFI {
     }
 }
 
+use crate::error_codes::{classified_error, classify, classify_iceberg, IcebergErrorCode};
 use crate::record_batch_builder::{RecordBatchBuilder, DEFAULT_COALESCE_ROWS};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
@@ -339,10 +340,7 @@ async fn encode_one_batch(state: Arc<WriterState>, batch: RecordBatch) {
 
     let (mut writer_opt, result) = match writer_opt {
         Some(mut w) => {
-            let r = w
-                .write(batch)
-                .await
-                .map_err(|e| anyhow::anyhow!("write batch: {}", e));
+            let r = w.write(batch).await.map_err(classify_iceberg);
             (Some(w), r)
         }
         None => (None, Err(anyhow::anyhow!("writer already closed"))),
@@ -762,10 +760,10 @@ export_runtime_op!(
     IcebergDataFileWriterResponse,
     || {
         if table.is_null() {
-            return Err(anyhow::anyhow!("Null table pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null table pointer provided"));
         }
         if parquet_props.is_null() {
-            return Err(anyhow::anyhow!("Null parquet_props pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null parquet_props pointer provided"));
         }
 
         let prefix_str = parse_c_string(prefix, "prefix")?;
@@ -918,7 +916,7 @@ export_runtime_op!(
     IcebergWriterCloseResponse,
     || {
         if writer.is_null() {
-            return Err(anyhow::anyhow!("Null writer pointer provided"));
+            return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Null writer pointer provided"));
         }
         let writer_ref = unsafe { &mut *writer };
         Ok(writer_ref)
@@ -959,7 +957,7 @@ export_runtime_op!(
 
         // Propagate any encode error
         if let Some(e) = state.error.lock().unwrap().take() {
-            return Err(e);
+            return Err(classify(e));
         }
 
         // Take the concrete writer and finalize the Parquet file
@@ -968,12 +966,12 @@ export_runtime_op!(
             .lock()
             .unwrap()
             .take()
-            .ok_or_else(|| anyhow::anyhow!("Writer already closed"))?;
+            .ok_or_else(|| classified_error(IcebergErrorCode::STATE_WRITER_CLOSED, "Writer has already been closed", "Writer already closed"))?;
 
         let data_files = concrete
             .close()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to close writer: {}", e))?;
+            .map_err(|e| classify(anyhow::anyhow!("Failed to close writer: {}", e)))?;
 
         Ok::<IcebergDataFiles, anyhow::Error>(IcebergDataFiles { data_files })
     },

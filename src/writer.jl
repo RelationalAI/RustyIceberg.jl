@@ -163,7 +163,9 @@ function set_encode_workers!(n::Int)
     n > 0 || throw(ArgumentError("n must be positive, got $n"))
     ret = @ccall rust_lib.iceberg_set_encode_workers(n::Cint)::Int32
     ret == 0 || throw(IcebergException(
-        "set_encode_workers! must be called before creating any DataFileWriter"
+        INTERNAL,
+        "Internal error (please report this as a bug)",
+        "set_encode_workers! must be called before creating any DataFileWriter",
     ))
     return nothing
 end
@@ -369,7 +371,11 @@ end
 """
 function Base.write(writer::DataFileWriter, data)
     if writer.ptr == C_NULL
-        throw(IcebergException("Writer has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Writer has been freed",
+        ))
     end
 
     # Serialize data to Arrow IPC format with field ID metadata
@@ -409,7 +415,11 @@ write(writer, arrow_table)
 """
 function Base.write(writer::DataFileWriter, table::Arrow.Table)
     if writer.ptr == C_NULL
-        throw(IcebergException("Writer has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Writer has been freed",
+        ))
     end
 
     # Serialize Arrow.Table to IPC format with field ID metadata
@@ -429,7 +439,11 @@ function _write_ipc_bytes(writer::DataFileWriter, ipc_bytes::Vector{UInt8})
             length(ipc_bytes)::Csize_t,
         )::Int32
     end
-    ret == 0 || throw(IcebergException("write failed (see writer close for details)"))
+    ret == 0 || throw(IcebergException(
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
+        "write failed (see writer close for details)",
+    ))
     return nothing
 end
 
@@ -470,7 +484,11 @@ free_writer!(writer)  # Also frees data_files
 """
 function close_writer(writer::DataFileWriter)
     if writer.ptr == C_NULL
-        throw(IcebergException("Writer has been freed"))
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Writer has been freed",
+        ))
     end
 
     response = WriterCloseResponse()
@@ -846,8 +864,16 @@ When the accumulated window reaches the coalesce size the writer auto-flushes a
 `RecordBatch` to the encode pool. `append!` calls are appended in order — no reordering.
 """
 function Base.append!(writer::DataFileWriter, chunk::RowChunk)
-    writer.ptr == C_NULL && throw(IcebergException("Writer has been freed"))
-    isempty(chunk.slices) && throw(IcebergException("RowChunk has no columns"))
+    writer.ptr == C_NULL && throw(IcebergException(
+        STATE_RESOURCE_FREED,
+        "Resource has been freed",
+        "Writer has been freed",
+    ))
+    isempty(chunk.slices) && throw(IcebergException(
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
+        "RowChunk has no columns",
+    ))
     ret = GC.@preserve chunk begin
         @ccall rust_lib.iceberg_writer_append(
             writer.ptr::Ptr{Cvoid},
@@ -855,7 +881,11 @@ function Base.append!(writer::DataFileWriter, chunk::RowChunk)
             length(chunk.slices)::Csize_t,
         )::Int32
     end
-    ret == 0 || throw(IcebergException("append! failed (see close_writer for details)"))
+    ret == 0 || throw(IcebergException(
+        INTERNAL,
+        "Internal error (please report this as a bug)",
+        "append! failed (see close_writer for details)",
+    ))
     return writer
 end
 
@@ -870,8 +900,16 @@ without waiting for the natural coalesce-window boundary. No-op if the buffer is
 when the caller wants control over flush timing.
 """
 function flush!(writer::DataFileWriter)
-    writer.ptr == C_NULL && throw(IcebergException("Writer has been freed"))
+    writer.ptr == C_NULL && throw(IcebergException(
+        STATE_RESOURCE_FREED,
+        "Resource has been freed",
+        "Writer has been freed",
+    ))
     ret = @ccall rust_lib.iceberg_writer_flush(writer.ptr::Ptr{Cvoid})::Int32
-    ret == 0 || throw(IcebergException("flush! failed (see close_writer for details)"))
+    ret == 0 || throw(IcebergException(
+        INTERNAL,
+        "Internal error (please report this as a bug)",
+        "flush! failed (see close_writer for details)",
+    ))
     return writer
 end

@@ -36,6 +36,9 @@ include("catalog_tests.jl")
 # Include scan tests after runtime initialization
 include("scan_tests.jl")
 
+# Include error condition tests
+include("error_tests.jl")
+
 # Include transaction tests
 include("transaction_tests.jl")
 
