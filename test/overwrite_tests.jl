@@ -283,6 +283,58 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# fast append after full overwrite (table cleared then re-populated)
+# ---------------------------------------------------------------------------
+
+@testset "Fast append after full overwrite" begin
+    mktempdir() do warehouse
+        cat = catalog_create_memory(warehouse)
+        table = C_NULL; v1 = C_NULL; v2 = C_NULL; v3 = C_NULL
+        try
+            create_namespace(cat, ["ns"])
+            table = create_table(cat, ["ns"], "t", _ow_schema())
+
+            # seed the table with some rows
+            v1 = _write_and_append(table, cat,
+                (id=Int64[1,2,3], value=[1.0,2.0,3.0]))
+            @test length(read_table_data(v1).id) == 3
+
+            # overwrite with empty set — delete everything, add nothing
+            old_files = list_data_files(v1)
+            v2 = RustyIceberg.with_transaction(v1, cat) do tx
+                with_overwrite(tx) do action
+                    delete_data_files(action, old_files)
+                end
+            end
+            snap2 = table_current_snapshot_id(v2)
+            @test !isnothing(snap2)
+
+            # table should now be empty
+            data2 = read_table_data(v2)
+            @test length(data2.id) == 0
+
+            # fast append populates the table again
+            v3 = _write_and_append(v2, cat,
+                (id=Int64[10,20], value=[10.0,20.0]); prefix="post")
+            snap3 = table_current_snapshot_id(v3)
+            @test !isnothing(snap3)
+            @test snap3 != snap2
+
+            data3 = read_table_data(v3)
+            @test length(data3.id) == 2
+            @test sort(data3.id) == [10, 20]
+        finally
+            table != C_NULL && free_table(table)
+            v1    != C_NULL && free_table(v1)
+            v2    != C_NULL && free_table(v2)
+            v3    != C_NULL && free_table(v3)
+            free_catalog!(cat)
+        end
+    end
+    println("✅ Fast append after full overwrite yields only the new rows")
+end
+
+# ---------------------------------------------------------------------------
 # error handling
 # ---------------------------------------------------------------------------
 

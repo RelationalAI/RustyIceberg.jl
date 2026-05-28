@@ -35,11 +35,10 @@ fn read_one_append_file(
 ) -> iceberg::Result<iceberg::scan::ArrowRecordBatchStream> {
     let append = futures::stream::once(async { Ok(task) }).boxed();
     let delete = futures::stream::empty::<iceberg::Result<DeleteScanTask>>().boxed();
-    let UnzippedIncrementalScanResult { appends, .. } =
-        StreamsInto::<ArrowReader, UnzippedIncrementalScanResult>::stream(
-            (append, delete),
-            reader,
-        )?;
+    let UnzippedIncrementalScanResult { appends, .. } = StreamsInto::<
+        ArrowReader,
+        UnzippedIncrementalScanResult,
+    >::stream((append, delete), reader)?;
     Ok(appends)
 }
 
@@ -81,15 +80,17 @@ pub async fn create_incremental_nested_pipeline(
 
     // Delete stream: StreamsInto with empty append stream routes all delete
     // tasks through the iceberg reader machinery.
-    let UnzippedIncrementalScanResult { deletes: delete_arrow, .. } =
-        StreamsInto::<ArrowReader, UnzippedIncrementalScanResult>::stream(
-            (
-                futures::stream::empty::<iceberg::Result<AppendedFileScanTask>>().boxed(),
-                delete_tasks,
-            ),
-            build_reader(file_io, batch_size),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create delete stream: {e}"))?;
+    let UnzippedIncrementalScanResult {
+        deletes: delete_arrow,
+        ..
+    } = StreamsInto::<ArrowReader, UnzippedIncrementalScanResult>::stream(
+        (
+            futures::stream::empty::<iceberg::Result<AppendedFileScanTask>>().boxed(),
+            delete_tasks,
+        ),
+        build_reader(file_io, batch_size),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to create delete stream: {e}"))?;
 
     let delete_stream = IcebergArrowStream {
         stream: AsyncMutex::new(crate::transform_stream_with_parallel_serialization(

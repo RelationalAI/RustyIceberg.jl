@@ -8,8 +8,8 @@ use crate::error_codes::{classified_error, classify_iceberg, IcebergErrorCode};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
 use iceberg::spec::DataFile;
-use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use iceberg::spec::ManifestContentType;
+use iceberg::transaction::{ApplyTransactionAction, Transaction};
 
 // FFI exports
 use object_store_ffi::{
@@ -85,6 +85,7 @@ impl IcebergFastAppendAction {
 }
 
 /// Opaque handle accumulating data files for an OverwriteAction.
+#[derive(Default)]
 pub struct IcebergOverwriteAction {
     added_files: Vec<DataFile>,
     deleted_files: Vec<DataFile>,
@@ -95,10 +96,7 @@ unsafe impl Sync for IcebergOverwriteAction {}
 
 impl IcebergOverwriteAction {
     pub fn new() -> Self {
-        IcebergOverwriteAction {
-            added_files: Vec::new(),
-            deleted_files: Vec::new(),
-        }
+        Self::default()
     }
 }
 
@@ -365,7 +363,9 @@ pub extern "C" fn iceberg_overwrite_action_add_data_files(
     let set_error = |msg: &str, out: *mut *mut std::ffi::c_char| {
         if !out.is_null() {
             if let Ok(c_str) = std::ffi::CString::new(msg) {
-                unsafe { *out = c_str.into_raw(); }
+                unsafe {
+                    *out = c_str.into_raw();
+                }
             }
         }
     };
@@ -379,7 +379,9 @@ pub extern "C" fn iceberg_overwrite_action_add_data_files(
     }
     let action_ref = unsafe { &mut *action };
     let df_ref = unsafe { &mut *data_files };
-    action_ref.added_files.extend(std::mem::take(&mut df_ref.data_files));
+    action_ref
+        .added_files
+        .extend(std::mem::take(&mut df_ref.data_files));
     0
 }
 
@@ -396,7 +398,9 @@ pub extern "C" fn iceberg_overwrite_action_delete_data_files(
     let set_error = |msg: &str, out: *mut *mut std::ffi::c_char| {
         if !out.is_null() {
             if let Ok(c_str) = std::ffi::CString::new(msg) {
-                unsafe { *out = c_str.into_raw(); }
+                unsafe {
+                    *out = c_str.into_raw();
+                }
             }
         }
     };
@@ -410,7 +414,9 @@ pub extern "C" fn iceberg_overwrite_action_delete_data_files(
     }
     let action_ref = unsafe { &mut *action };
     let df_ref = unsafe { &mut *data_files };
-    action_ref.deleted_files.extend(std::mem::take(&mut df_ref.data_files));
+    action_ref
+        .deleted_files
+        .extend(std::mem::take(&mut df_ref.data_files));
     0
 }
 
@@ -428,7 +434,9 @@ pub extern "C" fn iceberg_overwrite_action_apply(
     let set_error = |msg: &str, out: *mut *mut std::ffi::c_char| {
         if !out.is_null() {
             if let Ok(c_str) = std::ffi::CString::new(msg) {
-                unsafe { *out = c_str.into_raw(); }
+                unsafe {
+                    *out = c_str.into_raw();
+                }
             }
         }
     };
