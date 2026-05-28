@@ -53,7 +53,8 @@ end
             table = create_table(cat, ["ns"], "t", _ow_schema())
 
             df = list_data_files(table)
-            @test df.ptr != C_NULL
+            @test length(df) == 0
+            @test isempty(data_file_info(df))
             free_data_files!(df)
             @test df.ptr == C_NULL
         finally
@@ -61,7 +62,7 @@ end
             free_catalog!(cat)
         end
     end
-    println("✅ list_data_files on empty table returns valid empty handle")
+    println("✅ list_data_files on empty table returns empty handle")
 end
 
 @testset "list_data_files after append" begin
@@ -76,7 +77,17 @@ end
                 (id=Int64[1,2,3], value=[1.1,2.2,3.3]))
 
             listed = list_data_files(updated)
-            @test listed.ptr != C_NULL
+            @test length(listed) == 1
+
+            info = data_file_info(listed)
+            @test length(info) == 1
+            f = info[1]
+            @test f["content"] == "data"
+            @test f["file_format"] == "parquet"
+            @test f["record_count"] == 3
+            @test f["file_size_in_bytes"] > 0
+            @test endswith(f["file_path"], ".parquet")
+
             free_data_files!(listed)
         finally
             table   != C_NULL && free_table(table)
@@ -84,7 +95,7 @@ end
             free_catalog!(cat)
         end
     end
-    println("✅ list_data_files after append returns non-null handle")
+    println("✅ list_data_files after append returns correct file metadata")
 end
 
 # ---------------------------------------------------------------------------
@@ -112,6 +123,9 @@ end
             @test !isnothing(snap_before)
 
             old_files = list_data_files(v2)
+            @test length(old_files) == 2
+            @test sum(f["record_count"] for f in data_file_info(old_files)) == 5
+
             new_files = RustyIceberg.with_data_file_writer(v2; prefix="new") do w
                 write(w, (id=Int64[10,20], value=[10.0,20.0]))
             end
@@ -164,6 +178,8 @@ end
 
             # list_data_files on v1 returns only the first file
             files_from_v1 = list_data_files(v1)
+            @test length(files_from_v1) == 1
+            @test data_file_info(files_from_v1)[1]["record_count"] == 3
 
             # replacement for the first file
             new_file = RustyIceberg.with_data_file_writer(v2; prefix="new") do w

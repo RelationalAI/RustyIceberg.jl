@@ -1658,6 +1658,7 @@ dependencies = [
  "object_store_ffi",
  "once_cell",
  "parquet",
+ "serde",
  "serde_json",
  "strum 0.26.3",
  "tempfile",

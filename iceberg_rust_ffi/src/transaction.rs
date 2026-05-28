@@ -7,9 +7,9 @@ use crate::catalog::IcebergCatalog;
 use crate::error_codes::{classified_error, classify_iceberg, IcebergErrorCode};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
-use iceberg::spec::DataFile;
-use iceberg::spec::ManifestContentType;
+use iceberg::spec::{DataContentType, DataFile, Datum, ManifestContentType};
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
+use std::collections::HashMap;
 
 // FFI exports
 use object_store_ffi::{
@@ -123,6 +123,95 @@ pub extern "C" fn iceberg_data_files_free(data_files: *mut IcebergDataFiles) {
         unsafe {
             let _ = Box::from_raw(data_files);
         }
+    }
+}
+
+/// Return the number of data files in the handle (0 if null).
+#[no_mangle]
+pub extern "C" fn iceberg_data_files_len(data_files: *const IcebergDataFiles) -> usize {
+    if data_files.is_null() {
+        return 0;
+    }
+    unsafe { (*data_files).data_files.len() }
+}
+
+/// Return a JSON array of objects describing every data file in the handle.
+///
+/// Each object contains all metadata fields from the Iceberg DataFile spec:
+/// content, file_path, file_format, record_count, file_size_in_bytes,
+/// partition_spec_id, column_sizes, value_counts, null_value_counts,
+/// nan_value_counts, lower_bounds, upper_bounds, split_offsets,
+/// sort_order_id, equality_ids, first_row_id, referenced_data_file,
+/// content_offset, content_size_in_bytes.
+///
+/// Returns null on error or if `data_files` is null.
+/// The caller must free the returned string with `iceberg_destroy_cstring`.
+#[no_mangle]
+pub extern "C" fn iceberg_data_files_to_json(
+    data_files: *const IcebergDataFiles,
+) -> *mut std::ffi::c_char {
+    #[derive(serde::Serialize)]
+    struct DataFileJson<'a> {
+        content: &'static str,
+        file_path: &'a str,
+        file_format: String,
+        record_count: u64,
+        file_size_in_bytes: u64,
+        column_sizes: &'a HashMap<i32, u64>,
+        value_counts: &'a HashMap<i32, u64>,
+        null_value_counts: &'a HashMap<i32, u64>,
+        nan_value_counts: &'a HashMap<i32, u64>,
+        lower_bounds: HashMap<i32, &'a Datum>,
+        upper_bounds: HashMap<i32, &'a Datum>,
+        split_offsets: Option<&'a [i64]>,
+        sort_order_id: Option<i32>,
+        equality_ids: Option<Vec<i32>>,
+        first_row_id: Option<i64>,
+        referenced_data_file: Option<String>,
+        content_offset: Option<i64>,
+        content_size_in_bytes: Option<i64>,
+    }
+
+    if data_files.is_null() {
+        return std::ptr::null_mut();
+    }
+    let df_ref = unsafe { &*data_files };
+
+    let entries: Vec<DataFileJson> = df_ref
+        .data_files
+        .iter()
+        .map(|f| DataFileJson {
+            content: match f.content_type() {
+                DataContentType::Data => "data",
+                DataContentType::PositionDeletes => "position_deletes",
+                DataContentType::EqualityDeletes => "equality_deletes",
+            },
+            file_path: f.file_path(),
+            file_format: f.file_format().to_string(),
+            record_count: f.record_count(),
+            file_size_in_bytes: f.file_size_in_bytes(),
+            column_sizes: f.column_sizes(),
+            value_counts: f.value_counts(),
+            null_value_counts: f.null_value_counts(),
+            nan_value_counts: f.nan_value_counts(),
+            lower_bounds: f.lower_bounds().iter().map(|(k, v)| (*k, v)).collect(),
+            upper_bounds: f.upper_bounds().iter().map(|(k, v)| (*k, v)).collect(),
+            split_offsets: f.split_offsets(),
+            sort_order_id: f.sort_order_id(),
+            equality_ids: f.equality_ids(),
+            first_row_id: f.first_row_id(),
+            referenced_data_file: f.referenced_data_file(),
+            content_offset: f.content_offset(),
+            content_size_in_bytes: f.content_size_in_bytes(),
+        })
+        .collect();
+
+    match serde_json::to_string(&entries) {
+        Ok(json) => match std::ffi::CString::new(json) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
