@@ -40,8 +40,12 @@ mod data_file;
 // Writer module
 mod writer;
 
-// Column-based writer module (zero-copy from Julia)
+// Shared FFI structs/constants for the column-based write path
 mod writer_columns;
+
+// Incremental RecordBatch builder: per-slice copy into owned buffers, finalize to RecordBatch.
+// Embedded inside `IcebergDataFileWriter`; not directly exposed across the FFI.
+mod record_batch_builder;
 
 // Profiling stats for the file-parallel pipeline
 mod pipeline_stats;
@@ -84,7 +88,7 @@ pub use transaction::{IcebergOverwriteAction, IcebergTransaction, IcebergTransac
 pub use writer::{
     IcebergDataFileWriter, IcebergDataFileWriterResponse, IcebergWriterCloseResponse,
 };
-pub use writer_columns::ColumnDescriptor;
+pub use writer_columns::ColumnSlice;
 
 // We use `jl_adopt_thread` to ensure Rust can call into Julia when notifying
 // the Base.Event that is waiting for the Rust result.

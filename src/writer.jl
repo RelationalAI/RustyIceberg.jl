@@ -18,8 +18,11 @@ Compression codec for Parquet files.
 - `UNCOMPRESSED`: No compression
 - `SNAPPY`: Snappy compression (fast, moderate compression)
 - `GZIP`: Gzip compression (slower, better compression)
-- `LZ4`: LZ4 compression (very fast, lower compression)
+- `LZ4`: LZ4 compression, legacy Hadoop-framed variant (deprecated in the parquet spec; kept for
+  backward compatibility — prefer `LZ4_RAW`)
 - `ZSTD`: Zstandard compression (good balance of speed and compression)
+- `LZ4_RAW`: LZ4 compression, raw blocks with no framing overhead (modern parquet variant; faster
+  than `LZ4`)
 """
 @enum CompressionCodec begin
     UNCOMPRESSED = 0
@@ -27,6 +30,7 @@ Compression codec for Parquet files.
     GZIP = 2
     LZ4 = 3
     ZSTD = 4
+    LZ4_RAW = 5
 end
 
 """
@@ -506,48 +510,14 @@ end
 
 # ==========================================================================================
 # Column-based writing (zero-copy from Julia)
+#
+# A user produces one `RowChunk` per upstream slice (a horizontal stripe of rows across all
+# output columns), then calls `append!(writer, chunk)`. The writer copies the data eagerly
+# into Rust-owned per-column buffers; the source Julia arrays may be released the moment
+# `append!` returns. When the accumulated row count reaches the coalesce window, the writer
+# finalizes a `RecordBatch` and ships it to the async encode pool automatically. Callers
+# that need flush control on logical boundaries can call `flush!(writer)`.
 # ==========================================================================================
-
-"""
-    SliceRef
-
-FFI reference to a single slice of source column data for the scattered-gather writer.
-
-- `data_ptr`: pointer to source data array (T[]) or string pointers (Ptr{UInt8}[])
-- `lengths_ptr`: for string columns, pointer to lengths array; null for other types
-- `validity_ptr`: pointer to validity bitmap (BitVector.chunks); null if all rows valid
-- `sel_ptr`: pointer to selection index array (1-based Julia indices); null for sequential access
-- `len`: number of rows in this slice
-
-All fields are 8 bytes — total struct size is 40 bytes with no padding.
-"""
-struct SliceRef
-    data_ptr::Ptr{Cvoid}
-    lengths_ptr::Ptr{Int64}
-    validity_ptr::Ptr{UInt8}
-    sel_ptr::Ptr{Int64}
-    len::Csize_t
-end
-
-"""
-    GatheredColumnDescriptor
-
-FFI descriptor for a column to be gathered from multiple SliceRefs.
-Pass an array of these to `write_columns`.
-
-- `slices_ptr`: pointer to array of SliceRef structs
-- `num_slices`: number of SliceRef entries
-- `total_rows`: sum of all slice lengths
-- `column_type`: ColumnType enum value
-- `is_nullable`: whether the column may contain null values
-"""
-struct GatheredColumnDescriptor
-    slices_ptr::Ptr{SliceRef}
-    num_slices::Csize_t
-    total_rows::Csize_t
-    column_type::Int32
-    is_nullable::Bool
-end
 
 """
     ColumnType
@@ -568,34 +538,13 @@ Enum for column data types, matching the Rust FFI constants.
     COLUMN_TYPE_DECIMAL_INT32 = 10  # Decimal backed by Int32 (precision ≤ 9)
     COLUMN_TYPE_DECIMAL_INT64 = 11  # Decimal backed by Int64 (precision ≤ 18)
     COLUMN_TYPE_DECIMAL_INT128 = 12 # Decimal backed by Int128 (precision > 18)
-end
-
-"""
-    ColumnDescriptor
-
-FFI structure describing a single column for direct column writing.
-This struct must match the Rust `ColumnDescriptor` layout exactly.
-
-# Fields
-- `data_ptr::Ptr{Cvoid}`: Pointer to the raw column data. For strings, this is a
-  pointer to an array of string pointers (Ptr{UInt8}[]).
-- `lengths_ptr::Ptr{Int64}`: For string columns, pointer to lengths array (Int64[]).
-  For other types, this is C_NULL.
-- `validity_ptr::Ptr{UInt8}`: Pointer to validity bitmap (BitVector.chunks, bit-packed)
-- `num_rows::Csize_t`: Number of rows in the column
-- `column_type::Int32`: Type of the column (see `ColumnType` enum)
-- `is_nullable::Bool`: Whether this column can contain null values
-
-Note: Fields are ordered to avoid padding (8-byte fields first, then 4-byte, then 1-byte).
-"""
-struct ColumnDescriptor
-    data_ptr::Ptr{Cvoid}        # 8 bytes, offset 0
-    lengths_ptr::Ptr{Int64}     # 8 bytes, offset 8
-    validity_ptr::Ptr{UInt8}    # 8 bytes, offset 16
-    num_rows::Csize_t           # 8 bytes, offset 24
-    column_type::Int32          # 4 bytes, offset 32
-    is_nullable::Bool           # 1 byte,  offset 36
-    # (3 bytes trailing padding added by compiler, total 40 bytes)
+    # Julia-epoch variants: source data uses Julia's internal epoch (0001-01-01);
+    # Rust applies the offset to produce Iceberg's Unix-epoch representation.
+    COLUMN_TYPE_JULIA_DATE = 13           # i64[] days since year 1 → i32 days since 1970-01-01
+    COLUMN_TYPE_JULIA_TIMESTAMP = 14      # i64[] ms since year 1 → i64 μs since 1970-01-01
+    COLUMN_TYPE_JULIA_TIMESTAMPTZ = 15    # same + UTC timezone
+    COLUMN_TYPE_JULIA_TIMESTAMP_NS = 16   # i64[] ms since year 1 → i64 ns since 1970-01-01
+    COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS = 17 # same + UTC timezone
 end
 
 """
@@ -633,9 +582,11 @@ iceberg_column_type(::IcebergLong) = COLUMN_TYPE_INT64
 iceberg_column_type(::IcebergFloat) = COLUMN_TYPE_FLOAT32
 iceberg_column_type(::IcebergDouble) = COLUMN_TYPE_FLOAT64
 iceberg_column_type(::IcebergString) = COLUMN_TYPE_STRING
-iceberg_column_type(::IcebergDate) = COLUMN_TYPE_DATE
-iceberg_column_type(::IcebergTimestamp) = COLUMN_TYPE_TIMESTAMP
-iceberg_column_type(::IcebergTimestamptz) = COLUMN_TYPE_TIMESTAMPTZ
+iceberg_column_type(::IcebergDate)          = COLUMN_TYPE_JULIA_DATE
+iceberg_column_type(::IcebergTimestamp)     = COLUMN_TYPE_JULIA_TIMESTAMP
+iceberg_column_type(::IcebergTimestamptz)   = COLUMN_TYPE_JULIA_TIMESTAMPTZ
+iceberg_column_type(::IcebergTimestampNs)   = COLUMN_TYPE_JULIA_TIMESTAMP_NS
+iceberg_column_type(::IcebergTimestamptzNs) = COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS
 iceberg_column_type(::IcebergBoolean) = COLUMN_TYPE_BOOLEAN
 iceberg_column_type(::IcebergUuid) = COLUMN_TYPE_UUID
 function iceberg_column_type(d::IcebergDecimal)
@@ -649,551 +600,316 @@ function iceberg_column_type(d::IcebergDecimal)
 end
 
 """
-    ColumnBatch
+    ColumnSlice
 
-A builder for collecting column descriptors and their underlying arrays.
-Automatically tracks arrays that need to be preserved during FFI calls.
+FFI struct describing one column's contribution to a single `RowChunk`. Internal —
+users build `RowChunk`s via `push!` instead of constructing `ColumnSlice` directly.
 
-# Example
-```julia
-batch = ColumnBatch()
-push!(batch, ids)                           # non-nullable column
-push!(batch, values; validity=validity_vec) # nullable column
-write_columns(writer, batch)
-```
+All fields are 8 bytes; total struct size is 40 bytes with no padding (matches Rust's
+`ColumnSlice` layout).
 """
-mutable struct ColumnBatch
-    descriptors::Vector{ColumnDescriptor}
-    arrays_to_preserve::Vector{Any}
-
-    ColumnBatch() = new(ColumnDescriptor[], Any[])
+struct ColumnSlice
+    data_ptr::Ptr{Cvoid}
+    lengths_ptr::Ptr{Int64}
+    validity_ptr::Ptr{UInt8}
+    sel_ptr::Ptr{Int64}
+    len::Csize_t
 end
 
 """
-    push!(batch::ColumnBatch, data::Vector{String}; validity=nothing, length=nothing, column_type=nothing)
+    RowChunk
 
-Add a string column to the batch. Strings are passed as an array of pointers with lengths.
-Note: While this avoids copying on the Julia side, Arrow still copies the string data
-into its internal buffer on the Rust side.
+A horizontal stripe of rows across all output columns — what a streaming producer hands
+to the writer at each step. Build one by pushing column data in schema order, then call
+`append!(writer, chunk)`.
 
-# Arguments
-- `data`: The string column data array
-- `validity`: Optional validity mask (BitVector where false=null, true=valid)
-- `length`: Optional number of rows to use from the array. If not specified,
-  uses the full array length.
-- `column_type`: Optional explicit column type (defaults to COLUMN_TYPE_STRING)
+```julia
+chunk = RowChunk()
+push!(chunk, ids)                                            # non-nullable numeric, sequential
+push!(chunk, values; validity=src_valid_bv)                  # nullable numeric, sequential
+push!(chunk, source_scores;
+      validity=src_valid_bv, sel=sel_indices)                # nullable scattered: validity is
+                                                              # aligned to `source_scores`; the
+                                                              # library gathers through `sel`.
+push!(chunk, tags; validity=src_valid_bv)                    # nullable strings
+append!(writer, chunk)
+```
+
+For streaming pipelines that push many chunks, reuse the same `RowChunk` and call
+`empty!(chunk)` at the top of each iteration. `empty!` clears the working vectors but
+retains the chunk's internal pool of `str_ptrs` / `str_lens` buffers, so string columns
+amortize their per-chunk gather work to zero.
+
+```julia
+chunk = RowChunk()
+for slice in upstream
+    empty!(chunk)
+    push!(chunk, slice.ids)
+    push!(chunk, slice.tags; validity=slice.v)
+    append!(writer, chunk)
+end
+```
+
+Column order must be stable across iterations (it has to match the writer's schema
+anyway). The internal string pool is keyed by column position.
 """
-function Base.push!(
-    batch::ColumnBatch,
-    data::Vector{String};
-    validity::Union{Nothing, BitVector}=nothing,
-    length::Union{Nothing, Int}=nothing,
-    column_type::Union{Nothing, ColumnType}=nothing
+mutable struct RowChunk
+    slices::Vector{ColumnSlice}                  # FFI-ready, one entry per push!
+    preserve::Vector{Any}                        # GC roots for source data / validity / sel
+    # Per-column-position string scratch. Entry `i` holds the `str_ptrs` / `str_lens` /
+    # `str_validity` buffers for the i-th pushed column when it was a string column.
+    # `str_validity` is the output-aligned validity bitmap Rust receives when both `sel`
+    # and `validity` are present on a string push — see that `push!` overload for why.
+    # Non-string positions have unused (length-0) entries. Retained across `empty!` so
+    # streaming reuse is free.
+    str_ptrs::Vector{Vector{Ptr{UInt8}}}
+    str_lens::Vector{Vector{Int64}}
+    str_validity::Vector{BitVector}
+end
+
+RowChunk() = RowChunk(
+    ColumnSlice[], Any[], Vector{Ptr{UInt8}}[], Vector{Int64}[], BitVector[],
 )
-    num_rows = length === nothing ? Base.length(data) : length
-    is_nullable = validity !== nothing
-    col_type = column_type === nothing ? COLUMN_TYPE_STRING : column_type
 
-    # Build arrays of string pointers and lengths (no copy on Julia side)
-    # Each String in Julia is a pointer to contiguous UTF-8 bytes
-    # For null values, we use null pointer and zero length - Rust will check validity mask
-    str_ptrs = Vector{Ptr{UInt8}}(undef, num_rows)
-    str_lens = Vector{Int64}(undef, num_rows)
-    for i in 1:num_rows
-        if is_nullable && !validity[i]
-            # Null value - use null pointer and zero length
-            str_ptrs[i] = Ptr{UInt8}(C_NULL)
-            str_lens[i] = 0
-        else
-            str_ptrs[i] = pointer(data[i])
-            str_lens[i] = sizeof(data[i])
-        end
-    end
+"""
+    empty!(chunk::RowChunk)
 
-    # Preserve all arrays (original strings + metadata arrays)
-    push!(batch.arrays_to_preserve, data)
-    push!(batch.arrays_to_preserve, str_ptrs)
-    push!(batch.arrays_to_preserve, str_lens)
+Reset the chunk's working vectors so the next pass can refill them. The internal string
+ptr/len pool is *not* freed — it stays sized at the previous high-water mark, so a
+streaming loop that calls `empty!` then `push!` repeatedly pays zero per-iteration
+allocation for the string-gather buffers.
 
-    validity_ptr = if is_nullable
-        push!(batch.arrays_to_preserve, validity)
-        Ptr{UInt8}(pointer(validity.chunks))
-    else
-        Ptr{UInt8}(C_NULL)
-    end
-
-    # For strings: data_ptr = pointer to string pointers, offsets_ptr = pointer to lengths
-    desc = ColumnDescriptor(
-        Ptr{Cvoid}(pointer(str_ptrs)),
-        pointer(str_lens),  # Reuse offsets_ptr for lengths array
-        validity_ptr,
-        Csize_t(num_rows),
-        Int32(col_type),
-        is_nullable
-    )
-    push!(batch.descriptors, desc)
-    return batch
+Drop the chunk and create a new one if you want to actually reclaim the pool memory.
+"""
+function Base.empty!(chunk::RowChunk)
+    empty!(chunk.slices)
+    empty!(chunk.preserve)
+    return chunk
 end
 
 """
-    push!(batch::ColumnBatch, data::Vector{String}, str_ptrs::Vector{Ptr{UInt8}}, str_lens::Vector{Int64}; validity=nothing, length=nothing, column_type=nothing)
+    push!(chunk::RowChunk, data::AbstractVector{T};
+          validity=nothing, sel=nothing)
 
-Add a string column to the batch using pre-allocated pointer/length buffers.
-The caller is responsible for filling `str_ptrs` and `str_lens` before calling this.
-Avoids allocating new pointer/length arrays on every write.
+Add a non-string column slice to the chunk. Builds the FFI-ready `ColumnSlice` inline —
+just `pointer(data)` and pointer arithmetic, no allocation beyond the chunk's own
+`slices` / `preserve` growth.
+
+- `validity`: optional `BitVector` *aligned to `data`* — `length(validity) >= length(data)`,
+  bit `i` describes whether `data[i]` is valid (`true` = valid, `false` = null). When
+  `sel` is also provided, Rust gathers validity through `sel` alongside the value gather:
+  bit `sel[i] - 1` of the source bitmap becomes bit `i` of the output bitmap. When `sel`
+  is omitted, source and output positions coincide.
+- `sel`: optional contiguous `AbstractVector{Int64}` of 1-based indices into `data` for
+  scattered access. Output row count is `length(sel)`. If omitted, all rows of `data`
+  are used sequentially. A `view(sel_buf, 1:n)` is accepted — useful when the caller
+  has a sel buffer with stale capacity beyond the live region.
 """
 function Base.push!(
-    batch::ColumnBatch,
-    data::Vector{String},
-    str_ptrs::Vector{Ptr{UInt8}},
-    str_lens::Vector{Int64};
-    validity::Union{Nothing, BitVector}=nothing,
-    length::Union{Nothing, Int}=nothing,
-    column_type::Union{Nothing, ColumnType}=nothing,
-)
-    num_rows = length === nothing ? Base.length(str_ptrs) : length
-    is_nullable = validity !== nothing
-    col_type = column_type === nothing ? COLUMN_TYPE_STRING : column_type
-
-    push!(batch.arrays_to_preserve, data, str_ptrs, str_lens)
-
-    validity_ptr = if is_nullable
-        push!(batch.arrays_to_preserve, validity)
-        Ptr{UInt8}(pointer(validity.chunks))
-    else
-        Ptr{UInt8}(C_NULL)
-    end
-
-    desc = ColumnDescriptor(
-        Ptr{Cvoid}(pointer(str_ptrs)),
-        pointer(str_lens),
-        validity_ptr,
-        Csize_t(num_rows),
-        Int32(col_type),
-        is_nullable
-    )
-    push!(batch.descriptors, desc)
-    return batch
-end
-
-"""
-    push!(batch::ColumnBatch, data::Vector{T}; validity=nothing, length=nothing, column_type=nothing) where T
-
-Add a column to the batch. The column type is inferred from the element type unless
-explicitly specified.
-
-# Arguments
-- `data`: The column data array
-- `validity`: Optional validity mask (BitVector where false=null, true=valid)
-- `length`: Optional number of rows to use from the array. If not specified,
-  uses the full array length. This allows writing only a prefix of the array.
-- `column_type`: Optional explicit column type (ColumnType enum). If not specified,
-  inferred from the element type T. Use this when the physical storage type differs
-  from the logical type (e.g., Int32 data that represents Date32).
-"""
-function Base.push!(
-    batch::ColumnBatch,
-    data::Vector{T};
-    validity::Union{Nothing, BitVector}=nothing,
-    length::Union{Nothing, Int}=nothing,
-    column_type::Union{Nothing, ColumnType}=nothing
-) where T
-    push!(batch.arrays_to_preserve, data)
-
-    col_type = column_type === nothing ? julia_type_to_column_type(T) : column_type
-    num_rows = length === nothing ? Base.length(data) : length
-    is_nullable = validity !== nothing
-
-    validity_ptr = if is_nullable
-        # BitVector stores bits in UInt64 chunks - pass pointer to chunks directly
-        push!(batch.arrays_to_preserve, validity)
-        Ptr{UInt8}(pointer(validity.chunks))
-    else
-        Ptr{UInt8}(C_NULL)
-    end
-
-    desc = ColumnDescriptor(
-        Ptr{Cvoid}(pointer(data)),
-        Ptr{Int64}(C_NULL),  # lengths_ptr not used for non-string types
-        validity_ptr,
-        Csize_t(num_rows),
-        Int32(col_type),
-        is_nullable
-    )
-    push!(batch.descriptors, desc)
-    return batch
-end
-
-"""
-    write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}, arrays_to_preserve)
-
-Write raw column data directly to the Parquet writer, bypassing Arrow IPC serialization.
-
-This is a low-level function that passes raw column pointers to Rust, which builds
-Arrow arrays directly from them. This avoids one serialization step compared to
-the standard `write` function.
-
-# Arguments
-- `writer::DataFileWriter`: The writer to write to
-- `columns::Vector{ColumnDescriptor}`: Array of column descriptors
-- `arrays_to_preserve`: A tuple/collection of arrays whose memory is referenced by the
-  ColumnDescriptors. These will be GC-preserved during the FFI call.
-
-# Safety
-The ColumnDescriptors contain raw pointers that must point to valid data.
-Pass all source arrays in `arrays_to_preserve` to ensure they are not garbage
-collected during the FFI call.
-
-# Throws
-- `IcebergException` if the write fails
-
-# Example
-```julia
-data = Int64[1, 2, 3]
-validity = UInt8[1, 1, 1]
-desc = ColumnDescriptor(pointer(data), ...)
-write_columns(writer, [desc], (data, validity))  # Arrays preserved during call
-```
-"""
-function write_columns(writer::DataFileWriter, columns::Vector{ColumnDescriptor}, arrays_to_preserve)
-    writer.ptr == C_NULL && throw(IcebergException(
-        STATE_RESOURCE_FREED,
-        "Resource has been freed",
-        "Writer has been freed",
-    ))
-    isempty(columns) && throw(IcebergException(
-        DATA_SCHEMA_MISMATCH,
-        "Column not found in table schema",
-        "No columns provided",
-    ))
-
-    ret = GC.@preserve columns arrays_to_preserve begin
-        @ccall rust_lib.iceberg_writer_write_columns(
-            writer.ptr::Ptr{Cvoid},
-            pointer(columns)::Ptr{ColumnDescriptor},
-            length(columns)::Csize_t,
-        )::Int32
-    end
-
-    ret == 0 || throw(IcebergException(
-        DATA_SCHEMA_MISMATCH,
-        "Column not found in table schema",
-        "write_columns failed (see writer close for details)",
-    ))
-    return nothing
-end
-
-"""
-    write_columns(writer::DataFileWriter, batch::ColumnBatch)
-
-Write columns from a ColumnBatch to the Parquet writer.
-
-This is the recommended way to use write_columns - the ColumnBatch automatically
-tracks all arrays that need to be preserved during the FFI call.
-
-# Arguments
-- `writer::DataFileWriter`: The writer to write to
-- `batch::ColumnBatch`: The column batch to write
-
-# Example
-```julia
-batch = ColumnBatch()
-push!(batch, ids)
-push!(batch, values; validity=validity_vec)
-write_columns(writer, batch)
-
-# To write only first 100 rows, use the length parameter on push!:
-batch = ColumnBatch()
-push!(batch, ids; length=100)
-push!(batch, values; validity=validity_vec, length=100)
-write_columns(writer, batch)
-```
-"""
-function write_columns(writer::DataFileWriter, batch::ColumnBatch)
-    write_columns(writer, batch.descriptors, batch.arrays_to_preserve)
-end
-
-# ==========================================================================================
-# High-level gathered-column API
-# ==========================================================================================
-
-"""
-    GatheredColumn
-
-Accumulates one or more source slices for a single column. Rust gathers the data
-directly from source buffers when the batch is written, avoiding a Julia-side staging
-copy for numeric columns.
-
-Typical usage:
-
-```julia
-col = GatheredColumn(COLUMN_TYPE_INT64)
-add_slice!(col, src_array)                        # sequential: all rows
-add_slice!(col, src_array2; sel=sel_indices)      # scattered: rows at sel_indices
-add_slice!(col, src_array3; validity=valid_bv)    # nullable slice
-
-str_col = GatheredColumn(COLUMN_TYPE_STRING; nullable=true)
-add_string_slice!(str_col, ["a", "", "c"]; validity=BitVector([true, false, true]))
-```
-
-For string columns use `add_string_slice!` instead of `add_slice!`. Selection vectors
-are not supported for strings: Julia strings are non-contiguous, so the caller must
-build `str_ptrs`/`str_lens` arrays up-front — any row selection is applied on the Julia
-side before calling `add_string_slice!`.
-"""
-mutable struct GatheredColumn
-    slices::Vector{SliceRef}
-    total_rows::Int
-    column_type::ColumnType
-    is_nullable::Bool
-    preserve::Vector{Any}   # source arrays kept alive until write
-end
-
-GatheredColumn(column_type::ColumnType; nullable::Bool=false) =
-    GatheredColumn(SliceRef[], 0, column_type, nullable, Any[])
-
-"""
-    add_slice!(col::GatheredColumn, data::AbstractVector{T};
-               sel=nothing, validity=nothing)
-
-Append a slice of `data` to `col`.
-
-- `sel`: optional `Vector{Int64}` of 1-based row indices into `data` to select.
-  If omitted, all rows of `data` are used sequentially.
-- `validity`: optional `BitVector` (length = number of selected rows, `true` = valid).
-  Providing this marks the column as nullable.
-"""
-function add_slice!(
-    col::GatheredColumn,
+    chunk::RowChunk,
     data::AbstractVector{T};
-    sel::Union{Nothing, Vector{Int64}} = nothing,
     validity::Union{Nothing, BitVector} = nothing,
+    sel::Union{Nothing, AbstractVector{Int64}} = nothing,
 ) where T
     len = sel === nothing ? length(data) : length(sel)
 
     sel_ptr = if sel !== nothing
-        push!(col.preserve, sel)
+        push!(chunk.preserve, sel)
         pointer(sel)
     else
         Ptr{Int64}(C_NULL)
     end
 
     validity_ptr = if validity !== nothing
-        col.is_nullable = true
-        push!(col.preserve, validity)
+        push!(chunk.preserve, validity)
         Ptr{UInt8}(pointer(validity.chunks))
     else
         Ptr{UInt8}(C_NULL)
     end
 
-    push!(col.preserve, data)
-    push!(col.slices, SliceRef(
+    push!(chunk.preserve, data)
+    push!(chunk.slices, ColumnSlice(
         Ptr{Cvoid}(pointer(data)),
-        Ptr{Int64}(C_NULL),   # lengths_ptr unused for non-string types
+        Ptr{Int64}(C_NULL),
         validity_ptr,
         sel_ptr,
         Csize_t(len),
     ))
-    col.total_rows += len
-    return col
+    return chunk
 end
 
 """
-    add_string_slice!(col::GatheredColumn, strings::Vector{String}; validity=nothing)
+    push!(
+        chunk::RowChunk, strings::AbstractVector{<:AbstractString};
+        validity=nothing, sel=nothing
+    )
 
-Append a string slice to `col` from a plain `Vector{String}`.
+Add a string column slice to the chunk. Accepts any `AbstractString` element type
+(`String`, `SubString{String}`, Arrow's `VariableSizeString`, …) — `pointer(s)` and
+`ncodeunits(s)` are used directly, no materialization through `Vector{String}`.
 
-- `validity`: optional `BitVector` (`true` = valid, `false` = null). Marking a row null
-  does not require a placeholder in `strings`, but the vector must still be the same length.
+The ptr/len gather buffers live in the chunk's per-position pool and are reused across
+`empty!`/refill cycles, so a streaming loop pays no allocation for them after the first
+chunk.
 
-```julia
-col = GatheredColumn(COLUMN_TYPE_STRING; nullable=true)
-add_string_slice!(col, ["hello", "", "world"]; validity=BitVector([true, false, true]))
-```
+- `validity`: optional `BitVector` *aligned to `strings`* — `length(validity) >= length(strings)`,
+  bit `i` describes whether `strings[i]` is valid (`true` = valid, `false` = null).
+- `sel`: optional contiguous `AbstractVector{Int64}` of 1-based indices into `strings`
+  for scattered access. Output row count is `length(sel)`. If omitted, all rows of
+  `strings` are used sequentially.
 
-For performance-critical paths where pointer/length arrays are pre-allocated, use the
-lower-level `add_string_slice!(col, str_ptrs, str_lens; validity)` overload directly.
+Unlike the numeric `push!`, the value gather is performed here on the Julia side
+(`pointer(strings[sel[i]])` per row) because Rust can't walk a Julia `AbstractString`
+vector across the FFI. When both `sel` and `validity` are supplied, the validity gather
+is folded into that same loop and an output-aligned bitmap is materialized in the
+chunk's per-position pool. The consumer-visible contract is therefore identical to the
+numeric case — pass a source-aligned `validity` either way.
 """
-function add_string_slice!(
-    col::GatheredColumn,
-    strings::Vector{String};
+function Base.push!(
+    chunk::RowChunk,
+    strings::AbstractVector{<:AbstractString};
     validity::Union{Nothing, BitVector} = nothing,
+    sel::Union{Nothing, AbstractVector{Int64}} = nothing,
 )
-    n = length(strings)
-    is_nullable = validity !== nothing
-    str_ptrs = Vector{Ptr{UInt8}}(undef, n)
-    str_lens = Vector{Int64}(undef, n)
-    for i in 1:n
-        if is_nullable && !validity[i]
-            str_ptrs[i] = Ptr{UInt8}(C_NULL)
-            str_lens[i] = 0
-        else
-            str_ptrs[i] = pointer(strings[i])
-            str_lens[i] = ncodeunits(strings[i])
-        end
+    pos = length(chunk.slices) + 1
+    # Grow the per-position pool to cover this column's slot. Lazy and retained across
+    # `empty!` calls, so subsequent iterations are no-ops here.
+    while length(chunk.str_ptrs) < pos
+        push!(chunk.str_ptrs, Ptr{UInt8}[])
+        push!(chunk.str_lens, Int64[])
+        push!(chunk.str_validity, BitVector())
     end
-    push!(col.preserve, strings)  # keep String objects alive so pointers remain valid
-    return add_string_slice!(col, str_ptrs, str_lens; validity)
-end
+    str_ptrs = chunk.str_ptrs[pos]
+    str_lens = chunk.str_lens[pos]
 
-"""
-    add_string_slice!(col::GatheredColumn, str_ptrs, str_lens; validity=nothing)
+    n = sel === nothing ? length(strings) : length(sel)
+    resize!(str_ptrs, n)        # amortized O(1) once the pool is sized
+    resize!(str_lens, n)
 
-Low-level overload: append a string slice from pre-built pointer/length arrays.
-`str_ptrs` is a `Vector{Ptr{UInt8}}` of pointers to UTF-8 string data and `str_lens`
-is a `Vector{Int64}` of corresponding byte lengths. The caller is responsible for keeping
-the pointed-to string bytes alive until `write_columns` returns.
-"""
-function add_string_slice!(
-    col::GatheredColumn,
-    str_ptrs::Vector{Ptr{UInt8}},
-    str_lens::Vector{Int64};
-    validity::Union{Nothing, BitVector} = nothing,
-)
-    len = length(str_ptrs)
+    is_nullable = validity !== nothing
+    # Rust never sees `sel_ptr` for string columns (the value gather is pre-applied
+    # below), so when `sel` *and* `validity` are both supplied we have to rewrite the
+    # source-aligned validity bitmap to an output-aligned one here. With `sel === nothing`,
+    # source and output positions coincide and we pass `validity` through unchanged.
+    needs_validity_gather = is_nullable && sel !== nothing
+    str_validity = needs_validity_gather ? chunk.str_validity[pos] : nothing
+    if needs_validity_gather
+        resize!(str_validity, n)
+    end
 
-    validity_ptr = if validity !== nothing
-        col.is_nullable = true
-        push!(col.preserve, validity)
+    if sel === nothing
+        @inbounds for i in 1:n
+            if is_nullable && !validity[i]
+                str_ptrs[i] = Ptr{UInt8}(C_NULL)
+                str_lens[i] = 0
+            else
+                s = strings[i]
+                str_ptrs[i] = pointer(s)
+                str_lens[i] = ncodeunits(s)
+            end
+        end
+    elseif needs_validity_gather
+        @inbounds for i in 1:n
+            src = sel[i]
+            if !validity[src]
+                str_ptrs[i] = Ptr{UInt8}(C_NULL)
+                str_lens[i] = 0
+                str_validity[i] = false
+            else
+                s = strings[src]
+                str_ptrs[i] = pointer(s)
+                str_lens[i] = ncodeunits(s)
+                str_validity[i] = true
+            end
+        end
+        push!(chunk.preserve, sel)
+    else
+        @inbounds for i in 1:n
+            s = strings[sel[i]]
+            str_ptrs[i] = pointer(s)
+            str_lens[i] = ncodeunits(s)
+        end
+        push!(chunk.preserve, sel)
+    end
+
+    push!(chunk.preserve, strings)
+    validity_ptr = if needs_validity_gather
+        push!(chunk.preserve, str_validity)
+        Ptr{UInt8}(pointer(str_validity.chunks))
+    elseif validity !== nothing
+        push!(chunk.preserve, validity)
         Ptr{UInt8}(pointer(validity.chunks))
     else
         Ptr{UInt8}(C_NULL)
     end
 
-    push!(col.preserve, str_ptrs, str_lens)
-    push!(col.slices, SliceRef(
+    push!(chunk.slices, ColumnSlice(
         Ptr{Cvoid}(pointer(str_ptrs)),
         pointer(str_lens),
         validity_ptr,
         Ptr{Int64}(C_NULL),
-        Csize_t(len),
+        Csize_t(n),
     ))
-    col.total_rows += len
-    return col
+    return chunk
 end
 
 """
-    GatheredBatch
+    append!(writer::DataFileWriter, chunk::RowChunk)
 
-Collects a `GatheredColumn` per output column, then writes all of them in one call.
+Hand one `RowChunk` to the writer. The chunk's `slices` are already FFI-ready, so this
+just pins memory, fires the FFI, and returns. Rust copies all slice data synchronously
+into per-column buffers; the source arrays may be released the moment this call returns.
 
-```julia
-batch = GatheredBatch()
-push!(batch, col_int64)
-push!(batch, col_float64)
-write_columns(writer, batch)
-```
-
-You can also push a single-slice column inline without building a `GatheredColumn`
-explicitly:
-
-```julia
-batch = GatheredBatch()
-push!(batch, src_ints,   COLUMN_TYPE_INT64)
-push!(batch, src_floats, COLUMN_TYPE_FLOAT64; sel=indices, validity=valid_bv)
-write_columns(writer, batch)
-```
+When the accumulated window reaches the coalesce size the writer auto-flushes a
+`RecordBatch` to the encode pool. `append!` calls are appended in order — no reordering.
 """
-mutable struct GatheredBatch
-    columns::Vector{GatheredColumn}
-end
-
-GatheredBatch() = GatheredBatch(GatheredColumn[])
-
-"""
-    push!(batch::GatheredBatch, col::GatheredColumn)
-
-Append an already-built `GatheredColumn` to the batch.
-"""
-Base.push!(batch::GatheredBatch, col::GatheredColumn) = (push!(batch.columns, col); batch)
-
-"""
-    push!(batch::GatheredBatch, data::AbstractVector, column_type::ColumnType;
-          sel=nothing, validity=nothing, nullable=false)
-
-Convenience: create a single-slice `GatheredColumn` from `data` and append it.
-"""
-function Base.push!(
-    batch::GatheredBatch,
-    data::AbstractVector,
-    column_type::ColumnType;
-    sel::Union{Nothing, Vector{Int64}} = nothing,
-    validity::Union{Nothing, BitVector} = nothing,
-    nullable::Bool = validity !== nothing,
-)
-    col = GatheredColumn(column_type; nullable)
-    add_slice!(col, data; sel, validity)
-    push!(batch.columns, col)
-    return batch
-end
-
-"""
-    write_columns(writer::DataFileWriter, batch::GatheredBatch[, extra_preserve])
-
-Gather column data from Julia memory synchronously, then encode asynchronously.
-
-Gathers all column data from Julia memory in the calling thread using a plain blocking
-`ccall`. Encode runs asynchronously in the global worker pool.
-
-`extra_preserve` (optional) is an additional collection of objects whose memory must
-stay alive during the gather (e.g. source string arrays for zero-copy string columns).
-
-The source data pointed to by the `GatheredBatch` slices and `extra_preserve` must be
-valid for the duration of this call. After the call returns, all Julia pointers have
-been consumed and the source data may be safely released.
-"""
-function write_columns(
-    writer::DataFileWriter,
-    batch::GatheredBatch,
-    extra_preserve = nothing,
-)
-    isempty(batch.columns) && throw(IcebergException(
-        DATA_SCHEMA_MISMATCH,
-        "Column not found in table schema",
-        "GatheredBatch has no columns",
-    ))
+function Base.append!(writer::DataFileWriter, chunk::RowChunk)
     writer.ptr == C_NULL && throw(IcebergException(
         STATE_RESOURCE_FREED,
         "Resource has been freed",
         "Writer has been freed",
     ))
-
-    all_slice_arrays = Vector{Vector{SliceRef}}(undef, length(batch.columns))
-    descriptors = Vector{GatheredColumnDescriptor}(undef, length(batch.columns))
-    preserve = Any[]
-
-    for (i, col) in enumerate(batch.columns)
-        slices = col.slices
-        all_slice_arrays[i] = slices
-        append!(preserve, col.preserve)
-        push!(preserve, slices)
-        descriptors[i] = GatheredColumnDescriptor(
-            pointer(slices),
-            Csize_t(length(slices)),
-            Csize_t(col.total_rows),
-            Int32(col.column_type),
-            col.is_nullable,
-        )
-    end
-    extra_preserve !== nothing && append!(preserve, extra_preserve)
-
-    ret = GC.@preserve preserve all_slice_arrays descriptors begin
-        @ccall rust_lib.iceberg_writer_write_gathered_columns(
+    isempty(chunk.slices) && throw(IcebergException(
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
+        "RowChunk has no columns",
+    ))
+    ret = GC.@preserve chunk begin
+        @ccall rust_lib.iceberg_writer_append(
             writer.ptr::Ptr{Cvoid},
-            pointer(descriptors)::Ptr{GatheredColumnDescriptor},
-            length(descriptors)::Csize_t,
+            pointer(chunk.slices)::Ptr{ColumnSlice},
+            length(chunk.slices)::Csize_t,
         )::Int32
     end
-    if ret != 0
-        err_ptr = @ccall rust_lib.iceberg_take_gather_error()::Ptr{Cchar}
-        msg = if err_ptr != C_NULL
-            s = unsafe_string(err_ptr)
-            @ccall rust_lib.iceberg_destroy_cstring(err_ptr::Ptr{Cchar})::Cint
-            s
-        else
-            "gather failed (see writer close for details)"
-        end
-        throw(IcebergException(DATA_SCHEMA_MISMATCH, "Column not found in table schema", "write_columns (gathered): $msg"))
-    end
-    return nothing
+    ret == 0 || throw(IcebergException(
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
+        "append! failed (see close_writer for details)",
+    ))
+    return writer
+end
+
+"""
+    flush!(writer::DataFileWriter)
+
+Force the writer to flush its current partial window to the encode pool. Useful on logical
+boundaries (end of transaction, time tick) where a Parquet row-group break is desired
+without waiting for the natural coalesce-window boundary. No-op if the buffer is empty.
+
+`close_writer` flushes any remainder automatically, so explicit `flush!` is only needed
+when the caller wants control over flush timing.
+"""
+function flush!(writer::DataFileWriter)
+    writer.ptr == C_NULL && throw(IcebergException(
+        STATE_RESOURCE_FREED,
+        "Resource has been freed",
+        "Writer has been freed",
+    ))
+    ret = @ccall rust_lib.iceberg_writer_flush(writer.ptr::Ptr{Cvoid})::Int32
+    ret == 0 || throw(IcebergException(
+        DATA_SCHEMA_MISMATCH,
+        "Column not found in table schema",
+        "flush! failed (see close_writer for details)",
+    ))
+    return writer
 end
