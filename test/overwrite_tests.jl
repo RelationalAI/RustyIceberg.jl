@@ -13,7 +13,7 @@ function _ow_schema()
 end
 
 function _write_and_append(table, catalog, data; prefix="data")
-    files = with_data_file_writer(table; prefix) do w
+    files = RustyIceberg.with_data_file_writer(table; prefix) do w
         write(w, data)
     end
     with_transaction(table, catalog) do tx
@@ -112,7 +112,7 @@ end
             @test !isnothing(snap_before)
 
             old_files = list_data_files(v2)
-            new_files = with_data_file_writer(v2; prefix="new") do w
+            new_files = RustyIceberg.with_data_file_writer(v2; prefix="new") do w
                 write(w, (id=Int64[10,20], value=[10.0,20.0]))
             end
 
@@ -154,7 +154,7 @@ end
             create_namespace(cat, ["ns"])
             table = create_table(cat, ["ns"], "t", _ow_schema())
 
-            new_files = with_data_file_writer(table) do w
+            new_files = RustyIceberg.with_data_file_writer(table) do w
                 write(w, (id=Int64[1], value=[1.0]))
             end
 
@@ -193,7 +193,7 @@ end
 
             # first overwrite
             old1   = list_data_files(v1)
-            files2 = with_data_file_writer(v1; prefix="r1") do w
+            files2 = RustyIceberg.with_data_file_writer(v1; prefix="r1") do w
                 write(w, (id=Int64[10,11], value=[10.0,11.0]))
             end
             v2 = with_transaction(v1, cat) do tx
@@ -206,7 +206,7 @@ end
 
             # second overwrite
             old2   = list_data_files(v2)
-            files3 = with_data_file_writer(v2; prefix="r2") do w
+            files3 = RustyIceberg.with_data_file_writer(v2; prefix="r2") do w
                 write(w, (id=Int64[99], value=[99.0]))
             end
             v3 = with_transaction(v2, cat) do tx
@@ -259,7 +259,7 @@ end
             println("✅ add/delete_data_files with null DataFiles throw")
 
             # apply on a consumed transaction must throw
-            files1  = with_data_file_writer(table) do w
+            files1  = RustyIceberg.with_data_file_writer(table) do w
                 write(w, (id=Int64[1], value=[1.0]))
             end
             action3 = RustyIceberg.OverwriteAction()
@@ -269,7 +269,7 @@ end
             free_overwrite_action!(action3)
 
             action4 = RustyIceberg.OverwriteAction()
-            files2  = with_data_file_writer(table; prefix="e2") do w
+            files2  = RustyIceberg.with_data_file_writer(table; prefix="e2") do w
                 write(w, (id=Int64[2], value=[2.0]))
             end
             add_data_files(action4, files2)
