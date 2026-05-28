@@ -402,15 +402,18 @@ function add_data_files(action::OverwriteAction, data_files::DataFiles)
         throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "DataFiles has been freed or consumed"))
     end
     error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
-    result = @ccall rust_lib.iceberg_overwrite_action_add_data_files(
-        action.ptr::Ptr{Cvoid},
-        data_files.ptr::Ptr{Cvoid},
-        error_message_ptr::Ref{Ptr{Cchar}}
-    )::Cint
-    if result != 0
-        parse_and_throw(error_message_ptr[], "overwrite add_data_files")
+    try
+        result = @ccall rust_lib.iceberg_overwrite_action_add_data_files(
+            action.ptr::Ptr{Cvoid},
+            data_files.ptr::Ptr{Cvoid},
+            error_message_ptr::Ref{Ptr{Cchar}}
+        )::Cint
+        if result != 0
+            parse_and_throw(error_message_ptr[], "overwrite add_data_files")
+        end
+    finally
+        free_data_files!(data_files)
     end
-    data_files.ptr = C_NULL
     return nothing
 end
 
@@ -428,15 +431,18 @@ function delete_data_files(action::OverwriteAction, data_files::DataFiles)
         throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "DataFiles has been freed or consumed"))
     end
     error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
-    result = @ccall rust_lib.iceberg_overwrite_action_delete_data_files(
-        action.ptr::Ptr{Cvoid},
-        data_files.ptr::Ptr{Cvoid},
-        error_message_ptr::Ref{Ptr{Cchar}}
-    )::Cint
-    if result != 0
-        parse_and_throw(error_message_ptr[], "overwrite delete_data_files")
+    try
+        result = @ccall rust_lib.iceberg_overwrite_action_delete_data_files(
+            action.ptr::Ptr{Cvoid},
+            data_files.ptr::Ptr{Cvoid},
+            error_message_ptr::Ref{Ptr{Cchar}}
+        )::Cint
+        if result != 0
+            parse_and_throw(error_message_ptr[], "overwrite delete_data_files")
+        end
+    finally
+        free_data_files!(data_files)
     end
-    data_files.ptr = C_NULL
     return nothing
 end
 
