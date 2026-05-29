@@ -7,6 +7,7 @@ use crate::catalog::IcebergCatalog;
 use crate::error_codes::{classified_error, classify_iceberg, IcebergErrorCode};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
+use crate::IcebergDataFiles;
 use iceberg::spec::DataFile;
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 
@@ -44,15 +45,6 @@ impl IcebergTransaction {
     }
 }
 
-/// Opaque handle for data files produced by a writer
-/// This holds the Vec<DataFile> that results from closing a writer
-pub struct IcebergDataFiles {
-    pub data_files: Vec<DataFile>,
-}
-
-unsafe impl Send for IcebergDataFiles {}
-unsafe impl Sync for IcebergDataFiles {}
-
 /// Opaque handle for accumulating data files for a FastAppendAction
 ///
 /// Since iceberg-rust's FastAppendAction is not publicly exported, we store
@@ -83,6 +75,22 @@ impl IcebergFastAppendAction {
     }
 }
 
+/// Opaque handle accumulating data files for an OverwriteAction.
+#[derive(Default)]
+pub struct IcebergOverwriteAction {
+    added_files: Vec<DataFile>,
+    deleted_files: Vec<DataFile>,
+}
+
+unsafe impl Send for IcebergOverwriteAction {}
+unsafe impl Sync for IcebergOverwriteAction {}
+
+impl IcebergOverwriteAction {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Type alias for transaction response
 pub type IcebergTransactionResponse = IcebergBoxedResponse<IcebergTransaction>;
 
@@ -92,16 +100,6 @@ pub extern "C" fn iceberg_transaction_free(transaction: *mut IcebergTransaction)
     if !transaction.is_null() {
         unsafe {
             let _ = Box::from_raw(transaction);
-        }
-    }
-}
-
-/// Free data files handle
-#[no_mangle]
-pub extern "C" fn iceberg_data_files_free(data_files: *mut IcebergDataFiles) {
-    if !data_files.is_null() {
-        unsafe {
-            let _ = Box::from_raw(data_files);
         }
     }
 }
@@ -310,3 +308,161 @@ export_runtime_op!(
     transaction: *mut IcebergTransaction,
     catalog: *mut IcebergCatalog
 );
+
+/// Free an overwrite action.
+#[no_mangle]
+pub extern "C" fn iceberg_overwrite_action_free(action: *mut IcebergOverwriteAction) {
+    if !action.is_null() {
+        unsafe {
+            let _ = Box::from_raw(action);
+        }
+    }
+}
+
+/// Create a new OverwriteAction.
+///
+/// # Safety
+/// The returned action must be freed with `iceberg_overwrite_action_free` when no longer needed.
+#[no_mangle]
+pub extern "C" fn iceberg_overwrite_action_new() -> *mut IcebergOverwriteAction {
+    Box::into_raw(Box::new(IcebergOverwriteAction::new()))
+}
+
+/// Add data files to write in the overwrite snapshot.
+///
+/// The data_files handle is consumed — its files are moved into the action.
+/// Returns 0 on success, non-zero on error.
+#[no_mangle]
+pub extern "C" fn iceberg_overwrite_action_add_data_files(
+    action: *mut IcebergOverwriteAction,
+    data_files: *mut IcebergDataFiles,
+    error_message_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    let set_error = |msg: &str, out: *mut *mut std::ffi::c_char| {
+        if !out.is_null() {
+            if let Ok(c_str) = std::ffi::CString::new(msg) {
+                unsafe {
+                    *out = c_str.into_raw();
+                }
+            }
+        }
+    };
+    if action.is_null() {
+        set_error("Null action pointer provided", error_message_out);
+        return 1;
+    }
+    if data_files.is_null() {
+        set_error("Null data_files pointer provided", error_message_out);
+        return 1;
+    }
+    let action_ref = unsafe { &mut *action };
+    let df_ref = unsafe { &mut *data_files };
+    action_ref
+        .added_files
+        .extend(std::mem::take(&mut df_ref.data_files));
+    0
+}
+
+/// Mark data files for deletion in the overwrite snapshot.
+///
+/// The data_files handle is consumed — its files are moved into the action.
+/// Returns 0 on success, non-zero on error.
+#[no_mangle]
+pub extern "C" fn iceberg_overwrite_action_delete_data_files(
+    action: *mut IcebergOverwriteAction,
+    data_files: *mut IcebergDataFiles,
+    error_message_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    let set_error = |msg: &str, out: *mut *mut std::ffi::c_char| {
+        if !out.is_null() {
+            if let Ok(c_str) = std::ffi::CString::new(msg) {
+                unsafe {
+                    *out = c_str.into_raw();
+                }
+            }
+        }
+    };
+    if action.is_null() {
+        set_error("Null action pointer provided", error_message_out);
+        return 1;
+    }
+    if data_files.is_null() {
+        set_error("Null data_files pointer provided", error_message_out);
+        return 1;
+    }
+    let action_ref = unsafe { &mut *action };
+    let df_ref = unsafe { &mut *data_files };
+    action_ref
+        .deleted_files
+        .extend(std::mem::take(&mut df_ref.data_files));
+    0
+}
+
+/// Apply an OverwriteAction to a transaction.
+///
+/// Consumes the action's file lists and applies them to the transaction via
+/// `Transaction::overwrite()`. The action handle should be freed after this call.
+/// Returns 0 on success, non-zero on error.
+#[no_mangle]
+pub extern "C" fn iceberg_overwrite_action_apply(
+    action: *mut IcebergOverwriteAction,
+    transaction: *mut IcebergTransaction,
+    error_message_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    let set_error = |msg: &str, out: *mut *mut std::ffi::c_char| {
+        if !out.is_null() {
+            if let Ok(c_str) = std::ffi::CString::new(msg) {
+                unsafe {
+                    *out = c_str.into_raw();
+                }
+            }
+        }
+    };
+    if action.is_null() {
+        set_error("Null action pointer provided", error_message_out);
+        return 1;
+    }
+    if transaction.is_null() {
+        set_error("Null transaction pointer provided", error_message_out);
+        return 1;
+    }
+    let action_ref = unsafe { &mut *action };
+    let tx_ref = unsafe { &mut *transaction };
+
+    let added = std::mem::take(&mut action_ref.added_files);
+    let deleted = std::mem::take(&mut action_ref.deleted_files);
+
+    let tx = match tx_ref.take() {
+        Some(t) => t,
+        None => {
+            set_error(
+                &format!(
+                    "{}\t{}\tTransaction already consumed",
+                    IcebergErrorCode::STATE_TRANSACTION_CONSUMED as u32,
+                    "Transaction has already been committed or rolled back"
+                ),
+                error_message_out,
+            );
+            return 1;
+        }
+    };
+
+    let overwrite_action = tx
+        .overwrite()
+        .add_data_files(added)
+        .delete_data_files(deleted);
+
+    match overwrite_action.apply(tx) {
+        Ok(new_tx) => {
+            tx_ref.replace(new_tx);
+            0
+        }
+        Err(e) => {
+            set_error(
+                &format!("Failed to apply overwrite: {}", e),
+                error_message_out,
+            );
+            1
+        }
+    }
+}

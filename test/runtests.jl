@@ -45,6 +45,9 @@ include("transaction_tests.jl")
 # Include writer tests
 include("writer_tests.jl")
 
+# Include overwrite tests
+include("overwrite_tests.jl")
+
 end # End of testset
 
 println("\n🎉 All tests completed!")

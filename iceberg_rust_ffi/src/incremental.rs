@@ -218,7 +218,8 @@ export_runtime_op!(
         let (scan_ref, serialization_concurrency) = result_tuple;
 
         // Get unzipped streams (separate append and delete streams)
-        let (inserts_stream, deletes_stream) = scan_ref.to_unzipped_arrow().await.map_err(|e| classify_iceberg(e))?;
+        let result = scan_ref.to_unzipped_arrow().await.map_err(|e| classify_iceberg(e))?;
+        let (inserts_stream, deletes_stream) = (result.appends, result.deletes);
 
         // Transform both streams with parallel serialization
         let inserts = IcebergArrowStream {

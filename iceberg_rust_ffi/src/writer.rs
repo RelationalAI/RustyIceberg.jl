@@ -100,7 +100,6 @@ use crate::error_codes::{classified_error, classify, classify_iceberg, IcebergEr
 use crate::record_batch_builder::{RecordBatchBuilder, DEFAULT_COALESCE_ROWS};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
-use crate::transaction::IcebergDataFiles;
 use crate::util::parse_c_string;
 use crate::writer_columns::{
     ColumnSlice, COLUMN_TYPE_BOOLEAN, COLUMN_TYPE_DECIMAL_INT128, COLUMN_TYPE_DECIMAL_INT32,
@@ -109,6 +108,7 @@ use crate::writer_columns::{
     COLUMN_TYPE_JULIA_TIMESTAMPTZ, COLUMN_TYPE_JULIA_TIMESTAMPTZ_NS,
     COLUMN_TYPE_JULIA_TIMESTAMP_NS, COLUMN_TYPE_STRING, COLUMN_TYPE_UUID,
 };
+use crate::IcebergDataFiles;
 use object_store_ffi::{
     export_runtime_op, with_cancellation, CResult, NotifyGuard, ResponseGuard, RT,
 };
