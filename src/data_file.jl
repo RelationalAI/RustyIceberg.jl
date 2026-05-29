@@ -39,7 +39,7 @@ Return the number of data files in the handle (0 if the handle is null/freed).
 """
 function Base.length(df::DataFiles)
     df.ptr == C_NULL && return 0
-    Int(@ccall rust_lib.iceberg_data_files_len(df.ptr::Ptr{Cvoid})::Csize_t)
+    return Int(@ccall rust_lib.iceberg_data_files_len(df.ptr::Ptr{Cvoid})::Csize_t)
 end
 
 """
