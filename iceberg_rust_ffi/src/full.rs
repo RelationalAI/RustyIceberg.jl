@@ -14,8 +14,11 @@ use object_store_ffi::{
 };
 
 /// Holds state for a full table scan across its lifecycle:
-///   1. Construction: `builder` is set, everything else is None/0.
-///   2. Configuration: Julia calls with_* methods that transform `builder`.
+///   1. Construction: `builder` is set from the table + perf config; the perf
+///      fields (`batch_size`, `file_prefetch_depth`, `serialization_concurrency`)
+///      are stored on the struct.
+///   2. Configuration: Julia calls non-perf with_* methods (select, file/pos
+///      column, snapshot id) that transform `builder`.
 ///   3. Build: `builder` is consumed → `scan` is populated.
 ///   4. Stream: `scan` + `file_io` + `batch_size` are consumed by
 ///      `iceberg_arrow_stream` to create the file-parallel pipeline.
@@ -23,57 +26,58 @@ use object_store_ffi::{
 pub struct IcebergScan {
     pub builder: Option<TableScanBuilder<'static>>,
     pub scan: Option<TableScan>,
-    /// Dead field kept for FFI ABI compatibility and shape-symmetry with
-    /// `IncrementalScan` (whose twin *is* still used, but only for the
-    /// incremental delete-stream's parallel serialization — the per-file
-    /// append/full pipeline uses `tokio::task::spawn_blocking` directly,
-    /// with parallelism implicitly bounded by `file_prefetch_depth`).
-    /// The FFI setter `iceberg_scan_with_serialization_concurrency_limit`
-    /// writes this field, but nothing reads it.
+    /// Dead field kept for shape-symmetry with `IncrementalScan` (whose twin
+    /// *is* still used, but only for the incremental delete-stream's parallel
+    /// serialization — the per-file append/full pipeline uses
+    /// `tokio::task::spawn_blocking` directly, with parallelism implicitly
+    /// bounded by `file_prefetch_depth`). Populated from the perf config at
+    /// construction, but nothing reads it on the full-scan path.
     pub serialization_concurrency: usize,
     /// Cloned from the Table at construction time. Passed to the pipeline so
     /// each per-file ArrowReader can open its own parquet file.
     pub file_io: FileIO,
-    /// Set by Julia via `iceberg_scan_with_batch_size`. Required: the FFI
-    /// stream ops error out if this is still `None` at stream-creation time.
-    /// Forwarded to each per-file `ArrowReaderBuilder` inside the pipeline.
-    pub batch_size: Option<usize>,
-    /// Dead field kept for FFI ABI compatibility and shape-symmetry with
-    /// `IncrementalScan` (whose `file_concurrency` is likewise dead — both
-    /// pipelines are now bounded by `file_prefetch_depth` alone via
-    /// `Stream::buffered`). The FFI setter
-    /// `iceberg_scan_with_data_file_concurrency_limit` is a no-op and
-    /// does not write here; nothing reads this. Removing it would force
-    /// `scan_common.rs` macros to switch to functional-record-update
-    /// just to skip one field on one of the two structs they handle.
-    pub file_concurrency: usize,
+    /// Set from the perf config at construction. Forwarded to each per-file
+    /// `ArrowReaderBuilder` inside the pipeline.
+    pub batch_size: usize,
     /// How many FileScan items the full-scan pipeline keeps in flight (i.e.
-    /// `Stream::buffered(prefetch_depth)`). 0 = auto (= cpu_count()). This is
-    /// the only concurrency knob; see `nested_pipeline`'s module-level
-    /// "Concurrency invariant" doc for the cap on alive `process_file` tasks.
+    /// `Stream::buffered(prefetch_depth)`). Supplied verbatim by Julia (the
+    /// single source of tuning defaults) and used as-is. See `nested_pipeline`'s
+    /// module-level "Concurrency invariant" doc for the cap on alive
+    /// `process_file` tasks.
     pub file_prefetch_depth: usize,
 }
 
 unsafe impl Send for IcebergScan {}
 
-/// Create a new scan builder from an opened table.
-/// Captures `file_io` from the table for later use by the pipeline.
+/// Create a new scan from an opened table and a complete `IcebergPerfConfigFFI`
+/// (supplied by Julia — the single source of tuning defaults). The manifest
+/// concurrency knobs and batch size are applied to the iceberg-rs builder here;
+/// `batch_size` / `file_prefetch_depth` / `serialization_concurrency` are also
+/// stored on the struct for the pipeline to read. Captures `file_io` from the
+/// table for later use by the pipeline.
 #[no_mangle]
-pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan {
+pub extern "C" fn iceberg_new_scan(
+    table: *mut IcebergTable,
+    perf: IcebergPerfConfigFFI,
+) -> *mut IcebergScan {
     if table.is_null() {
         return ptr::null_mut();
     }
     let table_ref = unsafe { &*table };
     let file_io = table_ref.table.file_io().clone();
-    let scan_builder = table_ref.table.scan();
+    let scan_builder = table_ref
+        .table
+        .scan()
+        .with_batch_size(Some(perf.batch_size as usize))
+        .with_manifest_file_concurrency_limit(perf.manifest_file_concurrency_limit as usize)
+        .with_manifest_entry_concurrency_limit(perf.manifest_entry_concurrency_limit as usize);
     Box::into_raw(Box::new(IcebergScan {
         builder: Some(scan_builder),
         scan: None,
-        serialization_concurrency: 0,
+        serialization_concurrency: perf.serialization_concurrency_limit as usize,
         file_io,
-        batch_size: None,
-        file_concurrency: 0,
-        file_prefetch_depth: 0,
+        batch_size: perf.batch_size as usize,
+        file_prefetch_depth: perf.file_prefetch_depth as usize,
     }))
 }
 
@@ -81,51 +85,11 @@ pub extern "C" fn iceberg_new_scan(table: *mut IcebergTable) -> *mut IcebergScan
 
 impl_select_columns!(iceberg_select_columns, IcebergScan);
 
-/// FFI-stable no-op kept for API compatibility with Julia callers. The
-/// full-scan pipeline used to take this as a separate concurrency cap, but
-/// it overlapped with `file_prefetch_depth` and is now replaced by
-/// `Stream::buffered(prefetch_depth)`. The iceberg-rs scan builder's own
-/// `with_data_file_concurrency_limit` only affects `to_arrow()` (which we
-/// don't call — we use `plan_files()` directly), so forwarding is unnecessary.
-#[no_mangle]
-pub extern "C" fn iceberg_scan_with_data_file_concurrency_limit(
-    scan: &mut *mut IcebergScan,
-    _n: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    CResult::Ok
-}
-
-impl_scan_builder_method!(
-    iceberg_scan_with_manifest_file_concurrency_limit,
-    IcebergScan,
-    with_manifest_file_concurrency_limit,
-    n: usize
-);
-
-impl_scan_builder_method!(
-    iceberg_scan_with_manifest_entry_concurrency_limit,
-    IcebergScan,
-    with_manifest_entry_concurrency_limit,
-    n: usize
-);
-
-impl_with_batch_size!(iceberg_scan_with_batch_size, IcebergScan);
-
 impl_scan_builder_method!(iceberg_scan_with_file_column, IcebergScan, with_file_column);
 
 impl_scan_builder_method!(iceberg_scan_with_pos_column, IcebergScan, with_pos_column);
 
 impl_scan_build!(iceberg_scan_build, IcebergScan);
-
-impl_with_serialization_concurrency_limit!(
-    iceberg_scan_with_serialization_concurrency_limit,
-    IcebergScan
-);
-
-impl_with_file_prefetch_depth!(iceberg_scan_with_file_prefetch_depth, IcebergScan);
 
 impl_scan_builder_method!(
     iceberg_scan_with_snapshot_id,
@@ -145,20 +109,15 @@ impl_scan_builder_method!(
 //      yields batches in strict file-then-row order.
 
 /// Resolve the pipeline tuning parameters from a configured scan.
-/// Returns `(prefetch_depth, file_io, batch_size)`. A stored
-/// `file_prefetch_depth` of 0 means "auto" → defaults to `cpu_count()`.
-/// `batch_size` must have been set via `iceberg_scan_with_batch_size`;
-/// otherwise the FFI op returns an error.
+/// Returns `(prefetch_depth, file_io, batch_size)`. Both `file_prefetch_depth`
+/// and `batch_size` are supplied verbatim by Julia at construction (the single
+/// source of tuning defaults) and used as-is — there is no "0 = auto" fallback.
 fn resolve_pipeline_params(scan: &IcebergScan) -> anyhow::Result<(usize, FileIO, usize)> {
-    let prefetch_depth = if scan.file_prefetch_depth == 0 {
-        crate::cpu_count()
-    } else {
-        scan.file_prefetch_depth
-    };
-    let batch_size = scan.batch_size.ok_or_else(|| {
-        anyhow::anyhow!("batch_size not set; call iceberg_scan_with_batch_size before scan")
-    })?;
-    Ok((prefetch_depth, scan.file_io.clone(), batch_size))
+    Ok((
+        scan.file_prefetch_depth,
+        scan.file_io.clone(),
+        scan.batch_size,
+    ))
 }
 
 export_runtime_op!(

@@ -12,9 +12,8 @@ to build the scan and obtain an Arrow stream.
 # Example
 ```julia
 table = table_open("s3://path/to/table/metadata.json")
-scan = new_scan(table)
+scan = new_scan(table, IcebergPerfConfig(batch_size=1024))
 select_columns!(scan, ["col1", "col2"])
-with_batch_size!(scan, UInt(1024))
 stream = scan!(scan)
 # ... process batches from stream
 free_stream(stream)
@@ -27,12 +26,17 @@ mutable struct Scan
 end
 
 """
-    new_scan(table::Table) -> Scan
+    new_scan(table::Table, perf::IcebergPerfConfig) -> Scan
 
-Create a scan for the given table.
+Create a scan for the given table, configured with the tuning parameters in `perf`.
+
+`perf` is passed by value across the FFI and is the single source of every tuning
+default (batch size, manifest concurrency, prefetch depth, serialization concurrency).
+There are no per-field setters: the configuration is fixed at construction.
 """
-function new_scan(table::Table)
-    scan_ptr = @ccall rust_lib.iceberg_new_scan(table::Table)::Ptr{Cvoid}
+function new_scan(table::Table, perf::IcebergPerfConfig)
+    scan_ptr = @ccall rust_lib.iceberg_new_scan(
+        table::Table, perf::IcebergPerfConfig)::Ptr{Cvoid}
     return Scan(scan_ptr)
 end
 
@@ -61,79 +65,6 @@ function select_columns!(scan::Scan, column_names::Vector{String})
 end
 
 """
-    with_data_file_concurrency_limit!(scan::Scan, n::UInt)
-
-No-op (kept for API stability). The full-scan pipeline derives its
-concurrency from `with_file_prefetch_depth!` only.
-"""
-with_data_file_concurrency_limit!(::Scan, ::UInt) = nothing
-
-"""
-    with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
-
-Sets the manifest file concurrency level for the full scan.
-"""
-function with_manifest_file_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_manifest_file_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_scan_with_manifest_file_concurrency_limit returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
-    with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
-
-Sets the manifest entry concurrency level for the scan.
-"""
-function with_manifest_entry_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_manifest_entry_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_scan_with_manifest_entry_concurrency_limit returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
-    with_batch_size!(scan::Scan, n::UInt)
-
-Sets the batch size for the scan. **Required**: must be called before
-`scan!` / streaming the scan; otherwise the Rust FFI will error out
-with "batch_size not set".
-"""
-function with_batch_size!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_batch_size(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_scan_with_batch_size returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
     with_file_column!(scan::Scan)
 
 Add the _file metadata column to the scan.
@@ -143,7 +74,7 @@ tracking which data files contain specific rows.
 
 # Example
 ```julia
-scan = new_scan(table)
+scan = new_scan(table, IcebergPerfConfig())
 with_file_column!(scan)
 stream = scan!(scan)
 ```
@@ -173,7 +104,7 @@ be useful for tracking row locations and debugging.
 
 # Example
 ```julia
-scan = new_scan(table)
+scan = new_scan(table, IcebergPerfConfig())
 with_pos_column!(scan)
 stream = scan!(scan)
 ```
@@ -194,64 +125,6 @@ function with_pos_column!(scan::Scan)
 end
 
 """
-    with_serialization_concurrency_limit!(scan::Scan, n::UInt)
-
-Set the serialization concurrency limit for the scan.
-
-This controls how many RecordBatch serializations can happen in parallel.
-- `n = 0`: Auto-detect based on CPU cores (default)
-- `n > 0`: Use exactly n concurrent serializations
-
-Higher values improve throughput for scans with many batches, but use more memory.
-
-# Example
-```julia
-scan = new_scan(table)
-with_serialization_concurrency_limit!(scan, UInt(8))  # Serialize up to 8 batches in parallel
-stream = scan!(scan)
-```
-"""
-function with_serialization_concurrency_limit!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_serialization_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_scan_with_serialization_concurrency_limit returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
-    with_file_prefetch_depth!(scan::Scan, n::UInt)
-
-Set the width of the full-scan pipeline's `Stream::buffered(prefetch_depth)`
-window. Higher values keep the consumer busy and overlap manifest planning
-with reading, but use more memory. `0` = auto (= `cpu_count()`). Full-scan
-only. See the Rust crate's `nested_pipeline` module-level docs for the
-exact cap on alive `process_file` tasks.
-"""
-function with_file_prefetch_depth!(scan::Scan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_scan_with_file_prefetch_depth(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_scan_with_file_prefetch_depth returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
     with_snapshot_id!(scan::Scan, snapshot_id::Int64)
 
 Set the snapshot ID for the scan.
@@ -264,7 +137,7 @@ comparing data across different points in time.
 ```julia
 table = table_open("s3://path/to/table/metadata.json")
 # List available snapshots (if method is available)
-scan = new_scan(table)
+scan = new_scan(table, IcebergPerfConfig())
 with_snapshot_id!(scan, Int64(123))  # Scan snapshot with ID 123
 stream = scan!(scan)
 ```

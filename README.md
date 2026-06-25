@@ -8,6 +8,26 @@ A Julia package that provides bindings on top of Iceberg Rust crate, allowing yo
 
 This package wraps the iceberg_rust_ffi interface with Julia bindings, providing Julia interfaces for working with Iceberg tables. It supports reading data from Iceberg tables in full-scan and incremental-scan modes.
 
+## Scan tuning (`IcebergPerfConfig`)
+
+All scan tuning knobs (batch size, manifest concurrency, file prefetch depth,
+serialization concurrency) live in a single struct, [`IcebergPerfConfig`], which is
+**the authoritative source of every tuning default**. It is passed by value at scan
+construction:
+
+```julia
+scan = new_scan(table, IcebergPerfConfig())                 # all defaults
+scan = new_scan(table, IcebergPerfConfig(batch_size=1024))  # override one knob
+inc  = new_incremental_scan(table, from, to, IcebergPerfConfig())
+```
+
+There are no per-knob `with_*!` setters and no hidden defaults on the Rust side: the
+configuration is fixed at construction and the Rust layer consumes whatever Julia
+supplies. See the `IcebergPerfConfig` docstring for the full per-parameter
+documentation and the pipeline architecture. The struct is binary-compatible with the
+Rust `IcebergPerfConfigFFI` mirror; a round-trip test (`perf_config_tests.jl`) guards
+the layout.
+
 ## Installation
 1. Install the package in Julia:
 ```julia

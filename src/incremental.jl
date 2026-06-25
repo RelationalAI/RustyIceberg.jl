@@ -15,8 +15,7 @@ with builder methods, and call `scan!` to obtain separate Arrow streams for inse
 # Example
 ```julia
 table = table_open("s3://path/to/table/metadata.json")
-scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-with_batch_size!(scan, UInt(1024))
+scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, IcebergPerfConfig(batch_size=1024))
 inserts_stream, deletes_stream = scan!(scan)
 # ... process batches from both streams
 free_stream(inserts_stream)
@@ -52,31 +51,35 @@ mutable struct UnzippedStreamsResponse
 end
 
 """
-    new_incremental_scan(table::Table, from_snapshot_id::Union{Int64,Nothing}, to_snapshot_id::Union{Int64,Nothing}) -> IncrementalScan
+    new_incremental_scan(table::Table, from_snapshot_id::Union{Int64,Nothing}, to_snapshot_id::Union{Int64,Nothing}, perf::IcebergPerfConfig) -> IncrementalScan
 
-Create an incremental scan for the given table between two snapshots.
+Create an incremental scan for the given table between two snapshots, configured with
+the tuning parameters in `perf`.
 
 # Arguments
 - `table::Table`: The Iceberg table to scan
 - `from_snapshot_id`: Starting snapshot ID, or `nothing` to scan from the root (oldest) snapshot
 - `to_snapshot_id`: Ending snapshot ID, or `nothing` to scan to the current (latest) snapshot
+- `perf::IcebergPerfConfig`: Tuning parameters, passed by value (the single source of
+  every tuning default). There are no per-field setters: configuration is fixed at
+  construction.
 
 # Examples
 ```julia
 # Scan full history (root to current)
-scan = new_incremental_scan(table, nothing, nothing)
+scan = new_incremental_scan(table, nothing, nothing, IcebergPerfConfig())
 
 # Scan from root to specific snapshot
-scan = new_incremental_scan(table, nothing, snapshot_id)
+scan = new_incremental_scan(table, nothing, snapshot_id, IcebergPerfConfig())
 
 # Scan from specific snapshot to current
-scan = new_incremental_scan(table, snapshot_id, nothing)
+scan = new_incremental_scan(table, snapshot_id, nothing, IcebergPerfConfig())
 
 # Scan between specific snapshots
-scan = new_incremental_scan(table, from_id, to_id)
+scan = new_incremental_scan(table, from_id, to_id, IcebergPerfConfig())
 ```
 """
-function new_incremental_scan(table::Table, from_snapshot_id::Union{Int64,Nothing}, to_snapshot_id::Union{Int64,Nothing})
+function new_incremental_scan(table::Table, from_snapshot_id::Union{Int64,Nothing}, to_snapshot_id::Union{Int64,Nothing}, perf::IcebergPerfConfig)
     # Convert nothing to SNAPSHOT_ID_NONE for C API
     from_id = from_snapshot_id === nothing ? SNAPSHOT_ID_NONE : from_snapshot_id
     to_id = to_snapshot_id === nothing ? SNAPSHOT_ID_NONE : to_snapshot_id
@@ -84,7 +87,8 @@ function new_incremental_scan(table::Table, from_snapshot_id::Union{Int64,Nothin
     scan_ptr = @ccall rust_lib.iceberg_new_incremental_scan(
         table::Table,
         from_id::Int64,
-        to_id::Int64
+        to_id::Int64,
+        perf::IcebergPerfConfig
     )::Ptr{Cvoid}
     return IncrementalScan(scan_ptr)
 end
@@ -114,79 +118,6 @@ function select_columns!(scan::IncrementalScan, column_names::Vector{String})
 end
 
 """
-    with_manifest_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
-
-Sets the manifest file concurrency level for the incremental scan.
-"""
-function with_manifest_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_manifest_file_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_incremental_scan_with_manifest_file_concurrency_limit returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
-    with_data_file_concurrency_limit!(scan::IncrementalScan, n::UInt)
-
-No-op (kept for API stability). The incremental pipeline derives its
-concurrency from `with_file_prefetch_depth!` only.
-"""
-with_data_file_concurrency_limit!(::IncrementalScan, ::UInt) = nothing
-
-"""
-    with_manifest_entry_concurrency_limit!(scan::IncrementalScan, n::UInt)
-
-Sets the manifest entry concurrency level for the incremental scan.
-"""
-function with_manifest_entry_concurrency_limit!(scan::IncrementalScan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_manifest_entry_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_incremental_scan_with_manifest_entry_concurrency_limit returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
-    with_batch_size!(scan::IncrementalScan, n::UInt)
-
-Sets the batch size for the incremental scan. **Required**: must be called
-before streaming the scan; otherwise the Rust FFI will error out with
-"batch_size not set".
-"""
-function with_batch_size!(scan::IncrementalScan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_batch_size(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_incremental_scan_with_batch_size returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
     with_file_column!(scan::IncrementalScan)
 
 Add the _file metadata column to the incremental scan.
@@ -196,7 +127,7 @@ tracking which data files contain specific rows during incremental scans.
 
 # Example
 ```julia
-scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, IcebergPerfConfig())
 with_file_column!(scan)
 inserts_stream, deletes_stream = scan!(scan)
 ```
@@ -217,62 +148,6 @@ function with_file_column!(scan::IncrementalScan)
 end
 
 """
-    with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
-
-Set the serialization concurrency limit for the incremental scan.
-
-This controls how many RecordBatch serializations can happen in parallel for each stream.
-- `n = 0`: Auto-detect based on CPU cores (default)
-- `n > 0`: Use exactly n concurrent serializations per stream
-
-Note: Incremental scans have two separate streams (inserts and deletes), so total
-concurrency can be up to 2×n.
-
-# Example
-```julia
-scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
-with_serialization_concurrency_limit!(scan, UInt(8))  # Each stream serializes up to 8 batches in parallel
-inserts_stream, deletes_stream = scan!(scan)
-```
-"""
-function with_serialization_concurrency_limit!(scan::IncrementalScan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_serialization_concurrency_limit(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_incremental_scan_with_serialization_concurrency_limit returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
-    with_file_prefetch_depth!(scan::IncrementalScan, n::UInt)
-
-Set how many FileScan tasks are queued ahead in the outer FileScanStream.
-Higher values keep the Julia consumer busy but use more memory.
-"""
-function with_file_prefetch_depth!(scan::IncrementalScan, n::UInt)
-    result = GC.@preserve scan @ccall rust_lib.iceberg_incremental_scan_with_file_prefetch_depth(
-        convert(Ptr{Ptr{Cvoid}}, pointer_from_objref(scan))::Ptr{Ptr{Cvoid}},
-        n::Csize_t
-    )::Cint
-    if result != 0
-        throw(IcebergException(
-            STATE_RESOURCE_FREED,
-            "Resource has been freed",
-            "iceberg_scan_with_file_prefetch_depth returned $result",
-        ))
-    end
-    return nothing
-end
-
-"""
     with_pos_column!(scan::IncrementalScan)
 
 Add the _pos metadata column to the incremental scan.
@@ -282,7 +157,7 @@ be useful for tracking row locations during incremental scans.
 
 # Example
 ```julia
-scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, IcebergPerfConfig())
 with_pos_column!(scan)
 inserts_stream, deletes_stream = scan!(scan)
 ```

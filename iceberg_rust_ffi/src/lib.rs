@@ -5,12 +5,6 @@ pub(crate) fn unexpected(msg: impl std::fmt::Display) -> iceberg::Error {
     iceberg::Error::new(iceberg::ErrorKind::Unexpected, msg.to_string())
 }
 
-pub(crate) fn cpu_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-}
-
 use anyhow::Result;
 use arrow_array::{ffi as arrow_ffi, Array, RecordBatch, StructArray};
 

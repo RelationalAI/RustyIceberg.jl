@@ -22,15 +22,16 @@ const SNAPSHOT_ID_NONE: i64 = -1;
 pub struct IcebergIncrementalScan {
     pub builder: Option<IncrementalTableScanBuilder<'static>>,
     pub scan: Option<IncrementalTableScan>,
-    /// 0 = auto-detect (num_cpus)
+    /// Parallelism for the delete-stream IPC serialization fan-out. Supplied
+    /// verbatim by Julia (the single source of tuning defaults) and used as-is.
     pub serialization_concurrency: usize,
     // Present for macro compatibility with IcebergScan; unused for incremental.
     pub file_io: Option<iceberg::io::FileIO>,
-    /// Set by Julia via `iceberg_incremental_scan_with_batch_size`. Required:
-    /// the FFI stream op errors out if this is still `None` at stream-creation
-    /// time. Forwarded to the per-file `ArrowReaderBuilder` inside the pipeline.
-    pub batch_size: Option<usize>,
-    pub file_concurrency: usize,
+    /// Set from the perf config at construction. Forwarded to the per-file
+    /// `ArrowReaderBuilder` inside the pipeline.
+    pub batch_size: usize,
+    /// `Stream::buffered(prefetch_depth)` width for the append pipeline.
+    /// Supplied verbatim by Julia and used as-is.
     pub file_prefetch_depth: usize,
 }
 
@@ -83,11 +84,13 @@ impl RawResponse for IcebergUnzippedStreamsResponse {
 /// * `table` - The table to scan
 /// * `from_snapshot_id` - Starting snapshot ID, or `SNAPSHOT_ID_NONE` (-1) to scan from the root (oldest) snapshot
 /// * `to_snapshot_id` - Ending snapshot ID, or `SNAPSHOT_ID_NONE` (-1) to scan to the current (latest) snapshot
+/// * `perf` - Complete tuning config supplied by Julia (the single source of tuning defaults).
 #[no_mangle]
 pub extern "C" fn iceberg_new_incremental_scan(
     table: *mut IcebergTable,
     from_snapshot_id: i64,
     to_snapshot_id: i64,
+    perf: IcebergPerfConfigFFI,
 ) -> *mut IcebergIncrementalScan {
     if table.is_null() {
         return ptr::null_mut();
@@ -107,63 +110,27 @@ pub extern "C" fn iceberg_new_incremental_scan(
         Some(to_snapshot_id)
     };
 
-    let scan_builder = table_ref.table.incremental_scan(from_id, to_id);
+    let scan_builder = table_ref
+        .table
+        .incremental_scan(from_id, to_id)
+        .with_batch_size(Some(perf.batch_size as usize))
+        .with_manifest_file_concurrency_limit(perf.manifest_file_concurrency_limit as usize)
+        .with_manifest_entry_concurrency_limit(perf.manifest_entry_concurrency_limit as usize);
     Box::into_raw(Box::new(IcebergIncrementalScan {
         builder: Some(scan_builder),
         scan: None,
-        serialization_concurrency: 0,
+        serialization_concurrency: perf.serialization_concurrency_limit as usize,
         file_io: Some(table_ref.table.file_io().clone()),
-        batch_size: None,
-        file_concurrency: 0,
-        file_prefetch_depth: 0,
+        batch_size: perf.batch_size as usize,
+        file_prefetch_depth: perf.file_prefetch_depth as usize,
     }))
 }
 
-// Use macros from scan_common for shared functionality
+// Use macros from scan_common for shared functionality. Perf knobs (batch size,
+// manifest concurrency, prefetch depth, serialization concurrency) are applied at
+// construction from the `IcebergPerfConfigFFI`; only the non-perf builder methods
+// remain as separate setters.
 impl_select_columns!(iceberg_incremental_select_columns, IcebergIncrementalScan);
-
-impl_with_file_prefetch_depth!(
-    iceberg_incremental_scan_with_file_prefetch_depth,
-    IcebergIncrementalScan
-);
-
-impl_scan_builder_method!(
-    iceberg_incremental_scan_with_manifest_file_concurrency_limit,
-    IcebergIncrementalScan,
-    with_manifest_file_concurrency_limit,
-    n: usize
-);
-
-/// FFI-stable no-op kept for API compatibility with Julia callers. Same
-/// rationale as the full-scan twin (`iceberg_scan_with_data_file_concurrency_limit`):
-/// the incremental nested pipeline is now bounded by `file_prefetch_depth`
-/// alone, and the iceberg-rs scan builder's own
-/// `with_data_file_concurrency_limit` only affects `to_arrow()` /
-/// `to_unzipped_arrow()` (which we don't call — we use `plan_files()` +
-/// our own per-file `ArrowReader`s pinned to concurrency 1), so forwarding
-/// would have no effect anyway.
-#[no_mangle]
-pub extern "C" fn iceberg_incremental_scan_with_data_file_concurrency_limit(
-    scan: &mut *mut IcebergIncrementalScan,
-    _n: usize,
-) -> CResult {
-    if scan.is_null() || (*scan).is_null() {
-        return CResult::Error;
-    }
-    CResult::Ok
-}
-
-impl_scan_builder_method!(
-    iceberg_incremental_scan_with_manifest_entry_concurrency_limit,
-    IcebergIncrementalScan,
-    with_manifest_entry_concurrency_limit,
-    n: usize
-);
-
-impl_with_batch_size!(
-    iceberg_incremental_scan_with_batch_size,
-    IcebergIncrementalScan
-);
 
 impl_scan_builder_method!(
     iceberg_incremental_scan_with_file_column,
@@ -178,11 +145,6 @@ impl_scan_builder_method!(
 );
 
 impl_scan_build!(iceberg_incremental_scan_build, IcebergIncrementalScan);
-
-impl_with_serialization_concurrency_limit!(
-    iceberg_incremental_scan_with_serialization_concurrency_limit,
-    IcebergIncrementalScan
-);
 
 // Legacy unzipped FFI: returns two separate flat IcebergArrowStreams
 // (inserts + deletes) via iceberg-rs's own `to_unzipped_arrow()`. This
@@ -204,12 +166,9 @@ export_runtime_op!(
             return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Incremental scan not initialized"));
         }
 
-        // Determine concurrency (0 = auto-detect)
-        let serialization_concurrency = if scan_ptr.serialization_concurrency == 0 {
-            crate::cpu_count()
-        } else {
-            scan_ptr.serialization_concurrency
-        };
+        // Concurrency is supplied verbatim by Julia (the single source of tuning
+        // defaults); used as-is, no auto-detect.
+        let serialization_concurrency = scan_ptr.serialization_concurrency;
 
         Ok((scan_ref.as_ref().unwrap(), serialization_concurrency))
     },
@@ -241,27 +200,13 @@ export_runtime_op!(
     scan: *mut IcebergIncrementalScan
 );
 
-/// Resolve pipeline tuning knobs from an IncrementalScan. Same `0 = auto`
-/// convention as `resolve_pipeline_params` in `full.rs`, applied here to
-/// the two knobs that the incremental path actually consults: `prefetch_depth`
-/// (the append-pipeline's `Stream::buffered` width) and
-/// `serialization_concurrency` (parallelism for the delete-stream IPC fan-out).
-/// `file_concurrency` is stored on the struct for FFI ABI compatibility but
-/// is no longer consulted: the nested-append pipeline is bounded by
-/// `prefetch_depth` alone, matching the full-scan shape.
+/// Resolve pipeline tuning knobs from an IncrementalScan. Both knobs are
+/// supplied verbatim by Julia (the single source of tuning defaults) and used
+/// as-is — there is no "0 = auto" fallback. The two knobs the incremental path
+/// consults are `prefetch_depth` (the append-pipeline's `Stream::buffered` width)
+/// and `serialization_concurrency` (parallelism for the delete-stream IPC fan-out).
 fn resolve_incremental_pipeline_params(scan: &IcebergIncrementalScan) -> (usize, usize) {
-    let n = crate::cpu_count();
-    let prefetch_depth = if scan.file_prefetch_depth == 0 {
-        n
-    } else {
-        scan.file_prefetch_depth
-    };
-    let serialization_concurrency = if scan.serialization_concurrency == 0 {
-        n
-    } else {
-        scan.serialization_concurrency
-    };
-    (prefetch_depth, serialization_concurrency)
+    (scan.file_prefetch_depth, scan.serialization_concurrency)
 }
 
 /// Response for iceberg_incremental_file_scan_stream.
@@ -327,11 +272,7 @@ export_runtime_op!(
             .ok_or_else(|| classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "FileIO not available; create scan from table"))?;
         let (prefetch_depth, serialization_concurrency) =
             resolve_incremental_pipeline_params(scan_ptr);
-        let batch_size = scan_ptr.batch_size.ok_or_else(|| {
-            anyhow::anyhow!(
-                "batch_size not set; call iceberg_incremental_scan_with_batch_size before scan"
-            )
-        })?;
+        let batch_size = scan_ptr.batch_size;
 
         Ok((
             scan_ref.as_ref().unwrap(),

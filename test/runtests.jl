@@ -19,6 +19,9 @@ include("test_helpers.jl")
 # Include schema tests
 include("schema_tests.jl")
 
+# Binary-compatibility tests for the perf-config FFI struct (server-free)
+include("perf_config_tests.jl")
+
 @testset "Runtime Initialization" begin
     # Test runtime initialization - this should work
     @test_nowarn init_runtime()

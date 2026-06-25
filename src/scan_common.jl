@@ -1,6 +1,84 @@
 # Common scan utilities shared between full and incremental scans
 
 """
+    IcebergPerfConfig
+
+Scan pipeline & tuning parameters. **This is the single authoritative home for every
+scan tuning default.** It is passed by value across the FFI into [`new_scan`](@ref) /
+[`new_incremental_scan`](@ref); its memory layout must stay in lock-step with the Rust
+`IcebergPerfConfigFFI` helper struct (see `scan_common.rs`). The Rust struct has no
+defaults of its own — every field is supplied from here. A binary-compatibility test
+(`iceberg_perf_config_roundtrip`) guards the layout agreement.
+
+The fields are `UInt64` so the struct is `isbits` and passes by value to `@ccall` with
+no conversion (mirroring the C `u64` fields exactly).
+
+# Pipeline architecture
+
+Reading proceeds in three pipelined stages that overlap concurrently:
+
+  1. Manifest planning (metadata only, no data bytes read)
+     - Fetches manifest list from object storage (one small file per snapshot)
+     - Fetches manifest files concurrently (small Avro files, one per write batch)
+     - Processes manifest entries to build FileScanTask structs, each containing:
+       file path, byte range, record count, projected field IDs, bound predicate,
+       associated delete file list, partition metadata
+     - No Parquet data is opened at this stage
+
+  2. File Scan Task buffering (prefetch window)
+     - Both full and incremental scans run `Stream::buffered(file_prefetch_depth)` over
+       the planned per-file tasks. See the `nested_pipeline` module docs for the exact
+       cap on alive `process_file` tasks.
+     - Upstream is iceberg-rust's own internal channel (capacity =
+       manifest_entry_concurrency_limit).
+     - Purpose: hide manifest fetch latency (S3 round trips ~5–50ms each) behind data
+       read time.
+
+  3. Data reading
+     - Each per-file task opens one Parquet file, applies column projection and predicate,
+       loads associated delete files (full scan) or merges position deletes (incremental),
+       and streams Arrow record batches.
+     - Batches are serialized to Arrow IPC via tokio::task::spawn_blocking on both paths.
+
+# Tuning parameters
+
+  batch_size
+    Number of rows per Arrow record batch. Smaller batches reduce memory pressure;
+    larger batches reduce per-batch overhead. Applies to both data and delete file reads.
+
+  manifest_file_concurrency_limit
+    Per scan cap on how many manifest files are fetched from object storage concurrently.
+    All manifests for the snapshot share one pool.
+
+  manifest_entry_concurrency_limit
+    Per scan cap on how many manifest entries are processed concurrently — total across
+    all in-flight manifests, not per-manifest. Also sets the internal task channel
+    capacity, so it influences pipeline lookahead.
+
+  file_prefetch_depth
+    Width of the pipeline's `Stream::buffered(file_prefetch_depth)` window. Higher
+    values allow manifest planning to run further ahead of consumption, smoothing
+    bursts of object-storage latency. Each buffered reader holds open one file
+    and may have deserialized Arrow batches in memory, so this parameter also
+    bounds how much batch memory the FFI layer holds at once. Applies to both the
+    full-scan and incremental pipelines (both consume the value verbatim).
+
+  serialization_concurrency_limit
+    No-op for full scans (Arrow IPC serialization is dispatched per batch via
+    tokio::task::spawn_blocking inside the shared per-file pipeline, with parallelism
+    implicitly bounded by file_prefetch_depth). Incremental scans still honour it on
+    the delete-stream fan-out side (position deletes are flat-stream-serialized). The
+    legacy iterator-API path also honours it via its own spawn_blocking fan-out.
+"""
+Base.@kwdef struct IcebergPerfConfig
+    batch_size::UInt64 = 64 * 1024
+    manifest_file_concurrency_limit::UInt64 = Threads.nthreads() * 2
+    manifest_entry_concurrency_limit::UInt64 = Threads.nthreads() * 2
+    file_prefetch_depth::UInt64 = 1
+    serialization_concurrency_limit::UInt64 = Threads.nthreads()
+end
+
+"""
     ArrowStream
 
 Opaque pointer type representing an Arrow stream from the Rust FFI layer.
@@ -20,7 +98,7 @@ column in Iceberg tables.
 # Example
 ```julia
 # Select specific columns including the file path
-scan = new_scan(table)
+scan = new_scan(table, IcebergPerfConfig())
 select_columns!(scan, ["id", "name", FILE_COLUMN])
 stream = scan!(scan)
 ```
@@ -39,7 +117,7 @@ column in Iceberg tables, which represents the row's position within its data fi
 # Example
 ```julia
 # Select specific columns including the position
-scan = new_scan(table)
+scan = new_scan(table, IcebergPerfConfig())
 select_columns!(scan, ["id", "name", POS_COLUMN])
 stream = scan!(scan)
 ```
