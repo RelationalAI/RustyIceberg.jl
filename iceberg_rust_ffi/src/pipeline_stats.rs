@@ -8,8 +8,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::time::Instant;
 
-pub(crate) const MAX_BUFFERED_BYTES_PER_TASK: usize = 100 * 1024 * 1024;
-
 /// Process-monotonic origin used as a common reference point for the
 /// `pipeline_start_ns` / `pipeline_end_ns` timestamps. We can't store
 /// `Instant` directly in atomics, so each timestamp is encoded as
@@ -77,6 +75,9 @@ pub(crate) struct PipelineStats {
     pub buffered_bytes: AtomicU64,
     /// High-water mark of buffered_bytes.
     pub peak_buffered_bytes: AtomicU64,
+    /// Per-file byte budget in effect for this scan (from the scan's
+    /// `BufferLimits`); recorded once at pipeline start, for the stats display.
+    pub byte_budget_per_task: AtomicU64,
 }
 
 impl PipelineStats {
@@ -97,6 +98,7 @@ impl PipelineStats {
             consumer_file_wait_ns: AtomicU64::new(0),
             buffered_bytes: AtomicU64::new(0),
             peak_buffered_bytes: AtomicU64::new(0),
+            byte_budget_per_task: AtomicU64::new(0),
         }
     }
 
@@ -120,6 +122,14 @@ impl PipelineStats {
         self.consumer_file_wait_ns.store(0, Ordering::Relaxed);
         self.buffered_bytes.store(0, Ordering::Relaxed);
         self.peak_buffered_bytes.store(0, Ordering::Relaxed);
+        self.byte_budget_per_task.store(0, Ordering::Relaxed);
+    }
+
+    /// Record the per-file byte budget for this scan, for the stats display.
+    /// Called once at pipeline start (the value comes from the scan's
+    /// `BufferLimits`).
+    pub(crate) fn set_byte_budget_per_task(&self, bytes: u64) {
+        self.byte_budget_per_task.store(bytes, Ordering::Relaxed);
     }
 
     /// Mark the pipeline-end timestamp. Called from `make_file_stream` when a
@@ -216,7 +226,7 @@ impl PipelineStats {
         } else {
             0.0
         };
-        let limit_mb = MAX_BUFFERED_BYTES_PER_TASK / (1024 * 1024);
+        let limit_mb = self.byte_budget_per_task.load(Ordering::Relaxed) / (1024 * 1024);
 
         // Per-batch averages help distinguish "more parallel producers" from
         // "each batch got slower". Sum-across-producers lines double when

@@ -69,6 +69,30 @@ Reading proceeds in three pipelined stages that overlap concurrently:
     implicitly bounded by file_prefetch_depth). Incremental scans still honour it on
     the delete-stream fan-out side (position deletes are flat-stream-serialized). The
     legacy iterator-API path also honours it via its own spawn_blocking fan-out.
+
+== Per-file output buffering ==
+
+These bound how much already-read batch data the FFI layer holds in memory per data
+file, independently of `file_prefetch_depth` (which bounds how many *files* are in
+flight). Together with `file_prefetch_depth` they cap the pipeline's peak memory.
+
+  max_buffered_bytes_per_task
+    Per-file output-buffer cap in bytes. Each file's producer task parks once this
+    much undrained batch data is buffered for that file, resuming as the Julia
+    consumer drains batches. Larger = more read-ahead per file (smoother throughput)
+    at higher peak memory.
+
+  max_prefetch_buffers_of_waiting_file
+    Batch-slot budget for a *waiting* file — one whose per-file scan has been produced
+    by the outer pipeline but not yet picked up by the consumer. Kept small so waiting
+    files don't hoard memory before they are actively drained. Must be
+    `<= max_prefetch_buffers_of_active_file`.
+
+  max_prefetch_buffers_of_active_file
+    Batch-slot budget (and the per-file channel capacity) for an *active* file — one
+    handed off to the Julia consumer. Promoted from the waiting budget at hand-off.
+    Once active, this slot budget is typically slack and `max_buffered_bytes_per_task`
+    is the binding constraint.
 """
 Base.@kwdef struct IcebergPerfConfig
     batch_size::UInt64 = 64 * 1024
@@ -76,6 +100,9 @@ Base.@kwdef struct IcebergPerfConfig
     manifest_entry_concurrency_limit::UInt64 = Threads.nthreads() * 2
     file_prefetch_depth::UInt64 = 1
     serialization_concurrency_limit::UInt64 = Threads.nthreads()
+    max_buffered_bytes_per_task::UInt64 = 100 * 1024 * 1024
+    max_prefetch_buffers_of_waiting_file::UInt64 = 1
+    max_prefetch_buffers_of_active_file::UInt64 = 8
 end
 
 """

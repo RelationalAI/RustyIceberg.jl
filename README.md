@@ -11,9 +11,9 @@ This package wraps the iceberg_rust_ffi interface with Julia bindings, providing
 ## Scan tuning (`IcebergPerfConfig`)
 
 All scan tuning knobs (batch size, manifest concurrency, file prefetch depth,
-serialization concurrency) live in a single struct, [`IcebergPerfConfig`], which is
-**the authoritative source of every tuning default**. It is passed by value at scan
-construction:
+serialization concurrency, and per-file output-buffer limits) live in a single struct,
+[`IcebergPerfConfig`], which is **the authoritative source of every tuning default**.
+It is passed by value at scan construction:
 
 ```julia
 scan = new_scan(table, IcebergPerfConfig())                 # all defaults

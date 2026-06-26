@@ -1,4 +1,5 @@
-/// Common macros for scan builder methods shared between regular and incremental scans
+// Common scan utilities (the `IcebergPerfConfigFFI` wire struct + builder-method
+// macros) shared between regular and incremental scans.
 
 /// FFI mirror of RustyIceberg.jl's `IcebergPerfConfig`. This struct intentionally
 /// has NO `Default` impl and NO default values — every field is supplied by Julia,
@@ -15,48 +16,29 @@ pub struct IcebergPerfConfigFFI {
     pub manifest_entry_concurrency_limit: u64,
     pub file_prefetch_depth: u64,
     pub serialization_concurrency_limit: u64,
+    pub max_buffered_bytes_per_task: u64,
+    pub max_prefetch_buffers_of_waiting_file: u64,
+    pub max_prefetch_buffers_of_active_file: u64,
 }
 
-/// Test-only: echo each field of an `IcebergPerfConfigFFI` back into `out[0..5]`
+/// Test-only: echo each field of an `IcebergPerfConfigFFI` back into `out[0..8]`
 /// so a Julia unit test can assert the by-value struct layout agrees across the
 /// FFI boundary (field order, padding, calling convention). `out` must point to
-/// at least 5 `u64`s.
+/// at least 8 `u64`s.
 #[no_mangle]
 pub extern "C" fn iceberg_perf_config_roundtrip(p: IcebergPerfConfigFFI, out: *mut u64) {
     if out.is_null() {
         return;
     }
-    let out = unsafe { std::slice::from_raw_parts_mut(out, 5) };
+    let out = unsafe { std::slice::from_raw_parts_mut(out, 8) };
     out[0] = p.batch_size;
     out[1] = p.manifest_file_concurrency_limit;
     out[2] = p.manifest_entry_concurrency_limit;
     out[3] = p.file_prefetch_depth;
     out[4] = p.serialization_concurrency_limit;
-}
-
-#[cfg(test)]
-mod perf_config_abi_tests {
-    use super::IcebergPerfConfigFFI;
-    use std::mem::{align_of, size_of};
-
-    #[test]
-    fn iceberg_perf_config_abi_is_stable() {
-        assert_eq!(size_of::<IcebergPerfConfigFFI>(), 5 * 8); // 5 × u64
-        assert_eq!(align_of::<IcebergPerfConfigFFI>(), 8);
-        let p = IcebergPerfConfigFFI {
-            batch_size: 0,
-            manifest_file_concurrency_limit: 0,
-            manifest_entry_concurrency_limit: 0,
-            file_prefetch_depth: 0,
-            serialization_concurrency_limit: 0,
-        };
-        let base = &p as *const _ as usize;
-        assert_eq!((&p.batch_size as *const _ as usize) - base, 0);
-        assert_eq!((&p.manifest_file_concurrency_limit as *const _ as usize) - base, 8);
-        assert_eq!((&p.manifest_entry_concurrency_limit as *const _ as usize) - base, 16);
-        assert_eq!((&p.file_prefetch_depth as *const _ as usize) - base, 24);
-        assert_eq!((&p.serialization_concurrency_limit as *const _ as usize) - base, 32);
-    }
+    out[5] = p.max_buffered_bytes_per_task;
+    out[6] = p.max_prefetch_buffers_of_waiting_file;
+    out[7] = p.max_prefetch_buffers_of_active_file;
 }
 
 /// Macro to generate select_columns function for any scan type
@@ -101,6 +83,7 @@ macro_rules! impl_select_columns {
                 file_io: scan_ref.file_io,
                 batch_size: scan_ref.batch_size,
                 file_prefetch_depth: scan_ref.file_prefetch_depth,
+                buffer_limits: scan_ref.buffer_limits,
             }));
 
             CResult::Ok
@@ -150,6 +133,7 @@ macro_rules! impl_scan_builder_method {
                 file_io: scan_ref.file_io,
                 batch_size: scan_ref.batch_size,
                 file_prefetch_depth: scan_ref.file_prefetch_depth,
+                buffer_limits: scan_ref.buffer_limits,
             }));
 
             CResult::Ok
@@ -188,6 +172,7 @@ macro_rules! impl_scan_build {
                         file_io: scan_ref.file_io,
                         batch_size: scan_ref.batch_size,
                         file_prefetch_depth: scan_ref.file_prefetch_depth,
+                        buffer_limits: scan_ref.buffer_limits,
                     }));
                     CResult::Ok
                 }
@@ -235,3 +220,52 @@ pub(crate) use impl_scan_build;
 pub(crate) use impl_scan_builder_method;
 pub(crate) use impl_scan_free;
 pub(crate) use impl_select_columns;
+
+#[cfg(test)]
+mod perf_config_abi_tests {
+    use super::IcebergPerfConfigFFI;
+    use std::mem::{align_of, size_of};
+
+    #[test]
+    fn iceberg_perf_config_abi_is_stable() {
+        assert_eq!(size_of::<IcebergPerfConfigFFI>(), 8 * 8); // 8 × u64
+        assert_eq!(align_of::<IcebergPerfConfigFFI>(), 8);
+        let p = IcebergPerfConfigFFI {
+            batch_size: 0,
+            manifest_file_concurrency_limit: 0,
+            manifest_entry_concurrency_limit: 0,
+            file_prefetch_depth: 0,
+            serialization_concurrency_limit: 0,
+            max_buffered_bytes_per_task: 0,
+            max_prefetch_buffers_of_waiting_file: 0,
+            max_prefetch_buffers_of_active_file: 0,
+        };
+        let base = &p as *const _ as usize;
+        assert_eq!((&p.batch_size as *const _ as usize) - base, 0);
+        assert_eq!(
+            (&p.manifest_file_concurrency_limit as *const _ as usize) - base,
+            8
+        );
+        assert_eq!(
+            (&p.manifest_entry_concurrency_limit as *const _ as usize) - base,
+            16
+        );
+        assert_eq!((&p.file_prefetch_depth as *const _ as usize) - base, 24);
+        assert_eq!(
+            (&p.serialization_concurrency_limit as *const _ as usize) - base,
+            32
+        );
+        assert_eq!(
+            (&p.max_buffered_bytes_per_task as *const _ as usize) - base,
+            40
+        );
+        assert_eq!(
+            (&p.max_prefetch_buffers_of_waiting_file as *const _ as usize) - base,
+            48
+        );
+        assert_eq!(
+            (&p.max_prefetch_buffers_of_active_file as *const _ as usize) - base,
+            56
+        );
+    }
+}

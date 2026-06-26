@@ -43,7 +43,7 @@ called `with_batch_size!` before scanning.
 
 | File | Role |
 |---|---|
-| `src/nested_pipeline.rs` | Shared core: `create_nested_pipeline<S, Src>`, `spawn_file_task<S, BSF>`, `process_file`, `serialize_and_forward_batches`, `make_file_stream`, `build_reader`, `BufferedBatch`, `FileScan`, the `FileToScan<S>` handoff struct, constants (`MAX_PREFETCH_BUFFERS_OF_WAITING_FILE=1`, `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE=8`), and orchestration tests (which feed `FileToScan` values with an empty batch-stream builder). |
+| `src/nested_pipeline.rs` | Shared core: `create_nested_pipeline<S, Src>`, `spawn_file_task<S, BSF>`, `process_file`, `serialize_and_forward_batches`, `make_file_stream`, `build_reader`, `BufferedBatch`, `FileScan`, the `FileToScan<S>` handoff struct, the `BufferLimits` carrier (per-scan byte budget + waiting/active slot budgets, supplied by Julia via `IcebergPerfConfig`), and orchestration tests (which feed `FileToScan` values with an empty batch-stream builder). |
 | `src/full_pipeline.rs` | Full-scan entries: `create_full_scan_pipeline` (nested FFI) and `create_pipeline` (legacy flat-FFI wrapper = nested + `try_flatten` + inline `slot_sem` promotion). Per-file helper `read_one_full_scan_file`. Real-parquet end-to-end tests live here. |
 | `src/incremental_pipeline.rs` | Incremental-append entry: `create_incremental_nested_pipeline`. Pulls the same shared helpers, adds `read_one_append_file` + delete-stream glue. Real-parquet tests live here. |
 
@@ -207,10 +207,10 @@ Now genuinely *shared* (one body, called by both):
 * `build_reader` — `ArrowReaderBuilder` with the configured `batch_size`
   and per-file concurrency pinned to 1.
 * `BufferedBatch`, `FileScan` — the in-flight types.
-* `MAX_PREFETCH_BUFFERS_OF_WAITING_FILE` / `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE`
-  — the two-tier slot cap, including the FFI handoff promotion at
-  `IcebergFileScanResponse::set_payload`.
-* `MAX_BUFFERED_BYTES_PER_TASK` (in `pipeline_stats.rs`) — the byte_sem cap.
+* `BufferLimits` — per-scan tuning, supplied by Julia via `IcebergPerfConfig`
+  and threaded through `create_nested_pipeline`/`spawn_file_task`:
+  the waiting/active two-tier slot budget (including the FFI handoff promotion
+  at `IcebergFileScanResponse::set_payload`) and the `byte_sem` cap.
 * Stats counters: every `STATS.*` field is written from the shared code, so
   the incremental pipeline now correctly populates `reader_setup_ns`,
   `peak_concurrency`, `buffered_bytes`, etc. (At master, three of these
@@ -251,17 +251,19 @@ and not yet drained. With one serial consumer, `M = 1` and the cap is
 `create_full_scan_pipeline_caps_in_flight_at_prefetch_depth_plus_one`
 pins this down). Julia's `ICEBERG_FILE_TASK_GROUP` uses `M = nthreads()`.
 
-Memory per file is capped at ~100 MB by `byte_sem`. Slot count per file is
-capped at `MAX_PREFETCH_BUFFERS_OF_WAITING_FILE = 1` while waiting in the
-outer buffer (only one batch ahead before the FFI consumer picks the file
-up), promoted to `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE = 8` once the FFI
-consumer has called `iceberg_next_file_scan`. The promotion prevents
+Memory per file is capped by `byte_sem` at `BufferLimits::max_buffered_bytes_per_task`
+(default 100 MB). Slot count per file is capped at
+`BufferLimits::max_prefetch_buffers_of_waiting_file` (default 1) while waiting in
+the outer buffer (only one batch ahead before the FFI consumer picks the file
+up), promoted to `BufferLimits::max_prefetch_buffers_of_active_file` (default 8)
+once the FFI consumer has called `iceberg_next_file_scan`. The promotion prevents
 serialized bytes from accumulating in front of files that may never get
-drained (e.g. cancelled scans, slow consumers).
+drained (e.g. cancelled scans, slow consumers). All three are per-scan knobs
+supplied by Julia via `IcebergPerfConfig`.
 
 ### Backpressure clamp for oversized batches
 
-The byte semaphore has `MAX_BUFFERED_BYTES_PER_TASK` permits. A single
+The byte semaphore has `BufferLimits::max_buffered_bytes_per_task` permits. A single
 serialized batch larger than that would deadlock `byte_sem.acquire_many`,
 since the requested permit count can never be reached. To prevent that,
 `serialize_and_forward_batches` clamps the per-batch backpressure cost
@@ -331,8 +333,8 @@ serialized Arrow IPC in its per-file mpsc.
 Net consequences:
 
 * **Memory was much higher than the knob suggested.** Each alive
-  `process_file` task can buffer up to `MAX_BUFFERED_BYTES_PER_TASK`
-  (100 MB) of serialized IPC. With the master defaults, peak in-flight
+  `process_file` task can buffer up to `max_buffered_bytes_per_task`
+  (default 100 MB) of serialized IPC. With the master defaults, peak in-flight
   bytes were on the order of `(concurrency + prefetch_depth) × 100 MB`
   ≈ ~1.2 GB on a 4-thread default — not the `concurrency × 100 MB` a
   reader would infer.
@@ -534,13 +536,12 @@ These are not done on this branch; flagging them for future work.
   flat wrapper would simplify `full_pipeline.rs` by deleting
   `create_pipeline` and the inline `slot_sem` promotion. Blocked on
   confirming no out-of-tree consumers.
-* **Expose `byte_budget` and the slot constants as FFI-tunable knobs.**
-  `byte_budget` is already a parameter on `serialize_and_forward_batches`
-  / `process_file` / `process_file_inner` (so the oversized-batch
-  regression test can use a tiny budget), but `spawn_file_task` still
-  hardcodes it to `MAX_BUFFERED_BYTES_PER_TASK`. The slot constants are
-  still compile-time. Some Julia workloads (very wide schemas, small
-  batch sizes) might benefit from a different mix.
+* ~~**Expose `byte_budget` and the slot constants as FFI-tunable knobs.**~~
+  *Done (RAI-50776):* the byte budget and both slot budgets are now per-scan
+  fields on `BufferLimits`, supplied by Julia via `IcebergPerfConfig`
+  (`max_buffered_bytes_per_task`, `max_prefetch_buffers_of_waiting_file`,
+  `max_prefetch_buffers_of_active_file`) and threaded through
+  `create_nested_pipeline` → `spawn_file_task`. No compile-time constants remain.
 * **Per-pipeline stats namespaces.** Right now `STATS` is process-global
   and reset inside `create_nested_pipeline`. If two scans run concurrently
   in the same process the counters interleave. Currently irrelevant

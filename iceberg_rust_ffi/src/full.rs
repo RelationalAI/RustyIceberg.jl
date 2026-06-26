@@ -45,6 +45,12 @@ pub struct IcebergScan {
     /// module-level "Concurrency invariant" doc for the cap on alive
     /// `process_file` tasks.
     pub file_prefetch_depth: usize,
+    /// Per-scan buffer limits (byte budget + waiting/active prefetch slot
+    /// counts), populated from the perf config at construction and threaded
+    /// into the nested pipeline. Internal Rust struct (not repr(C)); Julia
+    /// only ever holds `IcebergScan` as an opaque `*mut` and never reads its
+    /// layout.
+    pub(crate) buffer_limits: crate::nested_pipeline::BufferLimits,
 }
 
 unsafe impl Send for IcebergScan {}
@@ -78,6 +84,12 @@ pub extern "C" fn iceberg_new_scan(
         file_io,
         batch_size: perf.batch_size as usize,
         file_prefetch_depth: perf.file_prefetch_depth as usize,
+        buffer_limits: crate::nested_pipeline::BufferLimits {
+            max_buffered_bytes_per_task: perf.max_buffered_bytes_per_task as usize,
+            max_prefetch_buffers_of_waiting_file: perf.max_prefetch_buffers_of_waiting_file
+                as usize,
+            max_prefetch_buffers_of_active_file: perf.max_prefetch_buffers_of_active_file as usize,
+        },
     }))
 }
 
@@ -109,14 +121,17 @@ impl_scan_builder_method!(
 //      yields batches in strict file-then-row order.
 
 /// Resolve the pipeline tuning parameters from a configured scan.
-/// Returns `(prefetch_depth, file_io, batch_size)`. Both `file_prefetch_depth`
-/// and `batch_size` are supplied verbatim by Julia at construction (the single
-/// source of tuning defaults) and used as-is — there is no "0 = auto" fallback.
-fn resolve_pipeline_params(scan: &IcebergScan) -> anyhow::Result<(usize, FileIO, usize)> {
+/// Returns `(prefetch_depth, file_io, batch_size, buffer_limits)`. All values
+/// are supplied verbatim by Julia at construction (the single source of tuning
+/// defaults) and used as-is — there is no "0 = auto" fallback.
+fn resolve_pipeline_params(
+    scan: &IcebergScan,
+) -> anyhow::Result<(usize, FileIO, usize, crate::nested_pipeline::BufferLimits)> {
     Ok((
         scan.file_prefetch_depth,
         scan.file_io.clone(),
         scan.batch_size,
+        scan.buffer_limits,
     ))
 }
 
@@ -132,12 +147,12 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Scan not initialized"));
         }
-        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr)?;
-        Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))
+        let (prefetch_depth, file_io, batch_size, buffer_limits) = resolve_pipeline_params(scan_ptr)?;
+        Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size, buffer_limits))
     },
     result_tuple,
     async {
-        let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
+        let (scan_ref, prefetch_depth, file_io, batch_size, buffer_limits) = result_tuple;
 
         // Hand off to the file-parallel pipeline. We pass the planner's
         // task stream directly — no `try_collect` into a `Vec`, since the
@@ -145,7 +160,7 @@ export_runtime_op!(
         // `Stream::buffered(prefetch_depth)`.
         let tasks = scan_ref.plan_files().await.map_err(|e| classify_iceberg(e))?;
         let stream = crate::full_pipeline::create_pipeline(
-            tasks, file_io, batch_size, prefetch_depth,
+            tasks, file_io, batch_size, prefetch_depth, buffer_limits,
         )
         .await;
 
@@ -175,17 +190,17 @@ export_runtime_op!(
         if scan_ref.is_none() {
             return Err(classified_error(IcebergErrorCode::STATE_RESOURCE_FREED, "Resource has been freed", "Scan not initialized"));
         }
-        let (prefetch_depth, file_io, batch_size) = resolve_pipeline_params(scan_ptr)?;
-        Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size))
+        let (prefetch_depth, file_io, batch_size, buffer_limits) = resolve_pipeline_params(scan_ptr)?;
+        Ok((scan_ref.as_ref().unwrap(), prefetch_depth, file_io, batch_size, buffer_limits))
     },
     result_tuple,
     async {
-        let (scan_ref, prefetch_depth, file_io, batch_size) = result_tuple;
+        let (scan_ref, prefetch_depth, file_io, batch_size, buffer_limits) = result_tuple;
 
         // Pass the planner's task stream directly into the pipeline.
         let tasks = scan_ref.plan_files().await.map_err(|e| classify_iceberg(e))?;
         let stream = crate::full_pipeline::create_full_scan_pipeline(
-            tasks, file_io, batch_size, prefetch_depth,
+            tasks, file_io, batch_size, prefetch_depth, buffer_limits,
         )
         .await;
 

@@ -33,6 +33,12 @@ pub struct IcebergIncrementalScan {
     /// `Stream::buffered(prefetch_depth)` width for the append pipeline.
     /// Supplied verbatim by Julia and used as-is.
     pub file_prefetch_depth: usize,
+    /// Per-scan buffer limits (byte budget + waiting/active prefetch slot
+    /// counts), populated from the perf config at construction and threaded
+    /// into the nested append pipeline. Internal Rust struct (not repr(C));
+    /// Julia only ever holds this scan as an opaque `*mut` and never reads
+    /// its layout.
+    pub(crate) buffer_limits: crate::nested_pipeline::BufferLimits,
 }
 
 unsafe impl Send for IcebergIncrementalScan {}
@@ -123,6 +129,12 @@ pub extern "C" fn iceberg_new_incremental_scan(
         file_io: Some(table_ref.table.file_io().clone()),
         batch_size: perf.batch_size as usize,
         file_prefetch_depth: perf.file_prefetch_depth as usize,
+        buffer_limits: crate::nested_pipeline::BufferLimits {
+            max_buffered_bytes_per_task: perf.max_buffered_bytes_per_task as usize,
+            max_prefetch_buffers_of_waiting_file: perf.max_prefetch_buffers_of_waiting_file
+                as usize,
+            max_prefetch_buffers_of_active_file: perf.max_prefetch_buffers_of_active_file as usize,
+        },
     }))
 }
 
@@ -273,6 +285,7 @@ export_runtime_op!(
         let (prefetch_depth, serialization_concurrency) =
             resolve_incremental_pipeline_params(scan_ptr);
         let batch_size = scan_ptr.batch_size;
+        let buffer_limits = scan_ptr.buffer_limits;
 
         Ok((
             scan_ref.as_ref().unwrap(),
@@ -280,11 +293,12 @@ export_runtime_op!(
             serialization_concurrency,
             batch_size,
             file_io,
+            buffer_limits,
         ))
     },
     result_tuple,
     async {
-        let (scan_ref, prefetch_depth, serialization_concurrency, batch_size, file_io) =
+        let (scan_ref, prefetch_depth, serialization_concurrency, batch_size, file_io, buffer_limits) =
             result_tuple;
 
         let (append_tasks, delete_tasks) = scan_ref.plan_files().await.map_err(|e| classify_iceberg(e))?;
@@ -297,6 +311,7 @@ export_runtime_op!(
                 batch_size,
                 prefetch_depth,
                 serialization_concurrency,
+                buffer_limits,
             )
             .await?;
 
