@@ -306,9 +306,8 @@ end
                     end
                 end
 
-                scan = new_scan(updated_table, IcebergPerfConfig())
+                scan = new_scan(updated_table, IcebergPerfConfig(batch_size=1024))
                 with_snapshot_id!(scan, Int64(999_999_999_999))  # non-existent
-                with_batch_size!(scan, UInt(1024))
                 stream = C_NULL
                 exc = try
                     stream = scan!(scan)
