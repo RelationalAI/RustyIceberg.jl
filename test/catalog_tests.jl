@@ -571,7 +571,7 @@ end
 
         # Create a scan on the loaded table
         println("Creating scan on loaded customer table...")
-        scan = RustyIceberg.new_scan(table)
+        scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig())
         @test scan != C_NULL
         println("✅ Scan created successfully on loaded table")
 
@@ -660,7 +660,7 @@ end
 
         # Create a scan on the loaded table
         println("Creating scan on loaded customer table...")
-        scan = RustyIceberg.new_scan(table)
+        scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig())
         @test scan != C_NULL
         println("✅ Scan created successfully on loaded table")
 
@@ -742,8 +742,7 @@ end
             credential_error_caught = false
             try
                 table = RustyIceberg.load_table(catalog, ["tpch.sf01"], "customer"; load_credentials=false)
-                scan = RustyIceberg.new_scan(table)
-                RustyIceberg.with_batch_size!(scan, UInt(1024))
+                scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
                 RustyIceberg.select_columns!(scan, ["c_custkey"])
                 stream = RustyIceberg.scan!(scan)
                 RustyIceberg.next_batch(stream)
@@ -810,7 +809,7 @@ end
 
             # Create a scan on the loaded table
             println("Creating scan on loaded customer table...")
-            scan = RustyIceberg.new_scan(table)
+            scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig())
             @test scan != C_NULL
             println("✅ Scan created successfully on loaded table")
 
@@ -892,7 +891,7 @@ end
         to_snapshot_id = Int64(6832180054960511692)
 
         println("Creating incremental scan on catalog-loaded table...")
-        scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id)
+        scan = RustyIceberg.new_incremental_scan(table, from_snapshot_id, to_snapshot_id, RustyIceberg.IcebergPerfConfig())
         @test scan isa RustyIceberg.IncrementalScan
         @test scan.ptr != C_NULL
         println("✅ Incremental scan created successfully on catalog-loaded table")

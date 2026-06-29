@@ -16,8 +16,7 @@ tbl = read_table_data(table)
 ```
 """
 function read_table_data(table)
-    scan = RustyIceberg.new_scan(table)
-    RustyIceberg.with_batch_size!(scan, UInt(1024))
+    scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
     stream = RustyIceberg.scan!(scan)
 
     # Collect column data across batches as plain Julia vectors.

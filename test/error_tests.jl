@@ -189,8 +189,7 @@ end
                     rm(f)
                 end
 
-                scan = new_scan(updated_table)
-                with_batch_size!(scan, UInt(1024))
+                scan = new_scan(updated_table, IcebergPerfConfig(batch_size=1024))
                 stream = C_NULL
                 error_caught = false
                 try
@@ -254,8 +253,7 @@ end
                     end
                 end
 
-                scan = new_scan(updated_table)
-                with_batch_size!(scan, UInt(1024))
+                scan = new_scan(updated_table, IcebergPerfConfig(batch_size=1024))
                 stream = C_NULL
                 error_caught = false
                 try
@@ -308,7 +306,7 @@ end
                     end
                 end
 
-                scan = new_scan(updated_table)
+                scan = new_scan(updated_table, IcebergPerfConfig())
                 with_snapshot_id!(scan, Int64(999_999_999_999))  # non-existent
                 with_batch_size!(scan, UInt(1024))
                 stream = C_NULL
@@ -628,8 +626,7 @@ end
             try
                 create_namespace(cat, ["ns"])
                 tbl = create_table(cat, ["ns"], "loc_scan", _err_schema())
-                scan = new_scan(tbl)
-                with_batch_size!(scan, UInt(1024))
+                scan = new_scan(tbl, IcebergPerfConfig(batch_size=1024))
                 # Do NOT call build!(scan) — leaves scan.scan as None on the Rust side.
                 exc = try
                     RustyIceberg.arrow_stream(scan)  # "Scan not initialized" guard
