@@ -22,7 +22,7 @@ use iceberg::io::FileIO;
 use iceberg::scan::incremental::{AppendedFileScanTask, DeleteScanTask};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::nested_pipeline::{build_reader, create_nested_pipeline, FileToScan};
+use crate::nested_pipeline::{build_reader, create_nested_pipeline, BufferLimits, FileToScan};
 use crate::table::{IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
@@ -60,6 +60,7 @@ pub async fn create_incremental_nested_pipeline(
     batch_size: usize,
     prefetch_depth: usize,
     serialization_concurrency: usize,
+    buffer_limits: BufferLimits,
 ) -> anyhow::Result<(IcebergFileScanStream, IcebergArrowStream)> {
     let reader = build_reader(file_io.clone(), batch_size);
 
@@ -76,7 +77,7 @@ pub async fn create_incremental_nested_pipeline(
             }),
         }
     });
-    let append_stream = create_nested_pipeline(files, prefetch_depth).await;
+    let append_stream = create_nested_pipeline(files, prefetch_depth, buffer_limits).await;
 
     // Delete stream: StreamsInto with empty append stream routes all delete
     // tasks through the iceberg reader machinery.
@@ -123,6 +124,16 @@ mod tests {
 
     use super::*;
     use crate::nested_pipeline::PIPELINE_TEST_LOCK;
+
+    /// `BufferLimits` built from the production-default consts, so these tests
+    /// keep their previous behavior.
+    // Mirrors the production defaults in RustyIceberg.jl `IcebergPerfConfig`
+    // (100 MiB / 1 / 8); kept inline so tests do not depend on named consts.
+    const TEST_LIMITS: BufferLimits = BufferLimits {
+        max_buffered_bytes_per_task: 100 * 1024 * 1024,
+        max_prefetch_buffers_of_waiting_file: 1,
+        max_prefetch_buffers_of_active_file: 8,
+    };
 
     // ── Shared setup helpers ──────────────────────────────────────────────
 
@@ -221,6 +232,7 @@ mod tests {
             1024,
             1,
             1,
+            TEST_LIMITS,
         )
         .await;
         assert!(result.is_ok());
@@ -248,6 +260,7 @@ mod tests {
             1024,
             1,
             1,
+            TEST_LIMITS,
         )
         .await
         .unwrap();
@@ -316,6 +329,7 @@ mod tests {
             1024,
             1,
             1,
+            TEST_LIMITS,
         )
         .await
         .unwrap();

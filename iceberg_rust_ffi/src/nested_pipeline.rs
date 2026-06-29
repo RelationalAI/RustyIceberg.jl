@@ -55,7 +55,8 @@
 //! checks the `prefetch_depth + 1` lower bound directly.
 //!
 //! # Memory bounding
-//! Each file task has its own Semaphore(MAX_BUFFERED_BYTES_PER_TASK). After
+//! Each file task has its own Semaphore sized to the per-file byte budget
+//! (`BufferLimits::max_buffered_bytes_per_task`). After
 //! serializing a batch, the task acquires clamped_byte_len permits. If the budget is
 //! exhausted, the task yields (async, not blocking) until the consumer drains
 //! batches and releases permits. This caps each file's buffered output to
@@ -71,7 +72,7 @@ use iceberg::arrow::{ArrowReader, ArrowReaderBuilder};
 use iceberg::io::FileIO;
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
-use crate::pipeline_stats::{MAX_BUFFERED_BYTES_PER_TASK, STATS};
+use crate::pipeline_stats::STATS;
 use crate::table::{ArrowBatch, IcebergArrowStream, IcebergFileScanStream};
 use crate::unexpected;
 
@@ -117,30 +118,48 @@ pub(crate) struct BufferedBatch {
     pub(crate) slot_sem: Arc<Semaphore>,
 }
 
-/// Initial batch-slot budget for a *waiting* file — one whose `FileScan`
-/// has been produced by the outer pipeline but not yet picked up by
-/// `iceberg_next_file_scan`. The producer can fill at most this many
-/// batches before parking on `slot_sem.acquire()`. Promoted to
-/// `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE` at the FFI handoff site (see
-/// `IcebergFileScanResponse::set_payload`).
-pub(crate) const MAX_PREFETCH_BUFFERS_OF_WAITING_FILE: usize = 1;
-/// Full batch-slot budget for an *active* file — one whose `FileScan` has
-/// been handed off to a Julia consumer. Matches the per-file mpsc capacity,
-/// so once active the slot semaphore stops being the binding constraint
-/// and the existing 100 MB byte budget is what throttles.
-pub(crate) const MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE: usize = 8;
+/// Per-scan buffer limits, supplied by Julia via `IcebergPerfConfigFFI` (the
+/// single source of tuning defaults). Threaded into each per-file task to size
+/// the byte semaphore, the waiting/active slot budgets, and the per-file mpsc
+/// capacity. Invariant: `max_prefetch_buffers_of_waiting_file <=
+/// max_prefetch_buffers_of_active_file` (the FFI handoff promotes the slot
+/// budget from waiting to active by their difference).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BufferLimits {
+    /// Per-file output-buffer cap in bytes; the producer parks once this much
+    /// undrained batch data is buffered for one file.
+    pub(crate) max_buffered_bytes_per_task: usize,
+    /// Initial batch-slot budget for a *waiting* file — one whose `FileScan`
+    /// has been produced by the outer pipeline but not yet picked up by
+    /// `iceberg_next_file_scan`. Promoted to the active budget at the FFI
+    /// handoff site (see `IcebergFileScanResponse::set_payload`).
+    pub(crate) max_prefetch_buffers_of_waiting_file: usize,
+    /// Full batch-slot budget (and per-file mpsc capacity) for an *active*
+    /// file — one handed off to a Julia consumer. Once active the slot
+    /// semaphore stops being the binding constraint and the byte budget throttles.
+    pub(crate) max_prefetch_buffers_of_active_file: usize,
+}
 
 /// Internal per-file scan result: filename, record count, prefetched inner
 /// batch stream, and the per-file slot semaphore. The slot semaphore is
 /// carried through the outer channel so the FFI handoff site can promote
-/// it from `MAX_PREFETCH_BUFFERS_OF_WAITING_FILE` to
-/// `MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE` with one `add_permits` call —
+/// it from the waiting-file slot budget
+/// (`BufferLimits::max_prefetch_buffers_of_waiting_file`) to the active-file
+/// slot budget (`BufferLimits::max_prefetch_buffers_of_active_file`) with one
+/// `add_permits` call —
 /// no separate plumbing through the orchestrator.
 pub struct FileScan {
     pub filename: String,
     pub record_count: i64,
     pub stream: IcebergArrowStream,
     pub(crate) slot_sem: Arc<Semaphore>,
+    /// Carried from this scan's `BufferLimits` so the FFI handoff site
+    /// (`IcebergFileScanResponse::set_payload`) and the flat-path promotion
+    /// in `full_pipeline::create_pipeline` can top up `slot_sem` by
+    /// `max_prefetch_buffers_of_active_file - max_prefetch_buffers_of_waiting_file`
+    /// without reading the global consts.
+    pub(crate) max_prefetch_buffers_of_waiting_file: usize,
+    pub(crate) max_prefetch_buffers_of_active_file: usize,
 }
 
 /// Handoff shape between a per-pipeline planner adapter and the orchestrator.
@@ -215,6 +234,7 @@ pub(crate) fn make_file_stream(
 pub(crate) async fn create_nested_pipeline<S, Src>(
     source: Src,
     prefetch_depth: usize,
+    limits: BufferLimits,
 ) -> IcebergFileScanStream
 where
     S: Stream<Item = iceberg::Result<RecordBatch>> + Send + Unpin + 'static,
@@ -225,6 +245,7 @@ where
     // Single reset site for both pipelines. `pipeline_start_ns` is captured
     // inside `reset()` so wall-time accounting starts here.
     STATS.reset();
+    STATS.set_byte_budget_per_task(limits.max_buffered_bytes_per_task as u64);
 
     // Each inner future does the sync `spawn_file_task` (which itself
     // `tokio::spawn`s the `process_file` task) *when polled*, so `buffered`'s
@@ -232,8 +253,8 @@ where
     // kicked off ahead of the consumer. Doing the spawn in `.map` directly
     // would fire it as soon as the source is polled, bypassing the bound.
     let buffered = source
-        .map(|res| async move {
-            res.map(|f| spawn_file_task(f.filename, f.record_count, f.build_batch_stream))
+        .map(move |res| async move {
+            res.map(|f| spawn_file_task(f.filename, f.record_count, f.build_batch_stream, limits))
         })
         .buffered(prefetch_depth);
 
@@ -269,22 +290,23 @@ pub(crate) fn spawn_file_task<S, BSF>(
     filename: String,
     record_count: i64,
     build_batch_stream: BSF,
+    limits: BufferLimits,
 ) -> FileScan
 where
     BSF: FnOnce() -> iceberg::Result<S> + Send + 'static,
     S: Stream<Item = iceberg::Result<RecordBatch>> + Send + Unpin + 'static,
 {
-    let byte_sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
+    let byte_sem = Arc::new(Semaphore::new(limits.max_buffered_bytes_per_task));
     // Start at the waiting-file prefetch floor; the FFI handoff site
     // (`IcebergFileScanResponse::set_payload`) tops up to the active-file
     // budget.
-    let slot_sem = Arc::new(Semaphore::new(MAX_PREFETCH_BUFFERS_OF_WAITING_FILE));
-    let (file_tx, file_rx) = mpsc::channel(MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE);
+    let slot_sem = Arc::new(Semaphore::new(limits.max_prefetch_buffers_of_waiting_file));
+    let (file_tx, file_rx) = mpsc::channel(limits.max_prefetch_buffers_of_active_file);
 
     tokio::spawn(process_file(
         build_batch_stream,
         byte_sem,
-        MAX_BUFFERED_BYTES_PER_TASK,
+        limits.max_buffered_bytes_per_task,
         slot_sem.clone(),
         file_tx,
     ));
@@ -294,6 +316,8 @@ where
         record_count,
         stream: make_file_stream(file_rx),
         slot_sem,
+        max_prefetch_buffers_of_waiting_file: limits.max_prefetch_buffers_of_waiting_file,
+        max_prefetch_buffers_of_active_file: limits.max_prefetch_buffers_of_active_file,
     }
 }
 
@@ -415,16 +439,17 @@ pub(crate) async fn serialize_and_forward_batches(
         // ("consumer hasn't drained enough"):
         //   (a) byte budget — `byte_sem.acquire_many(clamped_byte_len)`
         //       blocks if this file's outstanding buffered bytes exceed
-        //       MAX_BUFFERED_BYTES_PER_TASK (100 MB).
+        //       the per-file byte budget
+        //       (`BufferLimits::max_buffered_bytes_per_task`, 100 MB).
         //   (b) batch-slot budget — `slot_sem.acquire()` blocks if the file
         //       has hit its current batch-count cap. Needed *in addition to*
         //       the byte budget so a still-waiting file (Julia hasn't picked
         //       it up yet) doesn't fetch too far into the future (we want to
         //       prioritize prefetching of buffers on active files!):
-        //       cap is MAX_PREFETCH_BUFFERS_OF_WAITING_FILE while waiting,
-        //       MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE once active.
+        //       cap is the waiting-file slot budget while waiting,
+        //       the active-file slot budget once active.
         //   (c) channel-capacity safety — `tx.send(...)` blocks if the
-        //       mpsc is full. With slot_sem ≤ MAX_PREFETCH_BUFFERS_OF_ACTIVE_FILE
+        //       mpsc is full. With slot_sem ≤ the active-file slot budget
         //       = mpsc capacity, this is a redundant safety net.
         //
         // Each `.acquire()` is wrapped in a `tokio::select!` with `tx.closed()`,
@@ -489,6 +514,16 @@ mod tests {
     use super::*;
     use futures::TryStreamExt;
 
+    /// `BufferLimits` built from the production-default consts, so tests that
+    /// drive the pipeline keep their previous behavior.
+    // Mirrors the production defaults in RustyIceberg.jl `IcebergPerfConfig`
+    // (100 MiB / 1 / 8); kept inline so tests do not depend on named consts.
+    const TEST_LIMITS: BufferLimits = BufferLimits {
+        max_buffered_bytes_per_task: 100 * 1024 * 1024,
+        max_prefetch_buffers_of_waiting_file: 1,
+        max_prefetch_buffers_of_active_file: 8,
+    };
+
     // ── Orchestration tests (empty-batch-stream builder — no real I/O) ──
     //
     // These tests exercise `create_nested_pipeline`'s plumbing
@@ -525,7 +560,7 @@ mod tests {
         let _guard = PIPELINE_TEST_LOCK.lock().await;
         let source = futures::stream::iter(items)
             .map_ok(|(name, rc): (String, i64)| fake_file_to_scan(name, rc));
-        let nested = create_nested_pipeline(source, prefetch_depth).await;
+        let nested = create_nested_pipeline(source, prefetch_depth, TEST_LIMITS).await;
         let mut out = vec![];
         let mut stream = nested.stream.lock().await;
         while let Some(item) = stream.next().await {
@@ -635,6 +670,7 @@ mod tests {
                     "reader setup failed",
                 ))
             },
+            TEST_LIMITS,
         );
         let mut inner = fs.stream.stream.lock().await;
         // First item: the error from the builder closure, forwarded by
@@ -664,7 +700,7 @@ mod tests {
             .collect();
         let source = futures::stream::iter(items)
             .map_ok(|(name, rc): (String, i64)| fake_file_to_scan(name, rc));
-        let nested = create_nested_pipeline(source, 4).await;
+        let nested = create_nested_pipeline(source, 4, TEST_LIMITS).await;
         drop(nested);
     }
 
@@ -701,7 +737,7 @@ mod tests {
         // Two batches; the second will block the producer on slot_sem.
         let batches = futures::stream::iter(vec![make_batch(), make_batch()]);
 
-        let byte_sem = Arc::new(Semaphore::new(MAX_BUFFERED_BYTES_PER_TASK));
+        let byte_sem = Arc::new(Semaphore::new(TEST_LIMITS.max_buffered_bytes_per_task));
         let slot_sem = Arc::new(Semaphore::new(1));
         let (tx, mut rx) = mpsc::channel::<Result<BufferedBatch, iceberg::Error>>(8);
 
@@ -714,7 +750,7 @@ mod tests {
                 batches,
                 &byte_sem_for_drain,
                 &slot_sem_for_drain,
-                MAX_BUFFERED_BYTES_PER_TASK,
+                TEST_LIMITS.max_buffered_bytes_per_task,
                 &tx,
             )
             .await

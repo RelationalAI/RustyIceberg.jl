@@ -24,8 +24,9 @@ export new_incremental_scan, free_incremental_scan!
 export scan_incremental_nested!, nested_incremental_arrow_stream
 export table_open, free_table, new_scan, free_scan!
 export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_current_snapshot_id, table_schema
-export select_columns!, with_batch_size!, with_snapshot_id!, with_data_file_concurrency_limit!, with_manifest_entry_concurrency_limit!
-export with_file_column!, with_pos_column!, with_file_prefetch_depth!
+export IcebergPerfConfig
+export select_columns!, with_snapshot_id!
+export with_file_column!, with_pos_column!
 export scan!, next_batch, next_arrow_batch, foreach_arrow_batch, free_batch, free_stream
 export scan_nested!, nested_arrow_stream, next_file_scan
 export FileScanStream, file_scan_record_count, file_scan_filename, file_scan_arrow_stream
@@ -57,10 +58,27 @@ export COLUMN_TYPE_STRING, COLUMN_TYPE_DATE, COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_
 export COLUMN_TYPE_DECIMAL_INT32, COLUMN_TYPE_DECIMAL_INT64, COLUMN_TYPE_DECIMAL_INT128
 export julia_type_to_column_type
 
-# Always use the JLL library - override via Preferences if needed for local development
-# To use a local build, set the preference:
-#   using Preferences; set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => "/path/to/target/release/")
-const rust_lib = iceberg_rust_ffi_jll.libiceberg_rust_ffi
+# Resolve the FFI library, in priority order:
+#   1. ENV["ICEBERG_RUST_FFI_LIB"] — local-dev override that propagates to subprocesses
+#      (e.g. ReTestItems workers, which run in a temp test env that does NOT inherit a
+#      `LocalPreferences.toml` override). Set it to either the full path of the dylib or
+#      the directory containing it (e.g. `iceberg_rust_ffi/target/release`). Read at
+#      precompile time (`ccall` needs a `const`), so restart Julia / recompile after changing.
+#   2. The `iceberg_rust_ffi_jll` artifact, optionally redirected via Preferences:
+#      using Preferences; set_preferences!("iceberg_rust_ffi_jll", "libiceberg_rust_ffi_path" => "/path/to/libiceberg_rust_ffi.dylib"; force=true)
+const rust_lib = if haskey(ENV, "ICEBERG_RUST_FFI_LIB")
+    p = ENV["ICEBERG_RUST_FFI_LIB"]
+    lib_path = isfile(p) ? p : joinpath(p, "libiceberg_rust_ffi.$(Base.Libc.Libdl.dlext)")
+    lib_path = realpath(lib_path)
+    @warn """
+        Using unreleased iceberg_rust_ffi library (via ENV["ICEBERG_RUST_FFI_LIB"]):
+            $(repr(lib_path))
+        This is only intended for local development and should not be used in production.
+        """
+    lib_path
+else
+    iceberg_rust_ffi_jll.libiceberg_rust_ffi
+end
 
 """
     struct StaticConfig
