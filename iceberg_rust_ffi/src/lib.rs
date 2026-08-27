@@ -92,7 +92,7 @@ pub use writer_columns::ColumnSlice;
 extern "C" {
     fn jl_adopt_thread() -> i32;
     fn jl_gc_safe_enter() -> i32;
-    fn jl_gc_disable_finalizers_internal() -> c_void;
+    fn jl_gc_disable_finalizers_internal();
 }
 
 // Simple response type for operations that only need success/failure status
