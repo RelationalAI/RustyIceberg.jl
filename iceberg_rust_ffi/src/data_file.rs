@@ -148,8 +148,9 @@ export_runtime_op!(
             });
         };
 
-        let manifest_list = snapshot
-            .load_manifest_list(table.file_io(), &table.metadata_ref())
+        let manifest_list = table
+            .manifest_list_reader(snapshot)
+            .load()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to load manifest list: {e}"))?;
 
@@ -161,8 +162,9 @@ export_runtime_op!(
             if !manifest_entry.has_added_files() && !manifest_entry.has_existing_files() {
                 continue;
             }
-            let manifest = manifest_entry
-                .load_manifest(table.file_io())
+            let manifest = table
+                .manifest_reader()
+                .read(manifest_entry)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load manifest: {e}"))?;
             for entry in manifest.entries() {
