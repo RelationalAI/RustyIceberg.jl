@@ -70,6 +70,7 @@ use arrow_array::RecordBatch;
 use futures::{Stream, StreamExt};
 use iceberg::arrow::{ArrowReader, ArrowReaderBuilder};
 use iceberg::io::FileIO;
+use iceberg::Runtime;
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 
 use crate::pipeline_stats::STATS;
@@ -80,7 +81,7 @@ use crate::unexpected;
 /// concurrency pinned to 1 (each reader handles one file). Shared by the
 /// full-scan and incremental-append pipelines.
 pub(crate) fn build_reader(file_io: FileIO, batch_size: usize) -> ArrowReader {
-    ArrowReaderBuilder::new(file_io)
+    ArrowReaderBuilder::new(file_io, Runtime::current())
         .with_data_file_concurrency_limit(1)
         .with_batch_size(batch_size)
         .build()

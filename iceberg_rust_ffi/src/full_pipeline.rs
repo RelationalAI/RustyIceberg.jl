@@ -186,6 +186,10 @@ mod tests {
             partition: None,
             partition_spec: None,
             name_mapping: None,
+            unified_partition_type: None,
+            first_row_id: None,
+            data_sequence_number: None,
+            key_metadata: None,
             case_sensitive: false,
         };
 
@@ -319,6 +323,10 @@ mod tests {
                 partition: None,
                 partition_spec: None,
                 name_mapping: None,
+                unified_partition_type: None,
+                first_row_id: None,
+                data_sequence_number: None,
+                key_metadata: None,
                 case_sensitive: false,
             });
         }
@@ -440,6 +448,10 @@ mod tests {
                 partition: None,
                 partition_spec: None,
                 name_mapping: None,
+                unified_partition_type: None,
+                first_row_id: None,
+                data_sequence_number: None,
+                key_metadata: None,
                 case_sensitive: false,
             });
         }

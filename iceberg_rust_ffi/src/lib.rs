@@ -7,6 +7,8 @@ pub(crate) fn unexpected(msg: impl std::fmt::Display) -> iceberg::Error {
 
 use anyhow::Result;
 use arrow_array::{ffi as arrow_ffi, Array, RecordBatch, StructArray};
+use arrow_schema::{DataType, Field, Schema};
+use std::sync::Arc;
 
 // Import from object_store_ffi
 use object_store_ffi::{
@@ -92,7 +94,7 @@ pub use writer_columns::ColumnSlice;
 extern "C" {
     fn jl_adopt_thread() -> i32;
     fn jl_gc_safe_enter() -> i32;
-    fn jl_gc_disable_finalizers_internal() -> c_void;
+    fn jl_gc_disable_finalizers_internal();
 }
 
 // Simple response type for operations that only need success/failure status
@@ -143,6 +145,49 @@ unsafe impl Send for PropertyEntry {}
 
 // Table structures are in the table module
 
+/// Decodes any Run-End Encoded columns in `batch` back to their plain value type.
+///
+/// iceberg-rust encodes constant metadata columns (e.g. `_file`, `_spec_id`) as
+/// Arrow Run-End Encoded arrays for compression. The Julia `Arrow.jl` package's
+/// Arrow C Data Interface importer doesn't support the REE format string (`"+r"`)
+/// and throws on it, so batches must be decoded to plain arrays before crossing
+/// the FFI boundary. `arrow_cast::cast` from a `RunEndEncoded` type to its own
+/// values type performs exactly this decode (expanding each run into repeated
+/// values), so this is a data transform, not a reinterpretation -- the resulting
+/// column has the same length and values as the REE-encoded one, just materialized.
+///
+/// Returns `batch` unchanged (no copy) if it has no REE columns, which is the
+/// common case for most projections.
+fn flatten_run_end_encoded(batch: RecordBatch) -> Result<RecordBatch> {
+    let schema = batch.schema();
+    if !schema
+        .fields()
+        .iter()
+        .any(|f| matches!(f.data_type(), DataType::RunEndEncoded(_, _)))
+    {
+        return Ok(batch);
+    }
+
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for (field, column) in schema.fields().iter().zip(batch.columns()) {
+        if let DataType::RunEndEncoded(_, values_field) = field.data_type() {
+            let target_type = values_field.data_type().clone();
+            let decoded = arrow_cast::cast(column, &target_type)?;
+            let new_field = Field::new(field.name(), target_type, field.is_nullable())
+                .with_metadata(field.metadata().clone());
+            fields.push(Arc::new(new_field));
+            columns.push(decoded);
+        } else {
+            fields.push(field.clone());
+            columns.push(column.clone());
+        }
+    }
+
+    let new_schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+    Ok(RecordBatch::try_new(new_schema, columns)?)
+}
+
 /// Export a RecordBatch via the Arrow C Data Interface (zero-copy).
 ///
 /// The batch is represented as a struct-typed (ArrowSchema, ArrowArray) pair
@@ -153,6 +198,7 @@ unsafe impl Send for PropertyEntry {}
 fn record_batch_to_c_ffi(batch: RecordBatch) -> Result<ArrowBatch> {
     use crate::table::ArrowBatchInner;
 
+    let batch = flatten_run_end_encoded(batch)?;
     let struct_array = StructArray::from(batch);
     // to_ffi returns (FFI_ArrowArray, FFI_ArrowSchema) — array first, schema second.
     let (ffi_array, ffi_schema) = arrow_ffi::to_ffi(&struct_array.to_data())?;

@@ -777,7 +777,7 @@ export_runtime_op!(
         let table = &table_ref.table;
 
         // Create LocationGenerator from table metadata
-        let location_generator = DefaultLocationGenerator::new(table.metadata().clone())
+        let location_generator = DefaultLocationGenerator::new(table.metadata())
             .map_err(|e| anyhow::anyhow!("Failed to create location generator: {}", e))?;
 
         // Create FileNameGenerator

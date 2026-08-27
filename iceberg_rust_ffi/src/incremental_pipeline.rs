@@ -199,6 +199,10 @@ mod tests {
                 partition: None,
                 partition_spec: None,
                 case_sensitive: false,
+                unified_partition_type: None,
+                first_row_id: None,
+                data_sequence_number: None,
+                key_metadata: None,
             },
             positional_deletes: None,
             equality_delete_predicate: None,
@@ -319,6 +323,10 @@ mod tests {
                 partition: None,
                 partition_spec: None,
                 case_sensitive: false,
+                unified_partition_type: None,
+                first_row_id: None,
+                data_sequence_number: None,
+                key_metadata: None,
             },
         });
 
