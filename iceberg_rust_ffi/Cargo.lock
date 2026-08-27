@@ -1787,7 +1787,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.10.0"
-source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=161d0b2cfce9c97112457cc24400d50fe70584f1#161d0b2cfce9c97112457cc24400d50fe70584f1"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=902162a6fd0afbd711c89119b9aa1d465596671d#902162a6fd0afbd711c89119b9aa1d465596671d"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1850,7 +1850,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-rest"
 version = "0.10.0"
-source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=161d0b2cfce9c97112457cc24400d50fe70584f1#161d0b2cfce9c97112457cc24400d50fe70584f1"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=902162a6fd0afbd711c89119b9aa1d465596671d#902162a6fd0afbd711c89119b9aa1d465596671d"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1870,7 +1870,7 @@ dependencies = [
 [[package]]
 name = "iceberg-property-macro"
 version = "0.10.0"
-source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=161d0b2cfce9c97112457cc24400d50fe70584f1#161d0b2cfce9c97112457cc24400d50fe70584f1"
+source = "git+https://github.com/RelationalAI/iceberg-rust.git?rev=902162a6fd0afbd711c89119b9aa1d465596671d#902162a6fd0afbd711c89119b9aa1d465596671d"
 dependencies = [
  "proc-macro2",
  "quote",
