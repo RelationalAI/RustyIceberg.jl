@@ -1884,6 +1884,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-buffer",
+ "arrow-cast",
  "arrow-ipc",
  "arrow-schema",
  "async-trait",
