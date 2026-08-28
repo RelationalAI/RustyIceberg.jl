@@ -2640,7 +2640,7 @@ dependencies = [
 [[package]]
 name = "object_store_ffi"
 version = "0.12.9"
-source = "git+https://github.com/RelationalAI/object_store_ffi?rev=2031546098060f4350831a5d19c22a275f6088ed#2031546098060f4350831a5d19c22a275f6088ed"
+source = "git+https://github.com/RelationalAI/object_store_ffi?rev=bbbbd2f0ab0d609416014cef0d124efa99a515f3#bbbbd2f0ab0d609416014cef0d124efa99a515f3"
 dependencies = [
  "anyhow",
  "async-channel",
