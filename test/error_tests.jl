@@ -155,6 +155,115 @@ end
         end
     end
 
+    @testset "s3.allow-anonymous unconditionally skips signing, even with valid credentials" begin
+        # Regression coverage for a real production incident (raicode's Iceberg
+        # data-loading integration always sends "s3.allow-anonymous" => "true"
+        # alongside any explicit credentials, intending it as an anonymous
+        # *fallback* for when no credentials are configured).
+        #
+        # Under the fork's old opendal (0.55), that was safe: `allow_anonymous`
+        # was only consulted *after* trying to load a real credential, and only
+        # skipped signing if none was found (opendal-0.55.0/src/services/s3/core.rs,
+        # `S3Core::load_credential`).
+        #
+        # Upstream's opendal 0.58 (pulled in by this repo's Aug 2026 iceberg-rust
+        # merge, RelationalAI/iceberg-rust#78) renamed the flag to `skip_signature`
+        # and changed its semantics: it's now checked *first*, unconditionally,
+        # before any credential is even loaded (opendal-service-s3-0.58.2/src/
+        # core.rs: `if self.skip_signature { return ...unsigned... }`). So valid
+        # credentials configured alongside "s3.allow-anonymous" => "true" are now
+        # silently ignored — every request goes out unsigned.
+        #
+        # Against a private bucket (as production tables are), this surfaces as a
+        # 403 AccessDenied / AUTH_FAILED instead of a successful read, since
+        # anonymous requests aren't authorized. Callers must omit
+        # "s3.allow-anonymous" whenever credentials are being provided; do not set
+        # it "just in case" alongside real credentials.
+        without_aws_env() do
+            s3 = get_s3_config()
+            nation_meta = "s3://warehouse/tpch.sf01/nation/metadata/" *
+                          "00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
+            base_properties = Dict(
+                "s3.endpoint"          => s3["endpoint"],
+                "s3.access-key-id"     => s3["access_key_id"],
+                "s3.secret-access-key" => s3["secret_access_key"],
+                "s3.region"            => s3["region"],
+                "s3.path-style-access" => "true",
+            )
+
+            @testset "allow-anonymous set alongside valid credentials -> credentials ignored, AUTH_FAILED" begin
+                exc = try
+                    table_open(
+                        nation_meta;
+                        properties=merge(base_properties, Dict("s3.allow-anonymous" => "true"))
+                    )
+                    nothing
+                catch e
+                    e isa RustyIceberg.IcebergException ? e : rethrow()
+                end
+                @test !isnothing(exc)
+                @test exc.code == RustyIceberg.AUTH_FAILED
+            end
+
+            @testset "allow-anonymous omitted with the same valid credentials -> succeeds" begin
+                table = table_open(nation_meta; properties=base_properties)
+                @test table != C_NULL
+                free_table(table)
+            end
+        end
+    end
+
+    @testset "adls.allow-anonymous enables reading a public Azure container" begin
+        # Regression coverage for the ADLS counterpart of the S3
+        # allow-anonymous incident above: unlike S3 (which exposes an
+        # explicit "skip signing" bypass), opendal's Azdls service had no
+        # anonymous-access mode at all -- every request went through a
+        # generic credential-provider chain whose Credential variants all
+        # require a non-empty secret to be considered valid, and hard-errors
+        # ("failed to load signing credential" / AUTH_FAILED) if none can be
+        # found or validated. An empty SAS token doesn't help either: it's
+        # treated as a *found but invalid* credential, which fails the same
+        # way. So reading a genuinely public, unauthenticated Azure
+        # container was not possible through this stack at all until
+        # RelationalAI/iceberg-rust#79 added an explicit
+        # "adls.allow-anonymous" opt-in (mirroring "s3.allow-anonymous"),
+        # scoped to opendal's generic Http service instead of the Azdls one.
+        #
+        # This surfaced as 4 failing tests/DataLoader/iceberg_tests.jl "load
+        # from azure" (public access) cases in raicode while validating the
+        # RustyIceberg 0.9.2 bump (PR #28144) -- opendal was bumped 0.55->0.58
+        # as part of that merge, and this gap came along for the ride (the
+        # old fork's opendal 0.55 had the exact same gap; it just happened
+        # not to be exercised until then).
+        #
+        # Uses the same public-access test table raicode's own integration
+        # tests read from.
+        without_azure_env() do
+            nation_meta = "abfss://integration-tests@publicbenchmarks.dfs.core.windows.net" *
+                          "/iceberg/nation/metadata/00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
+
+            @testset "no credentials, no allow-anonymous -> AUTH_FAILED" begin
+                exc = try
+                    table_open(nation_meta)
+                    nothing
+                catch e
+                    e isa RustyIceberg.IcebergException ? e : rethrow()
+                end
+                @test !isnothing(exc)
+                @test exc.code == RustyIceberg.AUTH_FAILED
+            end
+
+            @testset "adls.allow-anonymous=true -> succeeds" begin
+                table = table_open(
+                    nation_meta;
+                    properties=Dict("adls.allow-anonymous" => "true"),
+                )
+                @test table != C_NULL
+                free_table(table)
+            end
+        end
+    end
+
 end
 
 # ── Scan — missing / corrupted Parquet files ──────────────────────────────────

@@ -132,3 +132,35 @@ function without_aws_env(f)
         end
     end
 end
+
+const AZURE_ENV_VARS = ["AZBLOB_ACCOUNT_NAME", "AZURE_STORAGE_ACCOUNT_NAME",
+                        "AZBLOB_ACCOUNT_KEY", "AZURE_STORAGE_ACCOUNT_KEY",
+                        "AZURE_STORAGE_SAS_TOKEN", "AZURE_STORAGE_BEARER_TOKEN",
+                        "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID",
+                        "AZURE_AUTHORITY_HOST"]
+
+"""
+    without_azure_env(f)
+
+Run `f()` with all ambient Azure credential environment variables unset, then
+restore them. Useful for tests that need to verify anonymous/unsigned access
+actually happens, rather than accidentally succeeding via an ambient
+credential (managed identity, Azure CLI, environment variables) picked up by
+opendal's default Azure credential chain.
+"""
+function without_azure_env(f)
+    saved = Dict{String,String}()
+    for var in AZURE_ENV_VARS
+        if haskey(ENV, var)
+            saved[var] = ENV[var]
+            delete!(ENV, var)
+        end
+    end
+    try
+        f()
+    finally
+        for (var, val) in saved
+            ENV[var] = val
+        end
+    end
+end
