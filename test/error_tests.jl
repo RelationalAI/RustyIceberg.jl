@@ -213,6 +213,57 @@ end
         end
     end
 
+    @testset "adls.allow-anonymous enables reading a public Azure container" begin
+        # Regression coverage for the ADLS counterpart of the S3
+        # allow-anonymous incident above: unlike S3 (which exposes an
+        # explicit "skip signing" bypass), opendal's Azdls service had no
+        # anonymous-access mode at all -- every request went through a
+        # generic credential-provider chain whose Credential variants all
+        # require a non-empty secret to be considered valid, and hard-errors
+        # ("failed to load signing credential" / AUTH_FAILED) if none can be
+        # found or validated. An empty SAS token doesn't help either: it's
+        # treated as a *found but invalid* credential, which fails the same
+        # way. So reading a genuinely public, unauthenticated Azure
+        # container was not possible through this stack at all until
+        # RelationalAI/iceberg-rust#79 added an explicit
+        # "adls.allow-anonymous" opt-in (mirroring "s3.allow-anonymous"),
+        # scoped to opendal's generic Http service instead of the Azdls one.
+        #
+        # This surfaced as 4 failing tests/DataLoader/iceberg_tests.jl "load
+        # from azure" (public access) cases in raicode while validating the
+        # RustyIceberg 0.9.2 bump (PR #28144) -- opendal was bumped 0.55->0.58
+        # as part of that merge, and this gap came along for the ride (the
+        # old fork's opendal 0.55 had the exact same gap; it just happened
+        # not to be exercised until then).
+        #
+        # Uses the same public-access test table raicode's own integration
+        # tests read from.
+        without_azure_env() do
+            nation_meta = "abfss://integration-tests@publicbenchmarks.dfs.core.windows.net" *
+                          "/iceberg/nation/metadata/00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
+
+            @testset "no credentials, no allow-anonymous -> AUTH_FAILED" begin
+                exc = try
+                    table_open(nation_meta)
+                    nothing
+                catch e
+                    e isa RustyIceberg.IcebergException ? e : rethrow()
+                end
+                @test !isnothing(exc)
+                @test exc.code == RustyIceberg.AUTH_FAILED
+            end
+
+            @testset "adls.allow-anonymous=true -> succeeds" begin
+                table = table_open(
+                    nation_meta;
+                    properties=Dict("adls.allow-anonymous" => "true"),
+                )
+                @test table != C_NULL
+                free_table(table)
+            end
+        end
+    end
+
 end
 
 # ── Scan — missing / corrupted Parquet files ──────────────────────────────────
