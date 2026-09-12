@@ -377,6 +377,7 @@ fn classify_message(detail: &str) -> (IcebergErrorCode, String) {
         || lower.contains("connection reset")
         || lower.contains("timed out")
         || lower.contains("network error")
+        || lower.contains("dns error")
     {
         return (IcebergErrorCode::IO_NETWORK, "Network error".into());
     }
