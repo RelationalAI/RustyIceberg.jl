@@ -23,7 +23,7 @@ export INTERNAL
 export new_incremental_scan, free_incremental_scan!
 export scan_incremental_nested!, nested_incremental_arrow_stream
 export table_open, free_table, new_scan, free_scan!
-export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_current_snapshot_id, table_schema
+export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_current_snapshot_id, table_schema, table_current_snapshot_summary
 export IcebergPerfConfig
 export select_columns!, with_snapshot_id!
 export with_file_column!, with_pos_column!
@@ -641,7 +641,7 @@ Get the current snapshot ID of an Iceberg table.
 Returns the snapshot ID if the table has at least one committed snapshot, or `nothing`
 if the table has no snapshots yet (e.g. immediately after creation, before any commit).
 """
-function table_current_snapshot_id(table::Table)::Union{Int64,Nothing}
+function table_current_snapshot_id(table::Table)
     id = @ccall rust_lib.iceberg_table_current_snapshot_id(table::Table)::Int64
     return id == -1 ? nothing : id
 end
@@ -666,6 +666,27 @@ function table_schema(table::Table)
     result = unsafe_string(ptr)
     @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
     return result
+end
+
+"""
+    table_current_snapshot_summary(table::Table)::Union{Dict{String,String},Nothing}
+
+Get the current snapshot's summary properties -- both caller-supplied ones (set via
+`set_snapshot_properties` on the `OverwriteAction` that produced this snapshot, e.g.
+`attempt_id`) and iceberg-rust's own computed metrics (e.g. `added-data-files`,
+`total-records`). A caller-supplied key is only overridden if it collides with one of
+these computed key names.
+
+Returns `nothing` if the table has no current snapshot yet.
+"""
+function table_current_snapshot_summary(table::Table)
+    ptr = @ccall rust_lib.iceberg_table_current_snapshot_summary(table::Table)::Ptr{Cchar}
+    if ptr == C_NULL
+        return nothing
+    end
+    json = unsafe_string(ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
+    return Dict{String,String}(JSON.parse(json))
 end
 
 end # module RustyIceberg

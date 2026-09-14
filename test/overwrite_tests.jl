@@ -424,7 +424,6 @@ end
                 write(w, (id=Int64[1, 2], value=[1.0, 2.0]))
             end
 
-            # Must not throw, and must not prevent the commit from landing.
             updated = RustyIceberg.with_transaction(table, cat) do tx
                 with_overwrite(tx) do action
                     add_data_files(action, files)
@@ -435,6 +434,14 @@ end
             @test !isnothing(table_current_snapshot_id(updated))
             data = read_table_data(updated)
             @test sort(data.id) == [1, 2]
+
+            # The property must actually be there, not just fail to throw -- and
+            # iceberg-rust's own computed metrics must still be present alongside it.
+            summary = table_current_snapshot_summary(updated)
+            @test !isnothing(summary)
+            @test summary["attempt_id"] == "test-attempt-123"
+            @test summary["added-data-files"] == "1"
+            @test summary["total-records"] == "2"
         finally
             table != C_NULL && free_table(table)
             updated != C_NULL && free_table(updated)

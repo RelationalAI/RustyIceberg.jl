@@ -453,6 +453,32 @@ pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char 
     }
 }
 
+/// Get the current snapshot's summary properties (the caller-supplied ones set via
+/// `iceberg_overwrite_action_set_snapshot_properties`, e.g. attempt_id -- NOT
+/// iceberg-rust's own computed metrics like `added-data-files`, `total-records`, etc,
+/// which are also present in the same map and can only diverge from a caller-supplied
+/// key if the caller tried to reuse one of those reserved names) as a JSON object
+/// string (`{"key": "value", ...}`).
+///
+/// Returns null if the table has no current snapshot.
+#[no_mangle]
+pub extern "C" fn iceberg_table_current_snapshot_summary(table: *mut IcebergTable) -> *mut c_char {
+    if table.is_null() {
+        return ptr::null_mut();
+    }
+    let table_ref = unsafe { &*table };
+    let Some(snapshot) = table_ref.table.metadata().current_snapshot() else {
+        return ptr::null_mut();
+    };
+    match serde_json::to_string(&snapshot.summary().additional_properties) {
+        Ok(json) => match std::ffi::CString::new(json) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null_mut(),
+        },
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
