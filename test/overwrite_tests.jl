@@ -406,3 +406,47 @@ end
     end
     println("✅ OverwriteAction error handling tests passed")
 end
+
+# ---------------------------------------------------------------------------
+# set_snapshot_properties
+# ---------------------------------------------------------------------------
+
+@testset "set_snapshot_properties round-trips through a real commit" begin
+    mktempdir() do warehouse
+        cat = catalog_create_memory(warehouse)
+        table = C_NULL
+        updated = C_NULL
+        try
+            create_namespace(cat, ["ns"])
+            table = create_table(cat, ["ns"], "t", _ow_schema())
+
+            files = RustyIceberg.with_data_file_writer(table) do w
+                write(w, (id=Int64[1, 2], value=[1.0, 2.0]))
+            end
+
+            # Must not throw, and must not prevent the commit from landing.
+            updated = RustyIceberg.with_transaction(table, cat) do tx
+                with_overwrite(tx) do action
+                    add_data_files(action, files)
+                    set_snapshot_properties(action, Dict("attempt_id" => "test-attempt-123"))
+                end
+            end
+
+            @test !isnothing(table_current_snapshot_id(updated))
+            data = read_table_data(updated)
+            @test sort(data.id) == [1, 2]
+        finally
+            table != C_NULL && free_table(table)
+            updated != C_NULL && free_table(updated)
+            free_catalog!(cat)
+        end
+    end
+    println("✅ set_snapshot_properties round-trips through a real commit")
+end
+
+@testset "set_snapshot_properties on a freed action throws" begin
+    action = RustyIceberg.OverwriteAction()
+    free_overwrite_action!(action)
+    @test_throws RustyIceberg.IcebergException set_snapshot_properties(action, Dict("k" => "v"))
+    println("✅ set_snapshot_properties on a freed action throws")
+end
