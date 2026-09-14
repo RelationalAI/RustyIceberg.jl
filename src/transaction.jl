@@ -420,13 +420,8 @@ end
 """
     set_snapshot_properties(action::OverwriteAction, properties::Dict{String,String})
 
-Set custom snapshot summary properties (e.g. `attempt_id`, `job_id`, `fencing_token`) to
-be recorded on the commit this action produces, for reconciliation. Merged with
-iceberg-rust's own computed summary properties, which win on key collision -- this cannot
-be used to override computed metrics such as `added-data-files`.
-
-Safe to call multiple times before the action is applied; later calls add to (and
-override, on key collision) earlier ones.
+Set custom snapshot summary properties for the commit this action produces. Merged with
+iceberg-rust's computed properties, which win on key collision.
 """
 function set_snapshot_properties(action::OverwriteAction, properties::Dict{String,String})
     if action.ptr == C_NULL

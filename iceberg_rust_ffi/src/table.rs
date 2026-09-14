@@ -453,14 +453,8 @@ pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char 
     }
 }
 
-/// Get the current snapshot's summary properties (the caller-supplied ones set via
-/// `iceberg_overwrite_action_set_snapshot_properties`, e.g. attempt_id -- NOT
-/// iceberg-rust's own computed metrics like `added-data-files`, `total-records`, etc,
-/// which are also present in the same map and can only diverge from a caller-supplied
-/// key if the caller tried to reuse one of those reserved names) as a JSON object
-/// string (`{"key": "value", ...}`).
-///
-/// Returns null if the table has no current snapshot.
+/// Current snapshot's summary properties (caller-supplied + iceberg-rust's computed
+/// metrics) as a JSON object string. Null if the table has no current snapshot.
 #[no_mangle]
 pub extern "C" fn iceberg_table_current_snapshot_summary(table: *mut IcebergTable) -> *mut c_char {
     if table.is_null() {

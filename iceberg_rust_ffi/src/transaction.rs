@@ -82,10 +82,8 @@ impl IcebergFastAppendAction {
 pub struct IcebergOverwriteAction {
     added_files: Vec<DataFile>,
     deleted_files: Vec<DataFile>,
-    /// Custom snapshot summary properties (e.g. attempt_id, job_id, fencing_token)
-    /// to be recorded on the commit for reconciliation. Merged with iceberg-rust's
-    /// own computed summary properties (added/removed file counts, etc.) -- this
-    /// map only ever adds caller-supplied keys, it never overrides computed ones.
+    /// Custom snapshot summary properties, merged with iceberg-rust's computed ones
+    /// (which win on key collision).
     snapshot_properties: HashMap<String, String>,
 }
 
@@ -370,14 +368,10 @@ pub extern "C" fn iceberg_overwrite_action_add_data_files(
     0
 }
 
-/// Set custom snapshot summary properties (e.g. attempt_id, job_id, fencing_token) to be
-/// recorded on the commit this action produces. Merged with iceberg-rust's own computed
-/// summary properties, which win on key collision -- callers cannot use this to override
-/// computed metrics such as `added-data-files`.
+/// Set custom snapshot summary properties for the commit this action produces. Merged
+/// with iceberg-rust's computed properties, which win on key collision.
 ///
-/// Copies `properties`; the caller retains ownership of it. Safe to call multiple times
-/// before `apply` -- later calls add to (and override, on key collision) earlier ones.
-/// Returns 0 on success, non-zero on error.
+/// Copies `properties`. Returns 0 on success, non-zero on error.
 #[no_mangle]
 pub extern "C" fn iceberg_overwrite_action_set_snapshot_properties(
     action: *mut IcebergOverwriteAction,

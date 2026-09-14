@@ -435,8 +435,6 @@ end
             data = read_table_data(updated)
             @test sort(data.id) == [1, 2]
 
-            # The property must actually be there, not just fail to throw -- and
-            # iceberg-rust's own computed metrics must still be present alongside it.
             summary = table_current_snapshot_summary(updated)
             @test !isnothing(summary)
             @test summary["attempt_id"] == "test-attempt-123"

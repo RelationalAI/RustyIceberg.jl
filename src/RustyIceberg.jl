@@ -671,13 +671,8 @@ end
 """
     table_current_snapshot_summary(table::Table)::Union{Dict{String,String},Nothing}
 
-Get the current snapshot's summary properties -- both caller-supplied ones (set via
-`set_snapshot_properties` on the `OverwriteAction` that produced this snapshot, e.g.
-`attempt_id`) and iceberg-rust's own computed metrics (e.g. `added-data-files`,
-`total-records`). A caller-supplied key is only overridden if it collides with one of
-these computed key names.
-
-Returns `nothing` if the table has no current snapshot yet.
+Current snapshot's summary properties (caller-supplied + iceberg-rust's computed
+metrics). `nothing` if the table has no current snapshot.
 """
 function table_current_snapshot_summary(table::Table)
     ptr = @ccall rust_lib.iceberg_table_current_snapshot_summary(table::Table)::Ptr{Cchar}
