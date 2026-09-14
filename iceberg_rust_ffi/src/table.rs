@@ -453,6 +453,27 @@ pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char 
     }
 }
 
+/// Current snapshot's summary (`operation` + caller-supplied and computed properties,
+/// all flattened into one object) as a JSON string. Null if the table has no current
+/// snapshot.
+#[no_mangle]
+pub extern "C" fn iceberg_table_current_snapshot_summary(table: *mut IcebergTable) -> *mut c_char {
+    if table.is_null() {
+        return ptr::null_mut();
+    }
+    let table_ref = unsafe { &*table };
+    let Some(snapshot) = table_ref.table.metadata().current_snapshot() else {
+        return ptr::null_mut();
+    };
+    match serde_json::to_string(snapshot.summary()) {
+        Ok(json) => match std::ffi::CString::new(json) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null_mut(),
+        },
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -418,6 +418,33 @@ function add_data_files(action::OverwriteAction, data_files::DataFiles)
 end
 
 """
+    set_snapshot_properties(action::OverwriteAction, properties::Dict{String,String})
+
+Set custom snapshot summary properties for the commit this action produces. Merged with
+iceberg-rust's computed properties, which win on key collision.
+"""
+function set_snapshot_properties(action::OverwriteAction, properties::Dict{String,String})
+    if action.ptr == C_NULL
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "OverwriteAction has been freed"))
+    end
+    property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
+    properties_len = length(property_entries)
+    error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    result = GC.@preserve properties property_entries begin
+        @ccall rust_lib.iceberg_overwrite_action_set_snapshot_properties(
+            action.ptr::Ptr{Cvoid},
+            (properties_len > 0 ? pointer(property_entries) : C_NULL)::Ptr{PropertyEntry},
+            properties_len::Csize_t,
+            error_message_ptr::Ref{Ptr{Cchar}}
+        )::Cint
+    end
+    if result != 0
+        parse_and_throw(error_message_ptr[], "overwrite set_snapshot_properties")
+    end
+    return nothing
+end
+
+"""
     delete_data_files(action::OverwriteAction, data_files::DataFiles)
 
 Mark existing data files for deletion in the overwrite snapshot.

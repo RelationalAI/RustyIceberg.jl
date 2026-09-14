@@ -23,7 +23,7 @@ export INTERNAL
 export new_incremental_scan, free_incremental_scan!
 export scan_incremental_nested!, nested_incremental_arrow_stream
 export table_open, free_table, new_scan, free_scan!
-export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_current_snapshot_id, table_schema
+export table_location, table_uuid, table_format_version, table_last_sequence_number, table_last_updated_ms, table_current_snapshot_id, table_schema, table_current_snapshot_summary
 export IcebergPerfConfig
 export select_columns!, with_snapshot_id!
 export with_file_column!, with_pos_column!
@@ -49,6 +49,7 @@ export IcebergString, IcebergUuid, IcebergBinary, IcebergDecimal
 export Transaction, DataFiles, free_transaction!, free_data_files!, commit, transaction, data_file_info
 export FastAppendAction, free_fast_append_action!, add_data_files, apply, with_fast_append
 export OverwriteAction, free_overwrite_action!, delete_data_files, with_overwrite, list_data_files
+export set_snapshot_properties
 export DataFileWriter, free_writer!, close_writer, set_encode_workers!
 export WriterConfig, CompressionCodec, UNCOMPRESSED, SNAPPY, GZIP, LZ4, ZSTD, LZ4_RAW
 export RowChunk, flush!
@@ -640,7 +641,7 @@ Get the current snapshot ID of an Iceberg table.
 Returns the snapshot ID if the table has at least one committed snapshot, or `nothing`
 if the table has no snapshots yet (e.g. immediately after creation, before any commit).
 """
-function table_current_snapshot_id(table::Table)::Union{Int64,Nothing}
+function table_current_snapshot_id(table::Table)
     id = @ccall rust_lib.iceberg_table_current_snapshot_id(table::Table)::Int64
     return id == -1 ? nothing : id
 end
@@ -665,6 +666,29 @@ function table_schema(table::Table)
     result = unsafe_string(ptr)
     @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
     return result
+end
+
+"""
+    table_current_snapshot_summary(table::Table)::Union{Dict{String,String},Nothing}
+
+Current snapshot's summary (`operation` + caller-supplied and computed properties).
+`nothing` if the table has no current snapshot; throws if `table` has been freed.
+"""
+function table_current_snapshot_summary(table::Table)
+    if table == C_NULL
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Table has been freed",
+        ))
+    end
+    ptr = @ccall rust_lib.iceberg_table_current_snapshot_summary(table::Table)::Ptr{Cchar}
+    if ptr == C_NULL
+        return nothing
+    end
+    json = unsafe_string(ptr)
+    @ccall rust_lib.iceberg_destroy_cstring(ptr::Ptr{Cchar})::Cint
+    return Dict{String,String}(JSON.parse(json))
 end
 
 end # module RustyIceberg

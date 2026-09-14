@@ -4,7 +4,7 @@ networks:
 services:
   minio:
     container_name: minio
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     ports:
       - "9000:9000" # MinIO API port
       - "9001:9001" # MinIO Console port
@@ -24,7 +24,7 @@ services:
       retries: 5
 
   setup_bucket:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       minio:
         condition: service_healthy

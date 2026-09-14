@@ -7,9 +7,11 @@ use crate::catalog::IcebergCatalog;
 use crate::error_codes::{classified_error, classify_iceberg, IcebergErrorCode};
 use crate::response::IcebergBoxedResponse;
 use crate::table::IcebergTable;
-use crate::IcebergDataFiles;
+use crate::util::parse_properties;
+use crate::{IcebergDataFiles, PropertyEntry};
 use iceberg::spec::DataFile;
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
+use std::collections::HashMap;
 
 // FFI exports
 use object_store_ffi::{
@@ -80,6 +82,9 @@ impl IcebergFastAppendAction {
 pub struct IcebergOverwriteAction {
     added_files: Vec<DataFile>,
     deleted_files: Vec<DataFile>,
+    /// Custom snapshot summary properties, merged with iceberg-rust's computed ones
+    /// (which win on key collision).
+    snapshot_properties: HashMap<String, String>,
 }
 
 unsafe impl Send for IcebergOverwriteAction {}
@@ -363,6 +368,45 @@ pub extern "C" fn iceberg_overwrite_action_add_data_files(
     0
 }
 
+/// Set custom snapshot summary properties for the commit this action produces. Merged
+/// with iceberg-rust's computed properties, which win on key collision.
+///
+/// Copies `properties`. Returns 0 on success, non-zero on error.
+#[no_mangle]
+pub extern "C" fn iceberg_overwrite_action_set_snapshot_properties(
+    action: *mut IcebergOverwriteAction,
+    properties: *const PropertyEntry,
+    properties_len: usize,
+    error_message_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    let set_error = |msg: &str, out: *mut *mut std::ffi::c_char| {
+        if !out.is_null() {
+            if let Ok(c_str) = std::ffi::CString::new(msg) {
+                unsafe {
+                    *out = c_str.into_raw();
+                }
+            }
+        }
+    };
+    if action.is_null() {
+        set_error("Null action pointer provided", error_message_out);
+        return 1;
+    }
+    let props: HashMap<String, String> = match parse_properties(properties, properties_len) {
+        Ok(props) => props,
+        Err(e) => {
+            set_error(
+                &format!("Failed to parse snapshot properties: {}", e),
+                error_message_out,
+            );
+            return 1;
+        }
+    };
+    let action_ref = unsafe { &mut *action };
+    action_ref.snapshot_properties.extend(props);
+    0
+}
+
 /// Mark data files for deletion in the overwrite snapshot.
 ///
 /// The data_files handle is consumed — its files are moved into the action.
@@ -431,6 +475,7 @@ pub extern "C" fn iceberg_overwrite_action_apply(
 
     let added = std::mem::take(&mut action_ref.added_files);
     let deleted = std::mem::take(&mut action_ref.deleted_files);
+    let snapshot_properties = std::mem::take(&mut action_ref.snapshot_properties);
 
     let tx = match tx_ref.take() {
         Some(t) => t,
@@ -450,7 +495,8 @@ pub extern "C" fn iceberg_overwrite_action_apply(
     let overwrite_action = tx
         .overwrite()
         .add_data_files(added)
-        .delete_data_files(deleted);
+        .delete_data_files(deleted)
+        .set_snapshot_properties(snapshot_properties);
 
     match overwrite_action.apply(tx) {
         Ok(new_tx) => {
