@@ -671,10 +671,17 @@ end
 """
     table_current_snapshot_summary(table::Table)::Union{Dict{String,String},Nothing}
 
-Current snapshot's summary properties (caller-supplied + iceberg-rust's computed
-metrics). `nothing` if the table has no current snapshot.
+Current snapshot's summary (`operation` + caller-supplied and computed properties).
+`nothing` if the table has no current snapshot; throws if `table` has been freed.
 """
 function table_current_snapshot_summary(table::Table)
+    if table == C_NULL
+        throw(IcebergException(
+            STATE_RESOURCE_FREED,
+            "Resource has been freed",
+            "Table has been freed",
+        ))
+    end
     ptr = @ccall rust_lib.iceberg_table_current_snapshot_summary(table::Table)::Ptr{Cchar}
     if ptr == C_NULL
         return nothing

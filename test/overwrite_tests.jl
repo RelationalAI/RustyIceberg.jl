@@ -427,7 +427,12 @@ end
             updated = RustyIceberg.with_transaction(table, cat) do tx
                 with_overwrite(tx) do action
                     add_data_files(action, files)
-                    set_snapshot_properties(action, Dict("attempt_id" => "test-attempt-123"))
+                    # "added-data-files" collides with a computed key; the real value
+                    # (asserted below) must win, not this bogus one.
+                    set_snapshot_properties(action, Dict(
+                        "attempt_id" => "test-attempt-123",
+                        "added-data-files" => "999",
+                    ))
                 end
             end
 
@@ -437,6 +442,7 @@ end
 
             summary = table_current_snapshot_summary(updated)
             @test !isnothing(summary)
+            @test summary["operation"] == "overwrite"
             @test summary["attempt_id"] == "test-attempt-123"
             @test summary["added-data-files"] == "1"
             @test summary["total-records"] == "2"
@@ -447,6 +453,16 @@ end
         end
     end
     println("✅ set_snapshot_properties round-trips through a real commit")
+end
+
+@testset "table_current_snapshot_summary on a null table throws" begin
+    # `Table` is a raw `Ptr{Cvoid}`, not a wrapper struct -- `free_table` can't null it
+    # out on the caller's side, so a freed-then-reused Table is unchecked UB here, same
+    # as every other Table-consuming function in this file. What the null-check in
+    # table_current_snapshot_summary actually guards against is a genuinely-null Table
+    # value, matching table_schema's existing behavior -- that's what this tests.
+    @test_throws RustyIceberg.IcebergException table_current_snapshot_summary(C_NULL)
+    println("✅ table_current_snapshot_summary on a null table throws")
 end
 
 @testset "set_snapshot_properties on a freed action throws" begin

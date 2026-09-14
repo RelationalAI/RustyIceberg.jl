@@ -453,8 +453,9 @@ pub extern "C" fn iceberg_table_schema(table: *mut IcebergTable) -> *mut c_char 
     }
 }
 
-/// Current snapshot's summary properties (caller-supplied + iceberg-rust's computed
-/// metrics) as a JSON object string. Null if the table has no current snapshot.
+/// Current snapshot's summary (`operation` + caller-supplied and computed properties,
+/// all flattened into one object) as a JSON string. Null if the table has no current
+/// snapshot.
 #[no_mangle]
 pub extern "C" fn iceberg_table_current_snapshot_summary(table: *mut IcebergTable) -> *mut c_char {
     if table.is_null() {
@@ -464,7 +465,7 @@ pub extern "C" fn iceberg_table_current_snapshot_summary(table: *mut IcebergTabl
     let Some(snapshot) = table_ref.table.metadata().current_snapshot() else {
         return ptr::null_mut();
     };
-    match serde_json::to_string(&snapshot.summary().additional_properties) {
+    match serde_json::to_string(snapshot.summary()) {
         Ok(json) => match std::ffi::CString::new(json) {
             Ok(c_str) => c_str.into_raw(),
             Err(_) => ptr::null_mut(),
