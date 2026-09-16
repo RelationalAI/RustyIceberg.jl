@@ -12,7 +12,7 @@ using Tables
     println("  Snapshot path: $snapshot_path")
 
     # Open table
-    table = RustyIceberg.table_open(snapshot_path)
+    table = RustyIceberg.table_open(snapshot_path; properties=s3_path_style_properties())
     @test table != C_NULL
     println("✅ Table opened successfully")
 
@@ -88,7 +88,7 @@ using Tables
             # Select first two columns for testing
             selected_columns = names(first_df)[1:min(2, length(names(first_df)))]
 
-            table2 = RustyIceberg.table_open(snapshot_path)
+            table2 = RustyIceberg.table_open(snapshot_path; properties=s3_path_style_properties())
             scan2 = RustyIceberg.new_scan(table2, RustyIceberg.IcebergPerfConfig(batch_size=8))
             RustyIceberg.select_columns!(scan2, selected_columns)
             stream2 = RustyIceberg.scan!(scan2)
@@ -143,7 +143,7 @@ end
 
     println("Testing reading nations table...")
 
-    table = RustyIceberg.table_open(nations_snapshot_path)
+    table = RustyIceberg.table_open(nations_snapshot_path; properties=s3_path_style_properties())
     scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=5))
     stream = RustyIceberg.scan!(scan)
 
@@ -214,7 +214,7 @@ end
 @testset "foreach_arrow_batch" begin
     nations_snapshot_path = "s3://warehouse/tpch.sf01/nation/metadata/00001-44f668fe-3688-49d5-851f-36e75d143321.metadata.json"
 
-    table = RustyIceberg.table_open(nations_snapshot_path)
+    table = RustyIceberg.table_open(nations_snapshot_path; properties=s3_path_style_properties())
     scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=5))
     stream = RustyIceberg.scan!(scan)
 
@@ -246,7 +246,7 @@ end
     test_snapshot_path = "s3://warehouse/incremental/test1/metadata/00003-359e8bb8-1e5d-46d2-bcde-fdaeaa41114f.metadata.json"
 
     # Open the table
-    table = RustyIceberg.table_open(test_snapshot_path)
+    table = RustyIceberg.table_open(test_snapshot_path; properties=s3_path_style_properties())
     @test table != C_NULL
     println("✅ Table opened successfully")
 
@@ -500,7 +500,7 @@ end
     to_snapshot_id = Int64(6832180054960511692)
 
     @testset "select_columns! - Full Scan" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
 
         # Select specific columns
@@ -530,7 +530,7 @@ end
     end
 
     @testset "select_columns! - Incremental Scan" begin
-        table = RustyIceberg.table_open(incremental_path)
+        table = RustyIceberg.table_open(incremental_path; properties=s3_path_style_properties())
         scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, RustyIceberg.IcebergPerfConfig())
 
         RustyIceberg.select_columns!(scan, ["n"])
@@ -560,7 +560,7 @@ end
     end
 
     @testset "batch_size via IcebergPerfConfig - Full Scan" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         # Set small batch size via perf config
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=10))
         stream = RustyIceberg.scan!(scan)
@@ -587,7 +587,7 @@ end
     end
 
     @testset "batch_size via IcebergPerfConfig - Incremental Scan" begin
-        table = RustyIceberg.table_open(incremental_path)
+        table = RustyIceberg.table_open(incremental_path; properties=s3_path_style_properties())
         scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, RustyIceberg.IcebergPerfConfig(batch_size=10))
 
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
@@ -614,7 +614,7 @@ end
     end
 
     @testset "full scan basic" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
         stream = RustyIceberg.scan!(scan)
 
@@ -633,7 +633,7 @@ end
     end
 
     @testset "incremental scan basic" begin
-        table = RustyIceberg.table_open(incremental_path)
+        table = RustyIceberg.table_open(incremental_path; properties=s3_path_style_properties())
         scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, RustyIceberg.IcebergPerfConfig())
 
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
@@ -654,7 +654,7 @@ end
     end
 
     @testset "manifest_entry_concurrency_limit via IcebergPerfConfig - Full Scan" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         # Set concurrency limit via perf config
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024, manifest_entry_concurrency_limit=4))
         stream = RustyIceberg.scan!(scan)
@@ -674,7 +674,7 @@ end
     end
 
     @testset "manifest_file_concurrency_limit via IcebergPerfConfig - Full Scan" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         # Set concurrency limit via perf config
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024, manifest_file_concurrency_limit=4))
         stream = RustyIceberg.scan!(scan)
@@ -694,7 +694,7 @@ end
     end
 
     @testset "manifest_entry_concurrency_limit via IcebergPerfConfig - Incremental Scan" begin
-        table = RustyIceberg.table_open(incremental_path)
+        table = RustyIceberg.table_open(incremental_path; properties=s3_path_style_properties())
         scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, RustyIceberg.IcebergPerfConfig(manifest_entry_concurrency_limit=4))
 
         inserts_stream, deletes_stream = RustyIceberg.scan!(scan)
@@ -715,7 +715,7 @@ end
     end
 
     @testset "Combined Builder Methods - Full Scan" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=5, manifest_entry_concurrency_limit=2, serialization_concurrency_limit=2))
 
         # Combine multiple builder methods
@@ -748,7 +748,7 @@ end
     end
 
     @testset "Combined Builder Methods - Incremental Scan" begin
-        table = RustyIceberg.table_open(incremental_path)
+        table = RustyIceberg.table_open(incremental_path; properties=s3_path_style_properties())
         scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, RustyIceberg.IcebergPerfConfig(batch_size=5, manifest_file_concurrency_limit=2, manifest_entry_concurrency_limit=2, serialization_concurrency_limit=2))
 
         # Combine multiple builder methods
@@ -781,7 +781,7 @@ end
     end
 
     @testset "select_columns! with with_file_column! - Full Scan" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
 
         # Select specific columns AND include file metadata
@@ -824,7 +824,7 @@ end
     end
 
     @testset "select_columns! with with_file_column! - Incremental Scan" begin
-        table = RustyIceberg.table_open(incremental_path)
+        table = RustyIceberg.table_open(incremental_path; properties=s3_path_style_properties())
         scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, RustyIceberg.IcebergPerfConfig())
 
         # Select specific column AND include file metadata for incremental scan
@@ -865,7 +865,7 @@ end
     end
 
     @testset "select_columns! with FILE_COLUMN constant" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
 
         # Select columns including FILE_COLUMN constant
@@ -906,7 +906,7 @@ end
     end
 
     @testset "select_columns! with with_pos_column! - Full Scan" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
 
         # Select specific columns AND include pos metadata
@@ -952,7 +952,7 @@ end
     end
 
     @testset "select_columns! with with_pos_column! - Incremental Scan" begin
-        table = RustyIceberg.table_open(incremental_path)
+        table = RustyIceberg.table_open(incremental_path; properties=s3_path_style_properties())
         scan = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, RustyIceberg.IcebergPerfConfig())
 
         # Select specific column AND include pos metadata for incremental scan
@@ -1042,7 +1042,7 @@ end
     end
 
     @testset "select_columns! with POS_COLUMN constant" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
 
         # Select columns including POS_COLUMN constant
@@ -1086,7 +1086,7 @@ end
     end
 
     @testset "with_file_column! and with_pos_column! combined" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
 
         # Select columns and include both file and pos metadata
@@ -1135,7 +1135,7 @@ end
     end
 
     @testset "with_snapshot_id! - Full Scan via Builder Method" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
 
         # Use the correct snapshot ID for the customer table
         customer_snapshot_id = Int64(3441867730092225551)
@@ -1192,7 +1192,7 @@ end
     end
 
     @testset "file_prefetch_depth via IcebergPerfConfig" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan  = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024, file_prefetch_depth=4))
         stream = RustyIceberg.scan!(scan)
 
@@ -1218,7 +1218,7 @@ end
     end
 
     @testset "file_prefetch_depth via IcebergPerfConfig - Incremental Scan" begin
-        table = RustyIceberg.table_open(incremental_path)
+        table = RustyIceberg.table_open(incremental_path; properties=s3_path_style_properties())
         scan  = new_incremental_scan(table, from_snapshot_id, to_snapshot_id, RustyIceberg.IcebergPerfConfig(batch_size=1024, file_prefetch_depth=4))
         append_stream, delete_stream = RustyIceberg.scan_incremental_nested!(scan)
 
@@ -1251,7 +1251,7 @@ end
     end
 
     @testset "Combined with_snapshot_id! and other builder methods" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=5))
 
         # Use the correct snapshot ID for the customer table
@@ -1307,7 +1307,7 @@ end
 
     @testset "nested_arrow_stream called directly after build!" begin
         # scan_nested! = build! + nested_arrow_stream; exercise the two-step path.
-        table = RustyIceberg.table_open(nations_path)
+        table = RustyIceberg.table_open(nations_path; properties=s3_path_style_properties())
         scan  = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
         RustyIceberg.build!(scan)
         outer = RustyIceberg.nested_arrow_stream(scan)
@@ -1341,7 +1341,7 @@ end
     end
 
     @testset "Basic iteration — filenames and record counts" begin
-        table = RustyIceberg.table_open(nations_path)
+        table = RustyIceberg.table_open(nations_path; properties=s3_path_style_properties())
         scan  = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
         outer = RustyIceberg.scan_nested!(scan)
         @test outer != C_NULL
@@ -1385,7 +1385,7 @@ end
 
     @testset "Row counts match flat scan" begin
         # Collect total rows via nested pipeline.
-        table_n = RustyIceberg.table_open(customer_path)
+        table_n = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan_n  = RustyIceberg.new_scan(table_n, RustyIceberg.IcebergPerfConfig(batch_size=1024))
         outer   = RustyIceberg.scan_nested!(scan_n)
 
@@ -1413,7 +1413,7 @@ end
         end
 
         # Collect total rows via flat pipeline.
-        table_f  = RustyIceberg.table_open(customer_path)
+        table_f  = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan_f   = RustyIceberg.new_scan(table_f, RustyIceberg.IcebergPerfConfig(batch_size=1024))
         stream_f = RustyIceberg.scan!(scan_f)
 
@@ -1440,7 +1440,7 @@ end
     end
 
     @testset "Correct data — nations table" begin
-        table = RustyIceberg.table_open(nations_path)
+        table = RustyIceberg.table_open(nations_path; properties=s3_path_style_properties())
         scan  = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
         outer = RustyIceberg.scan_nested!(scan)
 
@@ -1479,7 +1479,7 @@ end
     end
 
     @testset "Builder methods — select_columns! and batch_size via IcebergPerfConfig" begin
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan  = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=10))
         RustyIceberg.select_columns!(scan, ["c_custkey", "c_name"])
         outer = RustyIceberg.scan_nested!(scan)
@@ -1512,7 +1512,7 @@ end
 
     @testset "Safe early drop of FileScan" begin
         # Drop a FileScan after reading only the first batch — must not crash or hang.
-        table = RustyIceberg.table_open(customer_path)
+        table = RustyIceberg.table_open(customer_path; properties=s3_path_style_properties())
         scan  = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1))
         outer = RustyIceberg.scan_nested!(scan)
 
@@ -1539,7 +1539,7 @@ end
 
     @testset "print_pipeline_stats and reset_pipeline_stats" begin
         # Run a full scan so the pipeline stats are populated.
-        table  = RustyIceberg.table_open(nations_path)
+        table  = RustyIceberg.table_open(nations_path; properties=s3_path_style_properties())
         scan   = RustyIceberg.new_scan(table, RustyIceberg.IcebergPerfConfig(batch_size=1024))
         stream = RustyIceberg.scan!(scan)
         try

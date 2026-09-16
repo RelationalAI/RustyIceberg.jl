@@ -61,6 +61,18 @@ function get_s3_config()
 end
 
 """
+    s3_path_style_properties() -> Dict{String, String}
+
+Minimal properties for `table_open` calls that authenticate purely through
+AWS_* environment variables and only need S3 addressing style fixed for this
+repo's local MinIO. See the comment on `get_catalog_properties`'s
+`"s3.path-style-access"` entry for why this is needed.
+"""
+function s3_path_style_properties()
+    return Dict("s3.path-style-access" => "true")
+end
+
+"""
     get_warehouse_name() -> String
 
 Get the warehouse name from environment variable ICEBERG_WAREHOUSE.
@@ -87,6 +99,14 @@ function get_catalog_properties()
         "s3.endpoint" => s3["endpoint"],
         "s3.access-key-id" => s3["access_key_id"],
         "s3.secret-access-key" => s3["secret_access_key"],
+        # Iceberg's own spec default is virtual-host-style (matching Java's
+        # S3FileIOProperties.PATH_STYLE_ACCESS_DEFAULT = false), which this
+        # repo's local MinIO can't satisfy from outside the docker network:
+        # MinIO's virtual-host mode is configured for the `minio` domain
+        # (MINIO_DOMAIN=minio in docker-compose.yml), not `localhost`, so a
+        # virtual-hosted request for `warehouse.localhost:9000` 404s with
+        # NoSuchBucket. Force path-style for this test environment.
+        "s3.path-style-access" => "true",
         "s3.region" => s3["region"]
     )
 end
