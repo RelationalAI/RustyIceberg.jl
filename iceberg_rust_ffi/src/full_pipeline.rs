@@ -48,7 +48,7 @@ pub async fn create_full_scan_pipeline(
 ) -> IcebergFileScanStream {
     let files = tasks.map_ok(move |task: FileScanTask| {
         let filename = task.data_file_path().to_string();
-        let record_count = task.record_count.unwrap_or(0) as i64;
+        let record_count = task.record_count().unwrap_or(0) as i64;
         let reader = build_reader(file_io.clone(), batch_size);
         FileToScan {
             filename,
@@ -172,26 +172,18 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let task = FileScanTask {
-            data_file_path: path.to_string(),
-            file_size_in_bytes: file_size,
-            start: 0,
-            length: file_size,
-            record_count: Some(3),
-            data_file_format: DataFileFormat::Parquet,
-            schema: iceberg_schema,
-            project_field_ids: vec![1],
-            predicate: None,
-            deletes: vec![],
-            partition: None,
-            partition_spec: None,
-            name_mapping: None,
-            unified_partition_type: None,
-            first_row_id: None,
-            data_sequence_number: None,
-            key_metadata: None,
-            case_sensitive: false,
-        };
+        let task = FileScanTask::builder()
+            .with_data_file_path(path.to_string())
+            .with_file_size_in_bytes(file_size)
+            .with_start(0)
+            .with_length(file_size)
+            .with_record_count(Some(3))
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(iceberg_schema)
+            .with_project_field_ids(vec![1])
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
 
         // ── 5. Run the full pipeline ───────────────────────────────────────
         // Exercises: create_full_scan_pipeline → spawn_file_task → process_file
@@ -309,26 +301,20 @@ mod tests {
                 .write(parquet_bytes.clone())
                 .await
                 .unwrap();
-            tasks.push(FileScanTask {
-                data_file_path: path,
-                file_size_in_bytes: file_size,
-                start: 0,
-                length: file_size,
-                record_count: Some(3),
-                data_file_format: DataFileFormat::Parquet,
-                schema: iceberg_schema.clone(),
-                project_field_ids: vec![1],
-                predicate: None,
-                deletes: vec![],
-                partition: None,
-                partition_spec: None,
-                name_mapping: None,
-                unified_partition_type: None,
-                first_row_id: None,
-                data_sequence_number: None,
-                key_metadata: None,
-                case_sensitive: false,
-            });
+            tasks.push(
+                FileScanTask::builder()
+                    .with_data_file_path(path)
+                    .with_file_size_in_bytes(file_size)
+                    .with_start(0)
+                    .with_length(file_size)
+                    .with_record_count(Some(3))
+                    .with_data_file_format(DataFileFormat::Parquet)
+                    .with_schema(iceberg_schema.clone())
+                    .with_project_field_ids(vec![1])
+                    .with_case_sensitive(false)
+                    .build()
+                    .unwrap(),
+            );
         }
 
         // Run the flat pipeline. batch_size=1 forces 3 batches per file so
@@ -434,26 +420,20 @@ mod tests {
                 .write(parquet_bytes.clone())
                 .await
                 .unwrap();
-            tasks.push(FileScanTask {
-                data_file_path: path,
-                file_size_in_bytes: file_size,
-                start: 0,
-                length: file_size,
-                record_count: Some(3),
-                data_file_format: DataFileFormat::Parquet,
-                schema: iceberg_schema.clone(),
-                project_field_ids: vec![1],
-                predicate: None,
-                deletes: vec![],
-                partition: None,
-                partition_spec: None,
-                name_mapping: None,
-                unified_partition_type: None,
-                first_row_id: None,
-                data_sequence_number: None,
-                key_metadata: None,
-                case_sensitive: false,
-            });
+            tasks.push(
+                FileScanTask::builder()
+                    .with_data_file_path(path)
+                    .with_file_size_in_bytes(file_size)
+                    .with_start(0)
+                    .with_length(file_size)
+                    .with_record_count(Some(3))
+                    .with_data_file_format(DataFileFormat::Parquet)
+                    .with_schema(iceberg_schema.clone())
+                    .with_project_field_ids(vec![1])
+                    .with_case_sensitive(false)
+                    .build()
+                    .unwrap(),
+            );
         }
 
         let prefetch_depth = 2;

@@ -4,10 +4,11 @@ use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
 use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
-use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
+use iceberg::io::FileIOBuilder;
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
 use iceberg::TableIdent;
+use iceberg_storage_opendal::OpenDalResolvingStorageFactory;
 use std::ffi::{c_char, c_void};
 use std::ptr;
 use tokio::sync::Mutex as AsyncMutex;
@@ -301,8 +302,8 @@ export_runtime_op!(
     async {
         let (full_metadata_path, props) = result_tuple;
 
-        // Create file IO using routing factory that infers scheme from metadata location
-        let factory = std::sync::Arc::new(OpenDalRoutingStorageFactory);
+        // Create file IO using a resolving factory that infers scheme from metadata location
+        let factory = std::sync::Arc::new(OpenDalResolvingStorageFactory::new());
         let file_io = FileIOBuilder::new(factory)
             .with_props(props)
             .with_prop("iceberg.internal.metadata-location", &full_metadata_path)
