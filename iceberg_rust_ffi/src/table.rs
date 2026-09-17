@@ -4,10 +4,11 @@ use crate::response::IcebergBoxedResponse;
 /// Table and streaming support for iceberg_rust_ffi
 use crate::{CResult, Context, RawResponse};
 use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
-use iceberg::io::{FileIOBuilder, OpenDalRoutingStorageFactory};
+use iceberg::io::{FileIOBuilder, LocalFsStorageFactory};
 use iceberg::table::StaticTable;
 use iceberg::table::Table;
 use iceberg::TableIdent;
+use iceberg_storage_opendal::OpenDalResolvingStorageFactory;
 use std::ffi::{c_char, c_void};
 use std::ptr;
 use tokio::sync::Mutex as AsyncMutex;
@@ -301,12 +302,24 @@ export_runtime_op!(
     async {
         let (full_metadata_path, props) = result_tuple;
 
-        // Create file IO using routing factory that infers scheme from metadata location
-        let factory = std::sync::Arc::new(OpenDalRoutingStorageFactory);
-        let file_io = FileIOBuilder::new(factory)
-            .with_props(props)
-            .with_prop("iceberg.internal.metadata-location", &full_metadata_path)
-            .build();
+        // OpenDalResolvingStorageFactory resolves storage by URL scheme, so it rejects a
+        // bare local filesystem path (e.g. "/tmp/table/metadata.json") with a URL-parse
+        // error rather than treating it as a local file, unlike this crate's own
+        // conventions elsewhere (e.g. LocalFsStorageFactory-backed memory catalogs, which
+        // accept bare paths). Route schemeless paths to LocalFsStorageFactory directly so
+        // reading local metadata files keeps working the same way.
+        let file_io = if full_metadata_path.contains("://") {
+            let factory = std::sync::Arc::new(OpenDalResolvingStorageFactory::new());
+            FileIOBuilder::new(factory)
+                .with_props(props)
+                .with_prop("iceberg.internal.metadata-location", &full_metadata_path)
+                .build()
+        } else {
+            FileIOBuilder::new(std::sync::Arc::new(LocalFsStorageFactory))
+                .with_props(props)
+                .with_prop("iceberg.internal.metadata-location", &full_metadata_path)
+                .build()
+        };
 
         // Create table identifier
         let table_ident = TableIdent::from_strs(["default", "table"])?;

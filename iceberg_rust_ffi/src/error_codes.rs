@@ -207,6 +207,15 @@ fn classify_data_invalid(detail: &str) -> (IcebergErrorCode, String) {
             "Snapshot not found".into(),
         );
     }
+    // LocalFsStorage (and other backends) can report a missing file as
+    // DataInvalid rather than a dedicated not-found kind; match the same text
+    // classify_message uses for its own not-found fallback.
+    if lower.contains("nosuchkey") || lower.contains("no such file") {
+        return (
+            IcebergErrorCode::NOT_FOUND_METADATA,
+            "Metadata file not found".into(),
+        );
+    }
     // JSON parse errors contain positional text like "at line N column M" — check
     // for json parsing first so "column M" doesn't trigger DATA_SCHEMA_MISMATCH.
     if lower.contains("parse json")
