@@ -195,6 +195,21 @@ mutable struct NestedStringListResponse
     NestedStringListResponse() = new(-1, C_NULL, 0, C_NULL, C_NULL, C_NULL)
 end
 
+# iceberg-rust's REST catalog client infers `rest.auth.type=oauth2` whenever `token`,
+# `credential`, or `oauth2-server-uri` is set and `rest.auth.type` itself isn't -- and logs a
+# WARN every time it does, specifically to nudge callers into setting `rest.auth.type`
+# explicitly instead of relying on inference (see `RestCatalogConfig::auth_type` in
+# iceberg-catalog-rest). Since we already have the same information available here, we can
+# be that explicit caller ourselves and avoid the warning entirely, rather than pushing this
+# onto every caller of `catalog_create_rest`.
+const _REST_OAUTH2_INFERENCE_PROPS = ("token", "credential", "oauth2-server-uri")
+
+function _with_inferred_rest_auth_type(properties::Dict{String,String})
+    haskey(properties, "rest.auth.type") && return properties
+    any(k -> haskey(properties, k), _REST_OAUTH2_INFERENCE_PROPS) || return properties
+    return merge(properties, Dict("rest.auth.type" => "oauth2"))
+end
+
 """
     catalog_create_rest(
         uri::String;
@@ -252,6 +267,7 @@ function catalog_create_rest(
     end
 
     # Initialize the catalog with REST connection
+    properties = _with_inferred_rest_auth_type(properties)
     # Convert properties dict to array of PropertyEntry structs
     property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
     properties_len = length(property_entries)
@@ -369,6 +385,7 @@ function catalog_create_rest(
     end
 
     # Step 6: Initialize the catalog with REST connection
+    properties = _with_inferred_rest_auth_type(properties)
     # Convert properties dict to array of PropertyEntry structs
     property_entries = [PropertyEntry(pointer(k), pointer(v)) for (k, v) in properties]
     properties_len = length(property_entries)
