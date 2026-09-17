@@ -51,6 +51,9 @@ include("writer_tests.jl")
 # Include overwrite tests
 include("overwrite_tests.jl")
 
+# Include assert_requirements tests
+include("assert_requirements_tests.jl")
+
 end # End of testset
 
 println("\n🎉 All tests completed!")
