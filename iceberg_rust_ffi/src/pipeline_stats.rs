@@ -164,7 +164,7 @@ impl PipelineStats {
     /// caused by lingering tasks from a previous scan releasing after a reset().
     pub(crate) fn track_buffer_release(&self, bytes: u64) {
         self.buffered_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(bytes))
             })
             .ok();
