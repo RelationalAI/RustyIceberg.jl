@@ -847,8 +847,18 @@ mod tests {
         batch.byte_sem.add_permits(batch.clamped_byte_len);
         assert_eq!(byte_sem.available_permits(), byte_budget);
 
-        // Free the IPC payload allocated by serialize_record_batch.
-        unsafe { drop(Box::from_raw(batch.batch.rust_ptr as *mut Vec<u8>)) };
+        // Free the ArrowBatchInner allocated by record_batch_to_c_ffi (see
+        // `iceberg_arrow_batch_free`, which does the same thing at the FFI
+        // boundary). The prior `*mut Vec<u8>` cast here was wrong: `rust_ptr`
+        // is a `Box<ArrowBatchInner>`, not a serialized byte buffer, and
+        // dropping it as the wrong type is undefined behavior (freeing with
+        // a layout that doesn't match the real allocation) -- rustc 1.99's
+        // new allocator precondition checks started catching it as a SIGABRT.
+        unsafe {
+            drop(Box::from_raw(
+                batch.batch.rust_ptr as *mut crate::table::ArrowBatchInner,
+            ))
+        };
 
         // Drain finishes cleanly once the stream is exhausted.
         drop(rx);
