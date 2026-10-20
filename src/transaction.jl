@@ -3,6 +3,126 @@
 # This module provides Julia wrappers for the iceberg-rust Transaction API,
 # enabling Julia to create transactions, add data files, and commit changes.
 
+# ---------------------------------------------------------------------------
+# TableRequirement
+# ---------------------------------------------------------------------------
+
+"""
+    TableRequirement
+
+Abstract type for a precondition the Iceberg REST catalog protocol can assert before
+accepting a commit. Each concrete subtype corresponds to one `type` of the protocol's
+`TableRequirement` object; see the Iceberg REST catalog OpenAPI spec.
+
+Pass a vector of these to [`assert_requirements`](@ref).
+"""
+abstract type TableRequirement end
+
+"""
+    AssertTableDoesNotExist()
+
+The table must not already exist. Used for create transactions.
+"""
+struct AssertTableDoesNotExist <: TableRequirement end
+
+"""
+    AssertTableUuid(uuid::AbstractString)
+
+The table's UUID must match `uuid`.
+"""
+struct AssertTableUuid <: TableRequirement
+    uuid::String
+end
+
+"""
+    AssertRefSnapshotId(ref::AbstractString, snapshot_id::Union{Integer,Nothing})
+
+The branch or tag named `ref` must currently point at `snapshot_id`. `snapshot_id ===
+nothing` asserts that `ref` does not exist yet.
+
+This is the requirement to override via [`assert_requirements`](@ref) to pin a commit to
+an externally-resolved base snapshot, e.g. so every retry of the same logical job asserts
+the same base regardless of what the table's current state looks like by the time that
+retry runs.
+"""
+struct AssertRefSnapshotId <: TableRequirement
+    ref::String
+    snapshot_id::Union{Int64,Nothing}
+end
+AssertRefSnapshotId(ref::AbstractString, snapshot_id::Union{Integer,Nothing}) =
+    AssertRefSnapshotId(String(ref), snapshot_id === nothing ? nothing : Int64(snapshot_id))
+
+"""
+    AssertCurrentSchemaId(current_schema_id::Integer)
+
+The table's current schema id must match `current_schema_id`.
+"""
+struct AssertCurrentSchemaId <: TableRequirement
+    current_schema_id::Int32
+end
+
+"""
+    AssertLastAssignedFieldId(last_assigned_field_id::Integer)
+
+The table's last assigned column id must match `last_assigned_field_id`.
+"""
+struct AssertLastAssignedFieldId <: TableRequirement
+    last_assigned_field_id::Int32
+end
+
+"""
+    AssertLastAssignedPartitionId(last_assigned_partition_id::Integer)
+
+The table's last assigned partition id must match `last_assigned_partition_id`.
+"""
+struct AssertLastAssignedPartitionId <: TableRequirement
+    last_assigned_partition_id::Int32
+end
+
+"""
+    AssertDefaultSpecId(default_spec_id::Integer)
+
+The table's default partition spec id must match `default_spec_id`.
+"""
+struct AssertDefaultSpecId <: TableRequirement
+    default_spec_id::Int32
+end
+
+"""
+    AssertDefaultSortOrderId(default_sort_order_id::Integer)
+
+The table's default sort order id must match `default_sort_order_id`.
+"""
+struct AssertDefaultSortOrderId <: TableRequirement
+    default_sort_order_id::Int64
+end
+
+# Julia value -> the exact JSON shape the Iceberg REST catalog protocol uses (kebab-case
+# fields, `type` tag), ready for `JSON.json`.
+_to_json_dict(::AssertTableDoesNotExist) = Dict{String,Any}("type" => "assert-create")
+_to_json_dict(r::AssertTableUuid) = Dict{String,Any}("type" => "assert-table-uuid", "uuid" => r.uuid)
+_to_json_dict(r::AssertRefSnapshotId) =
+    Dict{String,Any}("type" => "assert-ref-snapshot-id", "ref" => r.ref, "snapshot-id" => r.snapshot_id)
+_to_json_dict(r::AssertCurrentSchemaId) =
+    Dict{String,Any}("type" => "assert-current-schema-id", "current-schema-id" => r.current_schema_id)
+_to_json_dict(r::AssertLastAssignedFieldId) =
+    Dict{String,Any}("type" => "assert-last-assigned-field-id", "last-assigned-field-id" => r.last_assigned_field_id)
+_to_json_dict(r::AssertLastAssignedPartitionId) = Dict{String,Any}(
+    "type" => "assert-last-assigned-partition-id",
+    "last-assigned-partition-id" => r.last_assigned_partition_id,
+)
+_to_json_dict(r::AssertDefaultSpecId) =
+    Dict{String,Any}("type" => "assert-default-spec-id", "default-spec-id" => r.default_spec_id)
+_to_json_dict(r::AssertDefaultSortOrderId) = Dict{String,Any}(
+    "type" => "assert-default-sort-order-id",
+    "default-sort-order-id" => r.default_sort_order_id,
+)
+
+# Structural equality for TableRequirement subtypes -- these are small value types, so two
+# instances with the same fields should compare equal even when they aren't the same object.
+Base.:(==)(a::T, b::T) where {T<:TableRequirement} =
+    all(f -> getfield(a, f) == getfield(b, f), fieldnames(T))
+
 """
     Transaction
 
@@ -440,6 +560,51 @@ function set_snapshot_properties(action::OverwriteAction, properties::Dict{Strin
     end
     if result != 0
         parse_and_throw(error_message_ptr[], "overwrite set_snapshot_properties")
+    end
+    return nothing
+end
+
+"""
+    assert_requirements(action::OverwriteAction, requirements::AbstractVector{<:TableRequirement})
+
+Assert additional table requirements before this commit is attempted, alongside the ones
+this action derives automatically from the table it's applied to (currently:
+[`AssertTableUuid`](@ref), and an [`AssertRefSnapshotId`](@ref) for the branch this commit
+targets).
+
+A supplied requirement of the same kind as one this action would otherwise derive
+automatically replaces the derived one, rather than producing a duplicate -- e.g. to
+assert a pinned base snapshot id that differs from whatever the table this transaction was
+created from currently reports, supply your own [`AssertRefSnapshotId`](@ref) here. Any
+other requirement kind is added alongside the derived ones. Calling this more than once
+accumulates requirements rather than replacing the whole set.
+
+# Example
+```julia
+# Pin this commit to a base snapshot resolved earlier (e.g. at job dispatch time), so a
+# retry of the same job keeps asserting the same base even if this table's current state
+# has since moved on.
+with_overwrite(tx) do action
+    add_data_files(action, new_files)
+    assert_requirements(action, [AssertRefSnapshotId("main", pinned_base_snapshot_id)])
+end
+```
+"""
+function assert_requirements(action::OverwriteAction, requirements::AbstractVector{<:TableRequirement})
+    if action.ptr == C_NULL
+        throw(IcebergException(STATE_RESOURCE_FREED, "Resource has been freed", "OverwriteAction has been freed"))
+    end
+    json = JSON.json([_to_json_dict(r) for r in requirements])
+    error_message_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    result = GC.@preserve json begin
+        @ccall rust_lib.iceberg_overwrite_action_assert_requirements(
+            action.ptr::Ptr{Cvoid},
+            json::Cstring,
+            error_message_ptr::Ref{Ptr{Cchar}}
+        )::Cint
+    end
+    if result != 0
+        parse_and_throw(error_message_ptr[], "overwrite assert_requirements")
     end
     return nothing
 end

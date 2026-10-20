@@ -50,6 +50,10 @@ export Transaction, DataFiles, free_transaction!, free_data_files!, commit, tran
 export FastAppendAction, free_fast_append_action!, add_data_files, apply, with_fast_append
 export OverwriteAction, free_overwrite_action!, delete_data_files, with_overwrite, list_data_files
 export set_snapshot_properties
+export TableRequirement, AssertTableDoesNotExist, AssertTableUuid, AssertRefSnapshotId
+export AssertCurrentSchemaId, AssertLastAssignedFieldId, AssertLastAssignedPartitionId
+export AssertDefaultSpecId, AssertDefaultSortOrderId
+export assert_requirements
 export DataFileWriter, free_writer!, close_writer, set_encode_workers!
 export WriterConfig, CompressionCodec, UNCOMPRESSED, SNAPPY, GZIP, LZ4, ZSTD, LZ4_RAW
 export RowChunk, flush!

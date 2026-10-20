@@ -1,6 +1,6 @@
 [package]
 name = "iceberg_rust_ffi"
-version = "0.9.6"
+version = "0.9.7"
 edition = "2021"
 
 [lib]
@@ -12,10 +12,13 @@ default = ["julia"]
 julia = []
 
 [dependencies]
-iceberg = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "ec07ed0f7c08390702d841298e4331976df93b45" }
-iceberg-catalog-rest = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "ec07ed0f7c08390702d841298e4331976df93b45" }
-iceberg-storage-opendal = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "ec07ed0f7c08390702d841298e4331976df93b45", features = ["opendal-azdls"] }
-iceberg-storage-refreshable = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "ec07ed0f7c08390702d841298e4331976df93b45" }
+# Pinned to RelationalAI/iceberg-rust#83 (gb/base-snapshot-assertion-and-stage-commit,
+# rebased onto main after #84 merged), which adds OverwriteAction::assert_requirements.
+# Move this back to a `main` rev once that PR merges.
+iceberg = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "f02c8db2f890d4447a2995738668573769aa98a3" }
+iceberg-catalog-rest = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "f02c8db2f890d4447a2995738668573769aa98a3" }
+iceberg-storage-opendal = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "f02c8db2f890d4447a2995738668573769aa98a3", features = ["opendal-azdls"] }
+iceberg-storage-refreshable = { git = "https://github.com/RelationalAI/iceberg-rust.git", rev = "f02c8db2f890d4447a2995738668573769aa98a3" }
 object_store_ffi = { git = "https://github.com/RelationalAI/object_store_ffi", rev = "bbbbd2f0ab0d609416014cef0d124efa99a515f3", default-features = false }
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"

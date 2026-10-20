@@ -11,6 +11,7 @@ use crate::util::parse_properties;
 use crate::{IcebergDataFiles, PropertyEntry};
 use iceberg::spec::DataFile;
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
+use iceberg::TableRequirement;
 use std::collections::HashMap;
 
 // FFI exports
@@ -85,6 +86,9 @@ pub struct IcebergOverwriteAction {
     /// Custom snapshot summary properties, merged with iceberg-rust's computed ones
     /// (which win on key collision).
     snapshot_properties: HashMap<String, String>,
+    /// Extra requirements to assert on commit, on top of (or in place of) the ones this
+    /// action derives automatically. See `OverwriteAction::assert_requirements`.
+    extra_requirements: Vec<TableRequirement>,
 }
 
 unsafe impl Send for IcebergOverwriteAction {}
@@ -407,6 +411,69 @@ pub extern "C" fn iceberg_overwrite_action_set_snapshot_properties(
     0
 }
 
+/// Assert additional table requirements before this commit is attempted, alongside the ones
+/// this action derives automatically from the table it's applied to (currently: a UUID match,
+/// and a ref-snapshot-id match for the branch this commit targets).
+///
+/// `requirements_json` must be a JSON array of Iceberg REST catalog `TableRequirement` objects,
+/// e.g. `[{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": 100}]` -- the exact
+/// shape the REST catalog protocol itself uses. A supplied requirement of the same kind as one
+/// this action would otherwise derive automatically (a UUID match, or a ref-snapshot-id match
+/// for the same ref) replaces the derived one, rather than producing a duplicate -- e.g. to
+/// assert a pinned base snapshot id that differs from whatever the table this transaction was
+/// created from currently reports, supply your own `assert-ref-snapshot-id` requirement here.
+/// Any other requirement kind is added alongside the derived ones. Calling this more than once
+/// accumulates requirements rather than replacing the whole set.
+///
+/// Copies `requirements_json`. Returns 0 on success, non-zero on error (including malformed JSON).
+#[no_mangle]
+pub extern "C" fn iceberg_overwrite_action_assert_requirements(
+    action: *mut IcebergOverwriteAction,
+    requirements_json: *const std::ffi::c_char,
+    error_message_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    let set_error = |msg: &str, out: *mut *mut std::ffi::c_char| {
+        if !out.is_null() {
+            if let Ok(c_str) = std::ffi::CString::new(msg) {
+                unsafe {
+                    *out = c_str.into_raw();
+                }
+            }
+        }
+    };
+    if action.is_null() {
+        set_error("Null action pointer provided", error_message_out);
+        return 1;
+    }
+    if requirements_json.is_null() {
+        set_error("Null requirements_json pointer provided", error_message_out);
+        return 1;
+    }
+    let json_str = match unsafe { std::ffi::CStr::from_ptr(requirements_json) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_error(
+                &format!("requirements_json is not valid UTF-8: {}", e),
+                error_message_out,
+            );
+            return 1;
+        }
+    };
+    let requirements: Vec<TableRequirement> = match serde_json::from_str(json_str) {
+        Ok(r) => r,
+        Err(e) => {
+            set_error(
+                &format!("Failed to parse requirements_json: {}", e),
+                error_message_out,
+            );
+            return 1;
+        }
+    };
+    let action_ref = unsafe { &mut *action };
+    action_ref.extra_requirements.extend(requirements);
+    0
+}
+
 /// Mark data files for deletion in the overwrite snapshot.
 ///
 /// The data_files handle is consumed — its files are moved into the action.
@@ -476,6 +543,7 @@ pub extern "C" fn iceberg_overwrite_action_apply(
     let added = std::mem::take(&mut action_ref.added_files);
     let deleted = std::mem::take(&mut action_ref.deleted_files);
     let snapshot_properties = std::mem::take(&mut action_ref.snapshot_properties);
+    let extra_requirements = std::mem::take(&mut action_ref.extra_requirements);
 
     let tx = match tx_ref.take() {
         Some(t) => t,
@@ -496,7 +564,8 @@ pub extern "C" fn iceberg_overwrite_action_apply(
         .overwrite()
         .add_data_files(added)
         .delete_data_files(deleted)
-        .set_snapshot_properties(snapshot_properties);
+        .set_snapshot_properties(snapshot_properties)
+        .assert_requirements(extra_requirements);
 
     match overwrite_action.apply(tx) {
         Ok(new_tx) => {
