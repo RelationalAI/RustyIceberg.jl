@@ -90,14 +90,19 @@ end
                 write(w, (id=Int64[2], value=[2.0]))
             end
             bogus_base = base_id + 12345
-            @test_throws RustyIceberg.IcebergException begin
+            exc = try
                 RustyIceberg.with_transaction(updated1, cat) do tx
                     with_overwrite(tx) do action
                         add_data_files(action, files2)
                         assert_requirements(action, [AssertRefSnapshotId("main", bogus_base)])
                     end
                 end
+                nothing
+            catch e
+                e isa RustyIceberg.IcebergException ? e : rethrow()
             end
+            @test !isnothing(exc)
+            @test exc.code == RustyIceberg.CATALOG_COMMIT_CONFLICT
 
             # And the catalog must genuinely be untouched by the rejected attempt.
             reloaded = load_table(cat, ["ns"], "t")
@@ -159,14 +164,19 @@ end
                 write(w, (id=Int64[1], value=[1.0]))
             end
 
-            @test_throws RustyIceberg.IcebergException begin
+            exc = try
                 RustyIceberg.with_transaction(table, cat) do tx
                     with_overwrite(tx) do action
                         add_data_files(action, files)
                         assert_requirements(action, [AssertCurrentSchemaId(999)])
                     end
                 end
+                nothing
+            catch e
+                e isa RustyIceberg.IcebergException ? e : rethrow()
             end
+            @test !isnothing(exc)
+            @test exc.code == RustyIceberg.CATALOG_COMMIT_CONFLICT
         finally
             table != C_NULL && free_table(table)
             free_catalog!(cat)
@@ -183,19 +193,39 @@ end
         try
             create_namespace(cat, ["ns"])
             table = create_table(cat, ["ns"], "t", _ar_schema())
+            base_id = table_current_snapshot_id(table)
 
             files = RustyIceberg.with_data_file_writer(table) do w
                 write(w, (id=Int64[1], value=[1.0]))
             end
 
-            updated = RustyIceberg.with_transaction(table, cat) do tx
-                with_overwrite(tx) do action
-                    add_data_files(action, files)
-                    assert_requirements(action, [AssertCurrentSchemaId(0)])
-                    assert_requirements(action, [AssertLastAssignedFieldId(2)])
+            # The first call's requirement is deliberately wrong; if a second call to
+            # assert_requirements discarded it instead of accumulating onto it, this commit
+            # would incorrectly succeed on the strength of the second (correct) requirement
+            # alone. `updated` is still assigned (and freed in `finally`) if that happens, so
+            # a regression here doesn't also leak a table handle.
+            exc = try
+                updated = RustyIceberg.with_transaction(table, cat) do tx
+                    with_overwrite(tx) do action
+                        add_data_files(action, files)
+                        assert_requirements(action, [AssertCurrentSchemaId(999)])
+                        assert_requirements(action, [AssertLastAssignedFieldId(2)])
+                    end
                 end
+                nothing
+            catch e
+                e isa RustyIceberg.IcebergException ? e : rethrow()
             end
-            @test !isnothing(table_current_snapshot_id(updated))
+            @test !isnothing(exc)
+            @test exc.code == RustyIceberg.CATALOG_COMMIT_CONFLICT
+
+            # And the catalog must genuinely be untouched by the rejected attempt.
+            reloaded = load_table(cat, ["ns"], "t")
+            try
+                @test table_current_snapshot_id(reloaded) == base_id
+            finally
+                free_table(reloaded)
+            end
         finally
             table   != C_NULL && free_table(table)
             updated != C_NULL && free_table(updated)
@@ -360,14 +390,19 @@ end
             # meant for create transactions); here it must reach the real catalog check and
             # be rejected, which is the only way to exercise this requirement kind's JSON
             # round-trip against an existing table.
-            @test_throws RustyIceberg.IcebergException begin
+            exc = try
                 RustyIceberg.with_transaction(table, cat) do tx
                     with_overwrite(tx) do action
                         add_data_files(action, files)
                         assert_requirements(action, [AssertTableDoesNotExist()])
                     end
                 end
+                nothing
+            catch e
+                e isa RustyIceberg.IcebergException ? e : rethrow()
             end
+            @test !isnothing(exc)
+            @test exc.code == RustyIceberg.CATALOG_COMMIT_CONFLICT
         finally
             table != C_NULL && free_table(table)
             free_catalog!(cat)
