@@ -61,6 +61,13 @@ services:
       quarkus.otel.sdk.disabled: "true"
       polaris.features.ALLOW_INSECURE_STORAGE_TYPES: "true"
       polaris.readiness.ignore-severe-issues: "true"
+      # Mitigate Java4Shell (CVE-2026-114938). The bug is in the JVM's AVX-512
+      # Base64 decoding fast path. The Polaris images published so far run an
+      # OpenJDK 21 build without the fix. This flag turns that fast path off.
+      # It is safe on CPUs without AVX-512 and on arm64. Remove it once
+      # apache/polaris:latest runs a fixed JDK.
+      # The image's run-java.sh adds JAVA_OPTS_APPEND to the JVM options.
+      JAVA_OPTS_APPEND: "-XX:-UseBASE64Intrinsics"
     networks:
       iceberg_net:
     depends_on:
